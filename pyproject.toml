@@ -1,0 +1,30 @@
+[project]
+name = "aurelius-miner"
+version = "0.1.0"
+description = "Miner for the Aurelius subnet - submit prompts to validators for OpenAI processing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Aurelius Protocol"}
+]
+keywords = ["bittensor", "blockchain", "ai", "miner", "aurelius"]
+
+dependencies = [
+    "bittensor>=6.9.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Aurelius-Protocol/Aurelius-Protocol"
+Repository = "https://github.com/Aurelius-Protocol/Aurelius-Protocol"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["aurelius*"]
+
+[project.scripts]
+aurelius-miner = "aurelius.miner.miner:main"
