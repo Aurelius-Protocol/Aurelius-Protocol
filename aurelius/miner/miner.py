@@ -9,13 +9,32 @@ from aurelius.shared.config import Config
 from aurelius.shared.protocol import PromptSynapse
 
 
-def send_prompt(prompt: str, validator_uid: int = 0) -> str:
+def send_prompt(
+    prompt: str,
+    validator_uid: int = 0,
+    vendor: str | None = None,
+    model_requested: str | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    min_chars: int | None = None,
+    max_chars: int | None = None,
+) -> str:
     """
     Send a prompt to a validator and return the response.
 
     Args:
         prompt: The prompt text to send
         validator_uid: The UID of the validator to query (default: 0)
+        vendor: AI vendor to use (e.g., 'openai', 'anthropic')
+        model_requested: Specific model to use (e.g., 'o4-mini', 'gpt-4o')
+        temperature: Sampling temperature (0.0-2.0)
+        top_p: Nucleus sampling parameter (0.0-1.0)
+        frequency_penalty: Frequency penalty (-2.0 to 2.0)
+        presence_penalty: Presence penalty (-2.0 to 2.0)
+        min_chars: Minimum response length in characters
+        max_chars: Maximum response length in characters
 
     Returns:
         The response from the validator (OpenAI completion)
@@ -29,9 +48,23 @@ def send_prompt(prompt: str, validator_uid: int = 0) -> str:
     dendrite = bt.dendrite(wallet=wallet)
 
     bt.logging.info(f"Prompt: {prompt}")
+    if vendor or model_requested:
+        bt.logging.info(f"Model specs: vendor={vendor}, model={model_requested}")
+    if temperature is not None:
+        bt.logging.info(f"Temperature: {temperature}")
 
-    # Create the synapse with the prompt
-    synapse = PromptSynapse(prompt=prompt)
+    # Create the synapse with the prompt and model specifications
+    synapse = PromptSynapse(
+        prompt=prompt,
+        vendor=vendor,
+        model_requested=model_requested,
+        temperature=temperature,
+        top_p=top_p,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+        min_chars=min_chars,
+        max_chars=max_chars,
+    )
 
     # Determine target axon based on mode
     if Config.LOCAL_MODE:
@@ -136,14 +169,35 @@ def main():
     parser.add_argument("--validator-uid", type=int, default=1, help="The UID of the validator to query (default: 1)")
     parser.add_argument("--netuid", type=int, default=None, help=f"Override the netuid (default: {Config.BT_NETUID})")
 
+    # Model specification arguments
+    parser.add_argument("--vendor", type=str, default=None, help="AI vendor to use (e.g., 'openai', 'anthropic')")
+    parser.add_argument("--model", type=str, default=None, help="Specific model to use (e.g., 'o4-mini', 'gpt-4o')")
+    parser.add_argument("--temperature", type=float, default=None, help="Sampling temperature (0.0-2.0)")
+    parser.add_argument("--top-p", type=float, default=None, help="Nucleus sampling parameter (0.0-1.0)")
+    parser.add_argument("--frequency-penalty", type=float, default=None, help="Frequency penalty (-2.0 to 2.0)")
+    parser.add_argument("--presence-penalty", type=float, default=None, help="Presence penalty (-2.0 to 2.0)")
+    parser.add_argument("--min-chars", type=int, default=None, help="Minimum response length in characters")
+    parser.add_argument("--max-chars", type=int, default=None, help="Maximum response length in characters")
+
     args = parser.parse_args()
 
     # Override netuid if provided
     if args.netuid is not None:
         Config.BT_NETUID = args.netuid
 
-    # Send the prompt
-    send_prompt(args.prompt, args.validator_uid)
+    # Send the prompt with model specifications
+    send_prompt(
+        prompt=args.prompt,
+        validator_uid=args.validator_uid,
+        vendor=args.vendor,
+        model_requested=args.model,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        frequency_penalty=args.frequency_penalty,
+        presence_penalty=args.presence_penalty,
+        min_chars=args.min_chars,
+        max_chars=args.max_chars,
+    )
 
 
 if __name__ == "__main__":

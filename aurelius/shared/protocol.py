@@ -16,6 +16,14 @@ class PromptSynapse(bt.Synapse):
     Attributes:
         prompt: The text prompt to send to OpenAI
         miner_hotkey: The miner's hotkey for tracking
+        vendor: AI vendor requested by miner (e.g., 'openai', 'anthropic')
+        model_requested: Specific model requested (e.g., 'o4-mini', 'gpt-4o')
+        temperature: Sampling temperature (0.0-2.0)
+        top_p: Nucleus sampling parameter (0.0-1.0)
+        frequency_penalty: Frequency penalty (-2.0 to 2.0)
+        presence_penalty: Presence penalty (-2.0 to 2.0)
+        min_chars: Minimum response length in characters
+        max_chars: Maximum response length in characters
         response: The completion returned from OpenAI (filled by validator)
         model_used: The OpenAI model that processed the request (filled by validator)
         danger_score: Combined danger score from moderation (0-1+, filled by validator)
@@ -35,6 +43,65 @@ class PromptSynapse(bt.Synapse):
         None,
         title="Miner Hotkey",
         description="The miner's hotkey for tracking submissions",
+    )
+
+    # Model specification from miner (optional)
+    vendor: str | None = Field(
+        None,
+        title="Vendor",
+        description="AI vendor requested (e.g., 'openai', 'anthropic')",
+    )
+
+    model_requested: str | None = Field(
+        None,
+        title="Model Requested",
+        description="Specific model requested (e.g., 'o4-mini', 'gpt-4o')",
+    )
+
+    temperature: float | None = Field(
+        None,
+        title="Temperature",
+        description="Sampling temperature (0.0-2.0)",
+        ge=0.0,
+        le=2.0,
+    )
+
+    top_p: float | None = Field(
+        None,
+        title="Top P",
+        description="Nucleus sampling parameter (0.0-1.0)",
+        ge=0.0,
+        le=1.0,
+    )
+
+    frequency_penalty: float | None = Field(
+        None,
+        title="Frequency Penalty",
+        description="Frequency penalty (-2.0 to 2.0)",
+        ge=-2.0,
+        le=2.0,
+    )
+
+    presence_penalty: float | None = Field(
+        None,
+        title="Presence Penalty",
+        description="Presence penalty (-2.0 to 2.0)",
+        ge=-2.0,
+        le=2.0,
+    )
+
+    min_chars: int | None = Field(
+        None,
+        title="Minimum Characters",
+        description="Minimum response length in characters",
+        ge=0,
+    )
+
+    max_chars: int | None = Field(
+        None,
+        title="Maximum Characters",
+        description="Maximum response length in characters",
+        ge=1,
     )
 
     # Output from validator - OpenAI response
