@@ -10,6 +10,8 @@ The Aurelius miner allows you to submit text prompts to validators on the Aureli
 
 - ✅ Submit prompts to validators on the Aurelius subnet
 - ✅ Receive OpenAI-generated responses with moderation scores
+- ✅ **Model specification** - Request specific AI models (gpt-4o, gpt-4o-mini, etc.)
+- ✅ **Parameter customization** - Control temperature, top_p, penalties, and response length
 - ✅ Support for mainnet (finney), testnet, and local development
 - ✅ Flexible configuration via environment variables
 - ✅ Simple command-line interface
@@ -114,21 +116,53 @@ aurelius-miner --prompt "Your prompt here" --validator-uid 1
 
 ### Command-Line Arguments
 
-- `--prompt` (required): The text prompt to send to the validator
-- `--validator-uid` (optional, default=1): UID of the validator to query
-- `--netuid` (optional): Override the subnet UID from config
+**Required:**
+- `--prompt`: The text prompt to send to the validator
+
+**Connection:**
+- `--validator-uid` (default=1): UID of the validator to query
+- `--netuid`: Override the subnet UID from config
+
+**Model Specification:**
+- `--vendor`: AI vendor to use (e.g., `openai`, `anthropic`)
+- `--model`: Specific model to use (e.g., `gpt-4o`, `gpt-4o-mini`, `o4-mini`)
+- `--temperature`: Sampling temperature (0.0-2.0, higher = more creative)
+- `--top-p`: Nucleus sampling parameter (0.0-1.0)
+- `--frequency-penalty`: Reduce repetition of frequent tokens (-2.0 to 2.0)
+- `--presence-penalty`: Reduce repetition of any mentioned topics (-2.0 to 2.0)
+- `--min-chars`: Minimum response length in characters
+- `--max-chars`: Maximum response length in characters
 
 ### Example Prompts
 
 ```bash
-# Safe educational prompt
+# Basic prompt (uses validator defaults)
 python miner.py --prompt "Explain how machine learning models work" --validator-uid 1
 
-# Creative writing
-python miner.py --prompt "Write a short story about a robot" --validator-uid 1
+# Request a specific model
+python miner.py --prompt "Write a technical analysis" --model gpt-4o
 
-# Technical question
-python miner.py --prompt "How do I sort a list in Python?" --validator-uid 1
+# Creative writing with high temperature
+python miner.py --prompt "Write a short story about a robot" --temperature 1.2
+
+# Controlled response with custom parameters
+python miner.py --prompt "Explain quantum computing" \
+  --model gpt-4o \
+  --temperature 0.7 \
+  --top-p 0.9 \
+  --min-chars 100 \
+  --max-chars 2000
+
+# Full customization example
+python miner.py --prompt "Write a product description" \
+  --vendor openai \
+  --model gpt-4o \
+  --temperature 0.8 \
+  --top-p 0.95 \
+  --frequency-penalty 0.3 \
+  --presence-penalty 0.2 \
+  --min-chars 50 \
+  --max-chars 1500
 ```
 
 ## Configuration
@@ -168,21 +202,81 @@ VALIDATOR_HOST=46.62.225.78  # IP of a test validator
 
 This bypasses blockchain lookups and connects directly to the specified validator IP.
 
+## Model Specification
+
+The miner supports requesting specific AI models and customizing generation parameters. The validator will respect your preferences when possible.
+
+### How It Works
+
+1. **Miner requests** a specific model and parameters via command-line arguments
+2. **Validator validates** the request against allowed models and parameter ranges
+3. **Validator uses** the requested configuration (or falls back to defaults if invalid)
+4. **Response includes** both the requested and actual values used
+
+### Available Models (OpenAI)
+
+- `gpt-4o` - Most capable model, best for complex tasks
+- `gpt-4o-mini` - Faster and cheaper, good for most tasks (default)
+- `o4-mini` - Optimized for reasoning tasks
+- `o3-mini` - Cost-effective reasoning model
+- `gpt-4-turbo` - High capability with larger context
+- `gpt-3.5-turbo` - Fast and economical
+
+### Parameter Guidelines
+
+| Parameter | Range | Description |
+|-----------|-------|-------------|
+| `temperature` | 0.0 - 2.0 | Controls randomness. 0.0 = deterministic, 2.0 = very creative |
+| `top_p` | 0.0 - 1.0 | Nucleus sampling. Lower values = more focused responses |
+| `frequency_penalty` | -2.0 - 2.0 | Positive = reduce word repetition |
+| `presence_penalty` | -2.0 - 2.0 | Positive = encourage topic diversity |
+
+### Validation and Fallback
+
+- If you request an invalid model, the validator uses the default (`gpt-4o-mini`)
+- Parameters outside valid ranges are automatically clamped
+- Character limits are enforced but may result in truncated responses
+- All requested vs. actual values are logged for transparency
+
+### Example: Research Query
+
+```bash
+python miner.py \
+  --prompt "Analyze the environmental impact of electric vehicles" \
+  --model gpt-4o \
+  --temperature 0.3 \
+  --min-chars 500 \
+  --max-chars 3000
+```
+
+This requests the most capable model with low temperature for factual accuracy and specific length requirements.
+
 ## Understanding the Response
 
 When you submit a prompt, the validator returns:
 
 ```
-Response: [The OpenAI-generated text]
-Model: gpt-4o-mini
-Danger Score: 0.00032
-Accepted: true
+============================================================
+RESPONSE FROM VALIDATOR
+============================================================
+Prompt:   Explain quantum computing
+Response: Quantum computing is a type of computation that...
+Model:    gpt-4o
+
+--- Moderation Results ---
+Danger Score:  0.0000
+Accepted:      ✓ YES
+
+Top Category Scores:
+============================================================
 ```
 
-- **Response**: The AI-generated answer to your prompt
-- **Model**: Which OpenAI model was used
+- **Prompt**: Your original request
+- **Response**: The AI-generated answer
+- **Model**: The actual model used (reflects your request if valid)
 - **Danger Score**: Content moderation score (0-1, higher = more dangerous)
-- **Accepted**: Whether the content met safety thresholds
+- **Accepted**: Whether the content met safety thresholds (✓ YES or ✗ NO)
+- **Top Category Scores**: Breakdown of moderation categories (if any concerns detected)
 
 ## Troubleshooting
 
