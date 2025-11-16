@@ -215,12 +215,12 @@ The miner supports requesting specific AI models and customizing generation para
 
 ### Available Models (OpenAI)
 
-- `gpt-4o` - Most capable model, best for complex tasks
-- `gpt-4o-mini` - Faster and cheaper, good for most tasks (default)
-- `o4-mini` - Optimized for reasoning tasks
-- `o3-mini` - Cost-effective reasoning model
-- `gpt-4-turbo` - High capability with larger context
-- `gpt-3.5-turbo` - Fast and economical
+- `gpt-4o` - Most capable GPT-4 model, best for complex tasks
+- `gpt-4o-mini` - Fast and cost-effective, good for most tasks (default)
+- `o4-mini` - Reasoning model, optimized for complex problem-solving
+- `o3-mini` - Reasoning model, cost-effective alternative
+- `gpt-4-turbo` - High capability with 128K context window
+- `gpt-3.5-turbo` - Legacy model, fastest and cheapest option
 
 ### Parameter Guidelines
 
@@ -347,10 +347,6 @@ python miner.py --prompt "Test prompt" --validator-uid 1
 
 - GitHub Issues: https://github.com/Aurelius-Protocol/Aurelius-Protocol/issues
 - Bittensor Discord: https://discord.gg/bittensor
-
-## License
-
-MIT License - see LICENSE file for details
 
 ## Acknowledgments
 
