@@ -1,6 +1,8 @@
-"""Configuration management for the Aurelius miner."""
+"""Configuration management for the subnet."""
 
+import json
 import os
+
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -8,31 +10,240 @@ load_dotenv()
 
 
 class Config:
-    """Miner configuration loaded from environment variables."""
+    """Subnet configuration loaded from environment variables."""
 
-    # Miner Configuration
-    MINER_WALLET_NAME: str = os.getenv("MINER_WALLET_NAME", "miner")
-    MINER_HOTKEY: str = os.getenv("MINER_HOTKEY", "default")
+    # OpenAI Configuration
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    OPENAI_MAX_TOKENS: int = int(os.getenv("OPENAI_MAX_TOKENS", "150"))
 
-    # Bittensor Network Configuration
-    BT_NETWORK: str = os.getenv("BT_NETWORK", "finney")
-    BT_NETUID: int = int(os.getenv("BT_NETUID", "1"))
+    # Multi-Vendor Model Configuration
+    # Allowed vendors and their supported models
+    _allowed_models_str = os.getenv(
+        "ALLOWED_MODELS",
+        '{"openai": ["gpt-4o-mini", "gpt-4o", "o4-mini", "o3-mini", "gpt-4-turbo", "gpt-3.5-turbo"]}',
+    )
+    ALLOWED_MODELS: dict[str, list[str]] = json.loads(_allowed_models_str)
 
-    # Validator Configuration (for queries)
-    BT_PORT_VALIDATOR: int = int(os.getenv("BT_PORT_VALIDATOR", "8091"))
+    # Default vendor and model (used when miner doesn't specify)
+    DEFAULT_VENDOR: str = os.getenv("DEFAULT_VENDOR", "openai")
+    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
 
-    # Chain endpoint (optional - for custom subtensor endpoints)
-    SUBTENSOR_ENDPOINT: str | None = os.getenv("SUBTENSOR_ENDPOINT")
+    # Model parameter constraints
+    MIN_TEMPERATURE: float = float(os.getenv("MIN_TEMPERATURE", "0.0"))
+    MAX_TEMPERATURE: float = float(os.getenv("MAX_TEMPERATURE", "2.0"))
+    MIN_TOP_P: float = float(os.getenv("MIN_TOP_P", "0.0"))
+    MAX_TOP_P: float = float(os.getenv("MAX_TOP_P", "1.0"))
+    MIN_FREQUENCY_PENALTY: float = float(os.getenv("MIN_FREQUENCY_PENALTY", "-2.0"))
+    MAX_FREQUENCY_PENALTY: float = float(os.getenv("MAX_FREQUENCY_PENALTY", "2.0"))
+    MIN_PRESENCE_PENALTY: float = float(os.getenv("MIN_PRESENCE_PENALTY", "-2.0"))
+    MAX_PRESENCE_PENALTY: float = float(os.getenv("MAX_PRESENCE_PENALTY", "2.0"))
 
-    # Local Mode - Skip blockchain, connect directly to validator by IP
-    # Set to true for testing without wallet registration/stake
-    LOCAL_MODE: bool = os.getenv("LOCAL_MODE", "false").lower() == "true"
-    VALIDATOR_HOST: str = os.getenv("VALIDATOR_HOST", "127.0.0.1")
+    # Response length constraints
+    MIN_ALLOWED_CHARS: int = int(os.getenv("MIN_ALLOWED_CHARS", "1"))
+    MAX_ALLOWED_CHARS: int = int(os.getenv("MAX_ALLOWED_CHARS", "10000"))
+
+    # Moderation Configuration
+    MODERATION_PROVIDER: str = os.getenv("MODERATION_PROVIDER", "openai")
+    DANGER_THRESHOLD: float = float(os.getenv("DANGER_THRESHOLD", "0.5"))
+    MODERATION_FAIL_MODE: str = os.getenv("MODERATION_FAIL_MODE", "closed")  # "open" or "closed"
 
     # Logging Configuration
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()  # DEBUG, INFO, WARNING, ERROR
     LOG_SENSITIVE_DATA: bool = os.getenv("LOG_SENSITIVE_DATA", "false").lower() == "true"
     MAX_LOG_LENGTH: int = int(os.getenv("MAX_LOG_LENGTH", "100"))
+
+    # Category weights for moderation scoring
+    _category_weights_str = os.getenv(
+        "MODERATION_CATEGORY_WEIGHTS",
+        '{"hate":1.0,"hate/threatening":1.2,"harassment":0.8,"harassment/threatening":1.0,'
+        '"self-harm":1.5,"self-harm/intent":1.5,"self-harm/instructions":1.5,'
+        '"sexual":0.8,"sexual/minors":2.0,"violence":1.0,"violence/graphic":1.2}',
+    )
+    MODERATION_CATEGORY_WEIGHTS: dict[str, float] = json.loads(_category_weights_str)
+
+    # Rate Limiting Configuration
+    RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
+    RATE_LIMIT_WINDOW_HOURS: float = float(os.getenv("RATE_LIMIT_WINDOW_HOURS", "1.0"))
+
+    # Dataset / Central API Configuration
+    CENTRAL_API_ENDPOINT: str | None = os.getenv("CENTRAL_API_ENDPOINT")
+    CENTRAL_API_KEY: str | None = os.getenv("CENTRAL_API_KEY")
+    LOCAL_DATASET_PATH: str = os.getenv("LOCAL_DATASET_PATH", "./datasets")
+    ENABLE_LOCAL_BACKUP: bool = os.getenv("ENABLE_LOCAL_BACKUP", "true").lower() == "true"
+
+    # Scoring Configuration
+    WEIGHT_UPDATE_INTERVAL: int = int(os.getenv("WEIGHT_UPDATE_INTERVAL", "100"))
+    MIN_SAMPLES_FOR_WEIGHTS: int = int(os.getenv("MIN_SAMPLES_FOR_WEIGHTS", "5"))
+
+    # Window-Based Reward Configuration
+    WINDOW_BLOCKS: int = int(os.getenv("WINDOW_BLOCKS", "1000"))  # ~3.3 hours at 12 sec/block
+    HISTORY_RETENTION_BLOCKS: int = int(os.getenv("HISTORY_RETENTION_BLOCKS", "10000"))  # ~33 hours
+
+    # Consensus Verification Configuration
+    CONSENSUS_VALIDATORS: int = int(os.getenv("CONSENSUS_VALIDATORS", "5"))
+    CONSENSUS_RUNS_PER_VALIDATOR: int = int(os.getenv("CONSENSUS_RUNS_PER_VALIDATOR", "3"))
+    CONSENSUS_REQUIRED_VOTES: int = int(os.getenv("CONSENSUS_REQUIRED_VOTES", "4"))
+    CONSENSUS_TIMEOUT: int = int(os.getenv("CONSENSUS_TIMEOUT", "60"))
+    MIN_VALIDATOR_STAKE: float = float(os.getenv("MIN_VALIDATOR_STAKE", "100.0"))
+    ENABLE_CONSENSUS: bool = os.getenv("ENABLE_CONSENSUS", "true").lower() == "true"
+
+    # Distribution Configuration (for guaranteed minimum runs)
+    MIN_TOTAL_RUNS_PER_PROMPT: int = int(os.getenv("MIN_TOTAL_RUNS_PER_PROMPT", "15"))
+    DISTRIBUTION_MODE: str = os.getenv("DISTRIBUTION_MODE", "dangerous_only")  # "all" or "dangerous_only"
+
+    # Validator Trust/Reputation Configuration
+    ENABLE_VALIDATOR_TRUST_TRACKING: bool = os.getenv("ENABLE_VALIDATOR_TRUST_TRACKING", "true").lower() == "true"
+    MIN_VALIDATOR_TRUST_SCORE: float = float(os.getenv("MIN_VALIDATOR_TRUST_SCORE", "0.7"))
+    VALIDATOR_TRUST_DECAY_RATE: float = float(os.getenv("VALIDATOR_TRUST_DECAY_RATE", "0.95"))
+    VALIDATOR_TRUST_PERSISTENCE_PATH: str = os.getenv("VALIDATOR_TRUST_PERSISTENCE_PATH", "./validator_trust.json")
+
+    # Miner Scores Persistence
+    MINER_SCORES_PATH: str = os.getenv("MINER_SCORES_PATH", "./miner_scores.json")
+
+    # Verification Thresholds
+    MAX_SCORE_VARIANCE_THRESHOLD: float = float(os.getenv("MAX_SCORE_VARIANCE_THRESHOLD", "0.05"))
+    MIN_RESPONSE_TIME_SECONDS: float = float(os.getenv("MIN_RESPONSE_TIME_SECONDS", "2.0"))
+
+    # Bittensor Network Configuration
+    BT_NETWORK: str = os.getenv("BT_NETWORK", "local")
+    BT_NETUID: int = int(os.getenv("BT_NETUID", "1"))
+
+    # Validator Configuration
+    BT_PORT_VALIDATOR: int = int(os.getenv("BT_PORT_VALIDATOR", "8091"))
+    VALIDATOR_WALLET_NAME: str = os.getenv("VALIDATOR_WALLET_NAME", "validator")
+    VALIDATOR_HOTKEY: str = os.getenv("VALIDATOR_HOTKEY", "default")
+
+    # Miner Configuration
+    MINER_WALLET_NAME: str = os.getenv("MINER_WALLET_NAME", "miner")
+    MINER_HOTKEY: str = os.getenv("MINER_HOTKEY", "default")
+
+    # Chain endpoint (for local development)
+    SUBTENSOR_ENDPOINT: str | None = os.getenv("SUBTENSOR_ENDPOINT")
+
+    # Local Mode - Skip blockchain registration (for testing without stake)
+    LOCAL_MODE: bool = os.getenv("LOCAL_MODE", "false").lower() == "true"
+
+    # Network Configuration
+    AUTO_DETECT_EXTERNAL_IP: bool = os.getenv("AUTO_DETECT_EXTERNAL_IP", "false").lower() == "true"
+    VALIDATOR_HOST: str = os.getenv("VALIDATOR_HOST", "127.0.0.1")
+
+    # Skip Weight Setting - For testing against real blockchain without registration
+    # Allows using real block heights while avoiding registration/stake requirements
+    SKIP_WEIGHT_SETTING: bool = os.getenv("SKIP_WEIGHT_SETTING", "false").lower() == "true"
+
+    # Simulated Block Height (for LOCAL_MODE testing)
+    SIMULATED_BLOCK_START: int = int(os.getenv("SIMULATED_BLOCK_START", "10000"))
+    SIMULATED_BLOCK_TIME: float = float(os.getenv("SIMULATED_BLOCK_TIME", "12.0"))  # seconds per block
+    FAST_BLOCK_MODE: bool = os.getenv("FAST_BLOCK_MODE", "false").lower() == "true"  # 1 sec per block
+
+    # Local Multi-Validator Testing - Comma-separated list of other validators
+    # Format: "host1:port1,host2:port2,host3:port3"
+    # Example: "127.0.0.1:8092,127.0.0.1:8093,127.0.0.1:8094,127.0.0.1:8095"
+    LOCAL_VALIDATOR_ENDPOINTS: str = os.getenv("LOCAL_VALIDATOR_ENDPOINTS", "")
+
+    @classmethod
+    def validate(cls) -> None:
+        """Validate that required configuration is present."""
+        if not cls.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required. Please set it in your .env file.")
+
+        # Validate danger threshold
+        if not 0 <= cls.DANGER_THRESHOLD <= 1:
+            raise ValueError(f"DANGER_THRESHOLD must be between 0 and 1, got {cls.DANGER_THRESHOLD}")
+
+        # Validate rate limit settings
+        if cls.RATE_LIMIT_REQUESTS < 1:
+            raise ValueError("RATE_LIMIT_REQUESTS must be at least 1")
+
+        if cls.RATE_LIMIT_WINDOW_HOURS <= 0:
+            raise ValueError("RATE_LIMIT_WINDOW_HOURS must be greater than 0")
+
+        # Validate distribution settings
+        if cls.MIN_TOTAL_RUNS_PER_PROMPT < 1:
+            raise ValueError("MIN_TOTAL_RUNS_PER_PROMPT must be at least 1")
+
+        if cls.DISTRIBUTION_MODE not in ["all", "dangerous_only"]:
+            raise ValueError("DISTRIBUTION_MODE must be 'all' or 'dangerous_only'")
+
+        # Validate multi-vendor model configuration
+        if cls.DEFAULT_VENDOR not in cls.ALLOWED_MODELS:
+            raise ValueError(f"DEFAULT_VENDOR '{cls.DEFAULT_VENDOR}' not in ALLOWED_MODELS")
+
+        if cls.DEFAULT_MODEL not in cls.ALLOWED_MODELS.get(cls.DEFAULT_VENDOR, []):
+            raise ValueError(
+                f"DEFAULT_MODEL '{cls.DEFAULT_MODEL}' not in ALLOWED_MODELS for vendor '{cls.DEFAULT_VENDOR}'"
+            )
+
+        # Validate temperature constraints
+        if cls.MIN_TEMPERATURE > cls.MAX_TEMPERATURE:
+            raise ValueError("MIN_TEMPERATURE cannot be greater than MAX_TEMPERATURE")
+
+        # Validate response length constraints
+        if cls.MIN_ALLOWED_CHARS > cls.MAX_ALLOWED_CHARS:
+            raise ValueError("MIN_ALLOWED_CHARS cannot be greater than MAX_ALLOWED_CHARS")
+
+    @classmethod
+    def load_subnet_hyperparameters(cls, subtensor) -> None:
+        """
+        Load subnet hyperparameters from chain and override config values.
+
+        This provides network-level consensus on critical parameters like
+        MIN_TOTAL_RUNS_PER_PROMPT, ensuring all validators use the same values.
+
+        Args:
+            subtensor: Bittensor subtensor connection
+
+        Note:
+            - Only loads in network mode (not LOCAL_MODE)
+            - Falls back to .env values if hyperparameters not set on-chain
+            - Subnet owner can set hyperparameters using:
+              `btcli sudo set --netuid N --param key --value val`
+        """
+        import bittensor as bt
+
+        if cls.LOCAL_MODE:
+            bt.logging.info("LOCAL_MODE: Skipping subnet hyperparameter loading")
+            return
+
+        if not subtensor:
+            bt.logging.warning("No subtensor connection, using .env values")
+            return
+
+        try:
+            # Attempt to read hyperparameters from chain
+            # Note: Bittensor may not have all these as standard hyperparameters
+            # You may need to use custom hyperparameters or store in subnet metadata
+
+            bt.logging.info(f"Loading subnet hyperparameters from netuid {cls.BT_NETUID}...")
+
+            # For now, we'll try to read from subnet metadata
+            # In production, you'd coordinate with subnet owner to set these
+            # using custom hyperparameters or a dedicated storage mechanism
+
+            # Example: If subnet supports custom hyperparameters
+            # hyperparams = subtensor.get_subnet_hyperparameters(cls.BT_NETUID)
+
+            # For this implementation, we'll add a placeholder that can be
+            # extended when the subnet is deployed and custom hyperparams are available
+
+            # TODO: Replace with actual hyperparameter reading when subnet is deployed
+            # For now, just log that we attempted to load
+            bt.logging.info(
+                "Subnet hyperparameter reading not yet implemented for this subnet. "
+                "Using .env values. Subnet owner should coordinate parameter values."
+            )
+
+            # When implemented, override would look like:
+            # if 'min_total_runs_per_prompt' in hyperparams:
+            #     cls.MIN_TOTAL_RUNS_PER_PROMPT = hyperparams['min_total_runs_per_prompt']
+            #     bt.logging.success(
+            #         f"Loaded MIN_TOTAL_RUNS_PER_PROMPT={cls.MIN_TOTAL_RUNS_PER_PROMPT} from chain"
+            #     )
+
+        except Exception as e:
+            bt.logging.warning(f"Could not load subnet hyperparameters: {e}")
+            bt.logging.info("Falling back to .env configuration values")
 
     @classmethod
     def get_subtensor_config(cls) -> dict:
@@ -46,9 +257,126 @@ class Config:
         return config
 
     @classmethod
+    def detect_external_ip(cls) -> str | None:
+        """
+        Detect external IP address using public API services.
+
+        Returns:
+            str: Detected external IP address or None if detection fails
+        """
+        import requests
+
+        # List of IP detection services (fallbacks in case one fails)
+        ip_services = [
+            "https://api.ipify.org",
+            "https://ifconfig.me/ip",
+            "https://icanhazip.com",
+        ]
+
+        for service in ip_services:
+            try:
+                response = requests.get(service, timeout=5)
+                if response.status_code == 200:
+                    ip = response.text.strip()
+                    # Basic validation
+                    if ip and "." in ip and not ip.startswith("127."):
+                        return ip
+            except Exception:
+                continue
+
+        return None
+
+    @classmethod
+    def get_validator_host(cls) -> str:
+        """
+        Get validator host IP, using auto-detection if enabled.
+
+        Returns:
+            str: Validator host IP address
+        """
+        if cls.AUTO_DETECT_EXTERNAL_IP:
+            detected_ip = cls.detect_external_ip()
+            if detected_ip:
+                return detected_ip
+            else:
+                # Fallback to configured VALIDATOR_HOST if detection fails
+                return cls.VALIDATOR_HOST
+        else:
+            return cls.VALIDATOR_HOST
+
+    @classmethod
+    def validate_production(cls) -> list[str]:
+        """
+        Validate configuration for production deployment.
+
+        Returns:
+            list[str]: List of warnings/errors found (empty list = all good)
+        """
+        warnings = []
+
+        # Critical checks - these should prevent startup
+        if cls.LOCAL_MODE:
+            warnings.append("CRITICAL: LOCAL_MODE is enabled - this should be FALSE in production")
+
+        if "your-api-key" in cls.OPENAI_API_KEY.lower() or "your-openai" in cls.OPENAI_API_KEY.lower():
+            warnings.append("CRITICAL: OPENAI_API_KEY appears to be a placeholder - set a real API key")
+
+        # Security warnings
+        if cls.DANGER_THRESHOLD < 0.3:
+            warnings.append(
+                f"WARNING: DANGER_THRESHOLD={cls.DANGER_THRESHOLD} is very low "
+                f"(recommended: 0.5+) - almost all content will be accepted"
+            )
+
+        if cls.MIN_VALIDATOR_STAKE < 10.0 and not cls.LOCAL_MODE:
+            warnings.append(
+                f"WARNING: MIN_VALIDATOR_STAKE={cls.MIN_VALIDATOR_STAKE} is very low "
+                f"(recommended: 100.0+) - consensus security may be compromised"
+            )
+
+        # Only warn about low validator count on mainnet (testnet may use single validator)
+        if cls.CONSENSUS_VALIDATORS < 3 and cls.BT_NETWORK != "test":
+            warnings.append(
+                f"WARNING: CONSENSUS_VALIDATORS={cls.CONSENSUS_VALIDATORS} is low "
+                f"(recommended: 5+) - insufficient validators for robust consensus"
+            )
+
+        if cls.MODERATION_FAIL_MODE == "open":
+            warnings.append(
+                "WARNING: MODERATION_FAIL_MODE='open' - dangerous content may be accepted on API errors "
+                "(recommended: 'closed' for production)"
+            )
+
+        if cls.LOG_SENSITIVE_DATA:
+            warnings.append(
+                "WARNING: LOG_SENSITIVE_DATA=true - prompts/responses will be logged "
+                "(consider false for privacy in production)"
+            )
+
+        # Network configuration warnings
+        if cls.AUTO_DETECT_EXTERNAL_IP and cls.VALIDATOR_HOST == "127.0.0.1":
+            # This is actually okay - auto-detect will override
+            pass
+        elif not cls.AUTO_DETECT_EXTERNAL_IP and cls.VALIDATOR_HOST in ["127.0.0.1", "localhost"]:
+            warnings.append(
+                "WARNING: VALIDATOR_HOST is localhost but AUTO_DETECT_EXTERNAL_IP=false - "
+                "validators may not be reachable for consensus"
+            )
+
+        # Validation mode warnings
+        if cls.SKIP_WEIGHT_SETTING:
+            warnings.append(
+                "WARNING: SKIP_WEIGHT_SETTING=true - weights will not be set on blockchain "
+                "(this should be FALSE in production)"
+            )
+
+        return warnings
+
+    @classmethod
     def setup_logging(cls) -> None:
         """Configure logging based on LOG_LEVEL setting."""
         import logging
+
         import bittensor as bt
 
         # Map string levels to logging constants
@@ -67,9 +395,7 @@ class Config:
 
         # Also configure root Python logger
         logging.basicConfig(
-            level=level,
-            format="%(asctime)s | %(levelname)-8s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
+            level=level, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
 
     @classmethod
@@ -89,4 +415,4 @@ class Config:
         if len(text) <= cls.MAX_LOG_LENGTH:
             return text
 
-        return text[:cls.MAX_LOG_LENGTH] + "... [TRUNCATED]"
+        return text[: cls.MAX_LOG_LENGTH] + "... [TRUNCATED]"

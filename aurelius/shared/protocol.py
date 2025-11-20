@@ -162,3 +162,62 @@ class PromptSynapse(bt.Synapse):
     def deserialize(self) -> str:
         """Return the response for easy access."""
         return self.response or ""
+
+
+class ConsensusVerificationSynapse(bt.Synapse):
+    """
+    Synapse for consensus verification between validators.
+
+    When a primary validator receives a potentially dangerous prompt,
+    it initiates consensus by sending this synapse to other validators.
+    Each validator independently runs the prompt and votes on dangerousness.
+
+    Attributes:
+        prompt: The prompt to verify
+        request_id: Unique identifier for this verification request
+        primary_validator_hotkey: Hotkey of the validator initiating consensus
+        verification_result: Results from the verifying validator (filled by receiver)
+    """
+
+    # Input from primary validator
+    prompt: str = Field(
+        ...,
+        title="Prompt",
+        description="The prompt to verify for dangerousness",
+    )
+
+    request_id: str = Field(
+        ...,
+        title="Request ID",
+        description="Unique identifier for this consensus verification",
+    )
+
+    primary_validator_hotkey: str = Field(
+        ...,
+        title="Primary Validator Hotkey",
+        description="Hotkey of the validator that initiated this consensus",
+    )
+
+    runs_required: int = Field(
+        3,
+        title="Runs Required",
+        description="Number of times this validator should run the prompt (adaptive based on total validators)",
+    )
+
+    # Output from verifying validator
+    verification_result: dict[str, Any] | None = Field(
+        None,
+        title="Verification Result",
+        description="Results from running the prompt multiple times",
+    )
+    # Structure:
+    # {
+    #     "runs": [0.85, 0.72, 0.91],  # Danger scores from 3 runs
+    #     "vote": True,                 # True if dangerous (2+ runs above threshold)
+    #     "validator_hotkey": "...",   # This validator's hotkey
+    #     "timestamp": "...",           # ISO timestamp
+    # }
+
+    def deserialize(self) -> dict | None:
+        """Return the verification result for easy access."""
+        return self.verification_result

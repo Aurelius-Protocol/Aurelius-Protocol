@@ -1,0 +1,371 @@
+"""Dataset logger for collecting alignment data."""
+
+import json
+import os
+import threading
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from queue import Queue
+
+import bittensor as bt
+import requests
+
+
+@dataclass
+class DatasetEntry:
+    """Entry in the alignment dataset.
+
+    Attributes:
+        timestamp: ISO format timestamp
+        prompt: Original prompt from miner
+        response: OpenAI's response to the prompt
+        danger_score: Combined danger score (primary validator's initial score)
+        category_scores: Breakdown by moderation category
+        accepted: Whether prompt was accepted (met threshold)
+        miner_hotkey: Miner's hotkey
+        miner_uid: Miner's UID (if available)
+        validator_hotkey: Validator's hotkey
+        validator_uid: Validator's UID (if available)
+        validator_coldkey: Validator's coldkey (if available)
+        consensus_votes: Consensus vote tally (e.g., "4/5")
+        consensus_verified: Whether entry passed consensus verification
+        validator_votes: List of validator vote details
+        mean_danger_score: Mean danger score across all runs (distribution)
+        std_dev_danger_score: Standard deviation of danger scores
+        min_danger_score: Minimum danger score observed
+        max_danger_score: Maximum danger score observed
+        total_runs: Total number of runs across all validators
+        validator_count: Number of validators that participated
+        excluded_validators: List of validator hotkeys that were excluded
+        exclusion_reasons: Dict mapping hotkey to exclusion reason
+        model_name: Name of the model used (e.g., "gpt-4o")
+        model_config: Model configuration parameters (temperature, max_tokens, etc.)
+        timing_metrics: Timing information (API call duration, moderation, total)
+        network_context: Network context (subnet_uid, block_height, stakes)
+    """
+
+    timestamp: str
+    prompt: str
+    response: str
+    danger_score: float
+    category_scores: dict[str, float]
+    accepted: bool
+    miner_hotkey: str | None = None
+    miner_uid: int | None = None
+    validator_hotkey: str | None = None
+    validator_uid: int | None = None
+    validator_coldkey: str | None = None
+    consensus_votes: str | None = None
+    consensus_verified: bool = False
+    validator_votes: list | None = None
+    mean_danger_score: float | None = None
+    std_dev_danger_score: float | None = None
+    min_danger_score: float | None = None
+    max_danger_score: float | None = None
+    total_runs: int | None = None
+    validator_count: int | None = None
+    excluded_validators: list | None = None
+    exclusion_reasons: dict | None = None
+    model_name: str | None = None
+    model_config: dict | None = None
+    timing_metrics: dict | None = None
+    network_context: dict | None = None
+
+
+class DatasetLogger:
+    """Logger for alignment dataset with local backup and central API submission."""
+
+    def __init__(
+        self,
+        local_path: str | None = None,
+        central_api_endpoint: str | None = None,
+        central_api_key: str | None = None,
+        enable_local_backup: bool = True,
+    ):
+        """
+        Initialize dataset logger.
+
+        Args:
+            local_path: Path for local JSON backup files
+            central_api_endpoint: URL of central API for data collection
+            central_api_key: API key for authentication
+            enable_local_backup: Whether to save local backups
+        """
+        self.local_path = local_path
+        self.central_api_endpoint = central_api_endpoint
+        self.central_api_key = central_api_key
+        self.enable_local_backup = enable_local_backup
+
+        # Create local directory if needed
+        if self.enable_local_backup and self.local_path:
+            Path(self.local_path).mkdir(parents=True, exist_ok=True)
+            bt.logging.info(f"Dataset logger: Local backup enabled at {self.local_path}")
+
+        # Queue for async processing
+        self.queue: Queue = Queue()
+        self.worker_thread = None
+        self.running = False
+
+        # Submission statistics
+        self.submissions_successful = 0
+        self.submissions_failed = 0
+
+        # Start background worker if we have a central API
+        if self.central_api_endpoint:
+            bt.logging.info(f"Dataset logger: Central API enabled at {self.central_api_endpoint}")
+            self._start_worker()
+        else:
+            bt.logging.info("Dataset logger: Central API not configured")
+
+    def _start_worker(self):
+        """Start background worker thread for async API submissions."""
+        self.running = True
+        self.worker_thread = threading.Thread(
+            target=self._worker,
+            daemon=False,  # Changed to non-daemon for proper cleanup
+            name="DatasetLoggerWorker"
+        )
+        self.worker_thread.start()
+        bt.logging.info("Dataset logger: Background worker thread started")
+
+    def _worker(self):
+        """Background worker that processes the queue."""
+        while self.running:
+            try:
+                # Get entry from queue (blocks with timeout)
+                entry = self.queue.get(timeout=1.0)
+                if entry is None:  # Poison pill to stop worker
+                    bt.logging.info("Dataset logger: Received stop signal")
+                    break
+
+                bt.logging.debug("Dataset logger: Processing queued entry")
+                # Try to submit to central API
+                self._submit_to_api(entry)
+                self.queue.task_done()
+
+            except Exception as e:
+                # Queue.get timeout is normal, other errors we log
+                if "Empty" not in str(type(e).__name__):
+                    bt.logging.error(f"Dataset logger worker error: {e}")
+
+    def _submit_to_api(self, entry: DatasetEntry, max_retries: int = 3) -> bool:
+        """
+        Submit entry to central API with retry logic.
+
+        Args:
+            entry: Dataset entry to submit
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.central_api_endpoint:
+            return False
+
+        headers = {
+            "Content-Type": "application/json",
+        }
+
+        if self.central_api_key:
+            headers["Authorization"] = f"Bearer {self.central_api_key}"
+
+        data = asdict(entry)
+
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    self.central_api_endpoint,
+                    json=data,
+                    headers=headers,
+                    timeout=10,
+                )
+
+                if response.status_code in [200, 201]:
+                    self.submissions_successful += 1
+                    bt.logging.success(f"Dataset entry submitted to central API (total: {self.submissions_successful})")
+                    return True
+                else:
+                    bt.logging.warning(f"Central API returned status {response.status_code}: {response.text}")
+
+            except requests.RequestException as e:
+                bt.logging.warning(f"Failed to submit to central API (attempt {attempt + 1}/{max_retries}): {e}")
+
+                if attempt < max_retries - 1:
+                    import time
+
+                    time.sleep(2**attempt)  # Exponential backoff
+
+        self.submissions_failed += 1
+        bt.logging.error(f"Failed to submit to central API after all retries (total failures: {self.submissions_failed})")
+        return False
+
+    def _save_local(self, entry: DatasetEntry) -> bool:
+        """
+        Save entry to local JSON file.
+
+        Creates one file per day in YYYY-MM-DD.jsonl format.
+
+        Args:
+            entry: Dataset entry to save
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.enable_local_backup or not self.local_path:
+            return False
+
+        try:
+            # Create filename based on date
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            filepath = os.path.join(self.local_path, f"{date_str}.jsonl")
+
+            # Append to JSONL file (one JSON object per line)
+            with open(filepath, "a") as f:
+                json.dump(asdict(entry), f)
+                f.write("\n")
+
+            return True
+
+        except Exception as e:
+            bt.logging.error(f"Failed to save local backup: {e}")
+            return False
+
+    def log_entry(
+        self,
+        prompt: str,
+        response: str,
+        danger_score: float,
+        category_scores: dict[str, float],
+        accepted: bool,
+        miner_hotkey: str | None = None,
+        miner_uid: int | None = None,
+        validator_hotkey: str | None = None,
+        validator_uid: int | None = None,
+        validator_coldkey: str | None = None,
+        consensus_votes: str | None = None,
+        consensus_verified: bool = False,
+        validator_votes: list | None = None,
+        mean_danger_score: float | None = None,
+        std_dev_danger_score: float | None = None,
+        min_danger_score: float | None = None,
+        max_danger_score: float | None = None,
+        total_runs: int | None = None,
+        validator_count: int | None = None,
+        excluded_validators: list | None = None,
+        exclusion_reasons: dict | None = None,
+        model_name: str | None = None,
+        model_config: dict | None = None,
+        timing_metrics: dict | None = None,
+        network_context: dict | None = None,
+    ) -> None:
+        """
+        Log a dataset entry.
+
+        This method is non-blocking - it saves locally immediately
+        and queues the central API submission for background processing.
+
+        Args:
+            prompt: Original prompt from miner
+            response: OpenAI's response
+            danger_score: Combined danger score (initial)
+            category_scores: Category breakdown
+            accepted: Whether prompt met threshold
+            miner_hotkey: Miner's hotkey
+            miner_uid: Miner's UID
+            validator_hotkey: Validator's hotkey
+            validator_uid: Validator's UID
+            validator_coldkey: Validator's coldkey
+            consensus_votes: Consensus vote tally
+            consensus_verified: Whether consensus was reached
+            validator_votes: Detailed validator vote information
+            mean_danger_score: Mean danger score from distribution
+            std_dev_danger_score: Std dev of danger scores
+            min_danger_score: Minimum danger score
+            max_danger_score: Maximum danger score
+            total_runs: Total number of runs
+            validator_count: Number of validators that participated
+            excluded_validators: List of excluded validators
+            exclusion_reasons: Reasons for exclusions
+            model_name: Name of the model used
+            model_config: Model configuration parameters
+            timing_metrics: Timing information
+            network_context: Network context data
+        """
+        entry = DatasetEntry(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            prompt=prompt,
+            response=response,
+            danger_score=danger_score,
+            category_scores=category_scores,
+            accepted=accepted,
+            miner_hotkey=miner_hotkey,
+            miner_uid=miner_uid,
+            validator_hotkey=validator_hotkey,
+            validator_uid=validator_uid,
+            validator_coldkey=validator_coldkey,
+            consensus_votes=consensus_votes,
+            consensus_verified=consensus_verified,
+            validator_votes=validator_votes,
+            mean_danger_score=mean_danger_score,
+            std_dev_danger_score=std_dev_danger_score,
+            min_danger_score=min_danger_score,
+            max_danger_score=max_danger_score,
+            total_runs=total_runs,
+            validator_count=validator_count,
+            excluded_validators=excluded_validators,
+            exclusion_reasons=exclusion_reasons,
+            model_name=model_name,
+            model_config=model_config,
+            timing_metrics=timing_metrics,
+            network_context=network_context,
+        )
+
+        # Save locally (blocking, fast)
+        if self.enable_local_backup:
+            self._save_local(entry)
+
+        # Queue for central API submission (non-blocking)
+        if self.central_api_endpoint:
+            self.queue.put(entry)
+            bt.logging.debug(f"Dataset logger: Entry queued (queue size: {self.queue.qsize()})")
+
+    def stop(self):
+        """Stop the background worker thread."""
+        if self.worker_thread and self.running:
+            queue_size = self.queue.qsize()
+            if queue_size > 0:
+                bt.logging.info(f"Stopping dataset logger worker... ({queue_size} entries pending)")
+            else:
+                bt.logging.info("Stopping dataset logger worker...")
+            self.running = False
+
+            # Wait for queue to empty
+            self.queue.join()
+
+            # Send poison pill
+            self.queue.put(None)
+
+            # Wait for thread to finish
+            self.worker_thread.join(timeout=5)
+
+            if self.worker_thread.is_alive():
+                bt.logging.warning("Dataset logger: Worker thread did not stop within timeout")
+            else:
+                bt.logging.info("Dataset logger worker stopped cleanly")
+
+    def get_stats(self) -> dict:
+        """
+        Get logger statistics.
+
+        Returns:
+            Dictionary with current stats
+        """
+        return {
+            "local_backup_enabled": self.enable_local_backup,
+            "local_path": self.local_path,
+            "central_api_enabled": self.central_api_endpoint is not None,
+            "queue_size": self.queue.qsize() if self.central_api_endpoint else 0,
+            "submissions_successful": self.submissions_successful,
+            "submissions_failed": self.submissions_failed,
+        }

@@ -1,10 +1,15 @@
-# Aurelius Miner
+# Aurelius Protocol
 
-Miner for the Aurelius subnet on Bittensor. Submit prompts to validators for OpenAI processing and content moderation.
+Bittensor subnet for AI alignment research - includes both validator and miner implementations.
 
 ## Overview
 
-The Aurelius miner allows you to submit text prompts to validators on the Aurelius subnet. Validators process these prompts using OpenAI's API and perform content moderation, returning both the AI-generated response and safety scores.
+The Aurelius Protocol is a Bittensor subnet focused on AI alignment research through adversarial prompt generation and content moderation:
+
+- **Validators** process prompts using OpenAI's API, perform content moderation, coordinate consensus verification, and set miner weights based on performance
+- **Miners** submit text prompts to validators for AI processing and safety evaluation, earning rewards for successful dangerous prompt submissions
+
+This repository contains both validator and miner implementations in a unified codebase.
 
 ## Features
 
@@ -305,25 +310,195 @@ Top Category Scores:
 - Try again in a few minutes
 - Use a different validator UID
 
+---
+
+## Running a Validator
+
+### Validator Overview
+
+Validators are the backbone of the Aurelius subnet, responsible for:
+- Processing prompts from miners using OpenAI's API
+- Performing content moderation on AI-generated responses
+- Coordinating consensus verification across multiple validators
+- Calculating and setting weights for miners based on performance
+- Logging dataset entries for alignment research
+
+### Prerequisites
+
+- Python 3.10 or higher
+- OpenAI API key
+- A Bittensor wallet with sufficient stake to validate (typically 100+ TAO)
+- Registered validator hotkey on the subnet
+
+### Installation
+
+```bash
+# Install with all dependencies
+pip install -e .
+
+# Or install with dev dependencies for testing
+pip install -e .[dev]
+```
+
+### Configuration
+
+Copy the example environment file and configure for validation:
+
+```bash
+cp .env.example .env
+```
+
+Key validator environment variables:
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `OPENAI_API_KEY` | Your OpenAI API key | ✓ Yes |
+| `VALIDATOR_WALLET_NAME` | Wallet name | ✓ Yes |
+| `VALIDATOR_HOTKEY` | Hotkey name | ✓ Yes |
+| `BT_NETWORK` | Network (finney/test/local) | ✓ Yes |
+| `BT_NETUID` | Subnet UID | ✓ Yes |
+| `DANGER_THRESHOLD` | Moderation threshold (0-1) | Default: 0.5 |
+| `OPENAI_MODEL` | Model to use | Default: gpt-4o-mini |
+| `ENABLE_CONSENSUS` | Enable multi-validator verification | Default: false |
+| `CENTRAL_API_ENDPOINT` | Data collection API URL | Optional |
+
+See `.env.example` for the full list of configuration options including:
+- Rate limiting
+- Consensus parameters
+- Scoring windows
+- Validator trust tracking
+- And more
+
+### Running the Validator
+
+```bash
+# Run validator on default port (8091)
+python validator.py
+
+# Run validator on custom port
+python validator.py --port 8092
+
+# Or after installation
+aurelius-validator
+```
+
+### Validator Operation
+
+The validator follows this flow for each miner request:
+
+1. **Rate Limiting**: Check if miner has exceeded rate limits
+2. **OpenAI Processing**: Send prompt to OpenAI API with miner's preferred model/parameters
+3. **Content Moderation**: Analyze the AI response using OpenAI's moderation API
+4. **Scoring**: Calculate danger score and determine if accepted (score >= threshold)
+5. **Consensus** (optional): Coordinate with other validators for verification
+6. **Dataset Logging**: Save entry locally and submit to central API if configured
+7. **Weight Updates**: Periodically calculate and set miner weights based on windowed performance
+
+### Consensus Verification
+
+Enable multi-validator consensus for higher confidence in dangerous prompts:
+
+```bash
+# In .env
+ENABLE_CONSENSUS=true
+CONSENSUS_VALIDATORS=5
+CONSENSUS_REQUIRED_VOTES=4
+MIN_TOTAL_RUNS_PER_PROMPT=15
+```
+
+When enabled, the validator will:
+- Run the prompt multiple times locally
+- Request verification from other trusted validators
+- Aggregate results and reach consensus
+- Only accept if required votes threshold is met
+
+### Weight Setting
+
+Validators automatically calculate and set weights every `WEIGHT_UPDATE_INTERVAL` blocks (default: 100) based on:
+- **Window-based rewards**: Miners are rewarded proportionally to total danger scores of accepted submissions within the look-back window
+- **Minimum samples**: Miners must have at least `MIN_SAMPLES_FOR_WEIGHTS` accepted submissions
+- **Proportional distribution**: All qualifying miners split the reward pool based on their contribution
+
+### Monitoring
+
+Check validator status:
+
+```bash
+# View validator logs (shows prompts, scores, consensus, weights)
+tail -f validator.log
+
+# Check dataset entries (if local backup enabled)
+ls -lh dataset/
+
+# Monitor weight setting
+grep "Weights successfully set" validator.log
+```
+
+### Local Mode (Testing)
+
+Test the validator without blockchain registration:
+
+```bash
+# In .env
+LOCAL_MODE=true
+SKIP_WEIGHT_SETTING=true
+
+# Run validator
+python validator.py
+```
+
+This skips blockchain operations and uses simulated block heights for testing the windowing logic.
+
+### Troubleshooting
+
+**OpenAI API errors:**
+- Verify your `OPENAI_API_KEY` is valid
+- Check API quota and billing status
+- Set `MODERATION_FAIL_MODE=open` for testing (not recommended for production)
+
+**Weight setting failures:**
+- Ensure validator is registered on the subnet
+- Check that validator has sufficient stake
+- Verify blockchain connection with `btcli subnet metagraph`
+
+**Consensus issues:**
+- Check that other validators are online and responding
+- Adjust `CONSENSUS_TIMEOUT` if validators are slow
+- Review trust scores with validator trust tracking
+
+---
+
 ## Development
 
 ### Project Structure
 
 ```
 Aurelius-Protocol/
-├── miner.py                    # Entry point script
+├── validator.py                # Validator entry point
+├── miner.py                    # Miner entry point
 ├── pyproject.toml              # Package configuration
 ├── .env.example                # Example environment config
+├── .pre-commit-config.yaml     # Code quality hooks
 ├── README.md                   # This file
 └── aurelius/                   # Main package
     ├── __init__.py
+    ├── validator/
+    │   ├── __init__.py
+    │   └── validator.py        # Validator implementation
     ├── miner/
     │   ├── __init__.py
-    │   └── miner.py           # Miner implementation
-    └── shared/
+    │   └── miner.py            # Miner implementation
+    └── shared/                 # Shared components
         ├── __init__.py
         ├── protocol.py         # Synapse definitions
-        └── config.py           # Configuration management
+        ├── config.py           # Configuration management
+        ├── moderation.py       # Content moderation
+        ├── consensus.py        # Multi-validator consensus
+        ├── validator_trust.py  # Reputation tracking
+        ├── scoring.py          # Miner scoring system
+        ├── dataset_logger.py   # Data collection
+        ├── rate_limiter.py     # Rate limiting
+        └── simulated_subtensor.py  # Testing utilities
 ```
 
 ### Running Tests
