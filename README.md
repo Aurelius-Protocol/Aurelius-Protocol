@@ -87,7 +87,7 @@ To participate on mainnet or testnet, you must register your hotkey:
 
 ```bash
 # For mainnet
-btcli subnet register --netuid 1 --wallet.name miner --wallet.hotkey default
+btcli subnet register --netuid 37 --wallet.name miner --wallet.hotkey default
 
 # For testnet
 btcli subnet register --netuid 37 --wallet.name miner --wallet.hotkey default --subtensor.network test
