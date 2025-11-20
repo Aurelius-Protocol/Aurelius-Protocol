@@ -1,5 +1,6 @@
 """Dataset logger for collecting alignment data."""
 
+import atexit
 import json
 import os
 import threading
@@ -115,6 +116,8 @@ class DatasetLogger:
         if self.central_api_endpoint:
             bt.logging.info(f"Dataset logger: Central API enabled at {self.central_api_endpoint}")
             self._start_worker()
+            # Register atexit handler for graceful shutdown
+            atexit.register(self.stop)
         else:
             bt.logging.info("Dataset logger: Central API not configured")
 
@@ -331,28 +334,80 @@ class DatasetLogger:
             bt.logging.debug(f"Dataset logger: Entry queued (queue size: {self.queue.qsize()})")
 
     def stop(self):
-        """Stop the background worker thread."""
-        if self.worker_thread and self.running:
-            queue_size = self.queue.qsize()
-            if queue_size > 0:
-                bt.logging.info(f"Stopping dataset logger worker... ({queue_size} entries pending)")
-            else:
-                bt.logging.info("Stopping dataset logger worker...")
-            self.running = False
+        """Stop the background worker thread with queue persistence."""
+        if not self.worker_thread or not self.running:
+            return  # Already stopped
 
-            # Wait for queue to empty
-            self.queue.join()
+        from aurelius.shared.config import Config
 
-            # Send poison pill
-            self.queue.put(None)
+        queue_size = self.queue.qsize()
+        if queue_size > 0:
+            bt.logging.info(f"Stopping dataset logger worker... ({queue_size} entries pending)")
+        else:
+            bt.logging.info("Stopping dataset logger worker...")
 
-            # Wait for thread to finish
-            self.worker_thread.join(timeout=5)
+        self.running = False
 
-            if self.worker_thread.is_alive():
-                bt.logging.warning("Dataset logger: Worker thread did not stop within timeout")
-            else:
-                bt.logging.info("Dataset logger worker stopped cleanly")
+        # Wait for queue to empty (with timeout)
+        timeout = Config.DATASET_LOGGER_SHUTDOWN_TIMEOUT
+        bt.logging.info(f"Waiting up to {timeout}s for queue to drain...")
+
+        # Use a shorter timeout per item to allow checking progress
+        items_processed = 0
+        remaining_items = queue_size
+
+        while remaining_items > 0 and items_processed < queue_size:
+            try:
+                self.queue.join()  # This will return when queue is empty
+                break
+            except:
+                pass
+            remaining_items = self.queue.qsize()
+            items_processed = queue_size - remaining_items
+
+        # Send poison pill
+        self.queue.put(None)
+
+        # Wait for thread to finish
+        self.worker_thread.join(timeout=min(timeout, 10))
+
+        if self.worker_thread.is_alive():
+            bt.logging.warning(
+                f"Dataset logger: Worker thread did not stop within {timeout}s timeout"
+            )
+            # Persist remaining queue items to disk
+            remaining = self.queue.qsize()
+            if remaining > 0:
+                self._persist_queue()
+        else:
+            bt.logging.info("Dataset logger worker stopped cleanly")
+
+    def _persist_queue(self):
+        """Persist remaining queue items to disk to prevent data loss."""
+        if not self.enable_local_backup or not self.local_path:
+            bt.logging.warning("Cannot persist queue - local backup not enabled")
+            return
+
+        try:
+            remaining_items = []
+            while not self.queue.empty():
+                try:
+                    entry = self.queue.get_nowait()
+                    if entry is not None:  # Skip poison pill
+                        remaining_items.append(entry)
+                except:
+                    break
+
+            if remaining_items:
+                persist_file = Path(self.local_path) / f"unsent_queue_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
+                with open(persist_file, "w") as f:
+                    json.dump([asdict(entry) for entry in remaining_items], f, indent=2)
+                bt.logging.warning(
+                    f"Persisted {len(remaining_items)} unsent entries to {persist_file}. "
+                    f"These were not submitted to the central API."
+                )
+        except Exception as e:
+            bt.logging.error(f"Failed to persist queue: {e}")
 
     def get_stats(self) -> dict:
         """

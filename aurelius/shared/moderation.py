@@ -100,18 +100,23 @@ class OpenAIModerationProvider(ModerationProvider):
             )
 
         except Exception as e:
-            bt.logging.error(f"Error in OpenAI moderation: {e}")
+            bt.logging.error(f"CRITICAL: OpenAI moderation API failure: {e}")
 
             # Handle error based on fail mode configuration
             from aurelius.shared.config import Config
 
             if Config.MODERATION_FAIL_MODE == "closed":
                 # Fail closed: Reject content on error (conservative/secure)
-                bt.logging.warning("MODERATION_FAIL_MODE=closed: Rejecting content due to API error")
+                bt.logging.error(
+                    "MODERATION_FAIL_MODE=closed: Rejecting content due to API error (SECURE default behavior)"
+                )
                 return ModerationResult(flagged=True, category_scores={}, categories={}, combined_score=1.0)
             else:
-                # Fail open: Accept content on error (permissive)
-                bt.logging.warning("MODERATION_FAIL_MODE=open: Accepting content despite API error")
+                # Fail open: Accept content on error (permissive) - ONLY FOR LOCAL_MODE
+                bt.logging.error(
+                    "SECURITY WARNING: MODERATION_FAIL_MODE=open: Accepting content despite API error. "
+                    "This should ONLY be used in LOCAL_MODE for testing!"
+                )
                 return ModerationResult(flagged=False, category_scores={}, categories={}, combined_score=0.0)
 
     def _calculate_combined_score(self, category_scores: dict[str, float]) -> float:

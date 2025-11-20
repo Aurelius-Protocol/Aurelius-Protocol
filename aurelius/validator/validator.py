@@ -15,7 +15,7 @@ from aurelius.shared.consensus import ConsensusCoordinator
 from aurelius.shared.dataset_logger import DatasetLogger
 from aurelius.shared.moderation import create_moderation_provider
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
-from aurelius.shared.rate_limiter import RateLimitConfig, RateLimiter
+from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
 
 
@@ -53,11 +53,11 @@ class Validator:
             category_weights=Config.MODERATION_CATEGORY_WEIGHTS,
         )
 
-        # Initialize rate limiter
+        # Initialize per-miner rate limiter
         rate_limit_config = RateLimitConfig(
             max_requests=Config.RATE_LIMIT_REQUESTS, window_hours=Config.RATE_LIMIT_WINDOW_HOURS
         )
-        self.rate_limiter = RateLimiter(rate_limit_config)
+        self.rate_limiter = PerMinerRateLimiter(rate_limit_config)
 
         # Initialize dataset logger
         self.dataset_logger = DatasetLogger(
@@ -229,6 +229,45 @@ class Validator:
 
         # Get miner hotkey for tracking
         miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, "dendrite") and synapse.dendrite else None
+
+        # Input validation (security)
+        # Check 1: Prompt length
+        if len(prompt) > Config.MAX_PROMPT_LENGTH:
+            bt.logging.warning(
+                f"Prompt too long: {len(prompt)} chars (max: {Config.MAX_PROMPT_LENGTH}). "
+                f"Miner: {miner_hotkey[:8] if miner_hotkey else 'unknown'}..."
+            )
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = f"Prompt exceeds maximum length ({Config.MAX_PROMPT_LENGTH} chars)"
+            return synapse
+
+        # Check 2: Response length limits
+        miner_max_chars = synapse.max_chars
+        if miner_max_chars and miner_max_chars > Config.MAX_RESPONSE_CHARS_LIMIT:
+            bt.logging.warning(
+                f"Requested max_chars ({miner_max_chars}) exceeds limit ({Config.MAX_RESPONSE_CHARS_LIMIT}). "
+                f"Miner: {miner_hotkey[:8] if miner_hotkey else 'unknown'}..."
+            )
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = f"max_chars exceeds limit ({Config.MAX_RESPONSE_CHARS_LIMIT})"
+            return synapse
+
+        # Check 3: min_chars vs max_chars consistency
+        miner_min_chars = synapse.min_chars
+        if miner_min_chars and miner_max_chars and miner_min_chars > miner_max_chars:
+            bt.logging.warning(
+                f"Invalid parameter combination: min_chars ({miner_min_chars}) > max_chars ({miner_max_chars}). "
+                f"Miner: {miner_hotkey[:8] if miner_hotkey else 'unknown'}..."
+            )
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = "min_chars cannot be greater than max_chars"
+            return synapse
 
         # Step 1: Check rate limits
         allowed, reason, remaining = self.rate_limiter.check_rate_limit(hotkey=miner_hotkey)
@@ -972,10 +1011,11 @@ class Validator:
             # Validator stake
             if self.wallet and self.subtensor:
                 try:
-                    validator_stake = self.subtensor.get_stake_for_coldkey_and_hotkey(
-                        hotkey_ss58=self.wallet.hotkey.ss58_address,
-                        coldkey_ss58=self.wallet.coldkeypub.ss58_address
-                    )
+                    with self.subtensor_lock:
+                        validator_stake = self.subtensor.get_stake_for_coldkey_and_hotkey(
+                            hotkey_ss58=self.wallet.hotkey.ss58_address,
+                            coldkey_ss58=self.wallet.coldkeypub.ss58_address
+                        )
                     context["validator_stake"] = float(validator_stake)
                 except Exception:
                     pass
@@ -984,7 +1024,8 @@ class Validator:
             if miner_hotkey and self.subtensor:
                 try:
                     # Get metagraph to find miner's coldkey
-                    metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+                    with self.subtensor_lock:
+                        metagraph = self.subtensor.metagraph(Config.BT_NETUID)
                     for uid, hotkey in enumerate(metagraph.hotkeys):
                         if hotkey == miner_hotkey:
                             miner_stake = metagraph.S[uid]
@@ -1183,7 +1224,8 @@ class Validator:
 
             # Determine our UID from the metagraph
             try:
-                metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+                with self.subtensor_lock:
+                    metagraph = self.subtensor.metagraph(Config.BT_NETUID)
                 validator_hotkey = self.wallet.hotkey.ss58_address
                 if validator_hotkey in metagraph.hotkeys:
                     self.uid = metagraph.hotkeys.index(validator_hotkey)
