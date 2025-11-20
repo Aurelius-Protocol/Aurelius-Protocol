@@ -71,7 +71,10 @@ class Config:
     RATE_LIMIT_WINDOW_HOURS: float = float(os.getenv("RATE_LIMIT_WINDOW_HOURS", "1.0"))
 
     # Dataset / Central API Configuration
-    CENTRAL_API_ENDPOINT: str | None = os.getenv("CENTRAL_API_ENDPOINT")
+    CENTRAL_API_ENDPOINT: str | None = os.getenv(
+        "CENTRAL_API_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/collections"
+    )
     CENTRAL_API_KEY: str | None = os.getenv("CENTRAL_API_KEY")
     LOCAL_DATASET_PATH: str = os.getenv("LOCAL_DATASET_PATH", "./datasets")
     ENABLE_LOCAL_BACKUP: bool = os.getenv("ENABLE_LOCAL_BACKUP", "true").lower() == "true"
