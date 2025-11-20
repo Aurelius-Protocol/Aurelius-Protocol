@@ -233,8 +233,8 @@ class ScoringSystem:
         if total > 0:
             weights = [w / total for w in weights]
         else:
-            # If no weights, distribute evenly
-            weights = [1.0 / len(weights) if len(weights) > 0 else 0.0] * len(weights)
+            # No dangerous prompts in window - all miners get 0 (zero-sum game)
+            weights = [0.0] * len(weights)
 
         return weights
 
@@ -359,6 +359,19 @@ class ScoringSystem:
                 weights.append(0.0)
                 continue
 
+            # Anti-spam: Cap submissions per window to prevent gaming via volume
+            # Sort by danger score (descending) and take top N
+            from aurelius.shared.config import Config
+
+            if len(submissions_in_window) > Config.MAX_SUBMISSIONS_PER_WINDOW:
+                submissions_in_window = sorted(
+                    submissions_in_window, key=lambda x: x["danger_score"], reverse=True
+                )[: Config.MAX_SUBMISSIONS_PER_WINDOW]
+                bt.logging.debug(
+                    f"Miner {hotkey[:8]}... had {len(submissions_in_window)} submissions in window, "
+                    f"capped to top {Config.MAX_SUBMISSIONS_PER_WINDOW} by danger score"
+                )
+
             # Weight = sum of danger scores of accepted submissions
             # This splits the pool proportionally based on total danger contribution
             weight = sum(sub["danger_score"] for sub in submissions_in_window)
@@ -370,8 +383,8 @@ class ScoringSystem:
         if total > 0:
             weights = [w / total for w in weights]
         else:
-            # If no weights, distribute evenly
-            weights = [1.0 / len(weights) if len(weights) > 0 else 0.0] * len(weights)
+            # No dangerous prompts in window - all miners get 0 (zero-sum game)
+            weights = [0.0] * len(weights)
 
         bt.logging.info(
             f"Calculated windowed weights for {len(weights)} miners "

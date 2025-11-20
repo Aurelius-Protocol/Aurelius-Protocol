@@ -43,6 +43,10 @@ class Config:
     MIN_ALLOWED_CHARS: int = int(os.getenv("MIN_ALLOWED_CHARS", "1"))
     MAX_ALLOWED_CHARS: int = int(os.getenv("MAX_ALLOWED_CHARS", "10000"))
 
+    # Input validation limits (security)
+    MAX_PROMPT_LENGTH: int = int(os.getenv("MAX_PROMPT_LENGTH", "10000"))  # Max chars in prompt
+    MAX_RESPONSE_CHARS_LIMIT: int = int(os.getenv("MAX_RESPONSE_CHARS_LIMIT", "50000"))  # Absolute max for responses
+
     # Moderation Configuration
     MODERATION_PROVIDER: str = os.getenv("MODERATION_PROVIDER", "openai")
     DANGER_THRESHOLD: float = float(os.getenv("DANGER_THRESHOLD", "0.5"))
@@ -71,6 +75,7 @@ class Config:
     CENTRAL_API_KEY: str | None = os.getenv("CENTRAL_API_KEY")
     LOCAL_DATASET_PATH: str = os.getenv("LOCAL_DATASET_PATH", "./datasets")
     ENABLE_LOCAL_BACKUP: bool = os.getenv("ENABLE_LOCAL_BACKUP", "true").lower() == "true"
+    DATASET_LOGGER_SHUTDOWN_TIMEOUT: int = int(os.getenv("DATASET_LOGGER_SHUTDOWN_TIMEOUT", "30"))  # seconds
 
     # Scoring Configuration
     WEIGHT_UPDATE_INTERVAL: int = int(os.getenv("WEIGHT_UPDATE_INTERVAL", "100"))
@@ -79,6 +84,7 @@ class Config:
     # Window-Based Reward Configuration
     WINDOW_BLOCKS: int = int(os.getenv("WINDOW_BLOCKS", "1000"))  # ~3.3 hours at 12 sec/block
     HISTORY_RETENTION_BLOCKS: int = int(os.getenv("HISTORY_RETENTION_BLOCKS", "10000"))  # ~33 hours
+    MAX_SUBMISSIONS_PER_WINDOW: int = int(os.getenv("MAX_SUBMISSIONS_PER_WINDOW", "100"))  # Cap submissions per miner per window
 
     # Consensus Verification Configuration
     CONSENSUS_VALIDATORS: int = int(os.getenv("CONSENSUS_VALIDATORS", "5"))
@@ -102,7 +108,7 @@ class Config:
     MINER_SCORES_PATH: str = os.getenv("MINER_SCORES_PATH", "./miner_scores.json")
 
     # Verification Thresholds
-    MAX_SCORE_VARIANCE_THRESHOLD: float = float(os.getenv("MAX_SCORE_VARIANCE_THRESHOLD", "0.05"))
+    MAX_SCORE_VARIANCE_THRESHOLD: float = float(os.getenv("MAX_SCORE_VARIANCE_THRESHOLD", "0.02"))  # Reduced from 0.05 to 0.02 for security
     MIN_RESPONSE_TIME_SECONDS: float = float(os.getenv("MIN_RESPONSE_TIME_SECONDS", "2.0"))
 
     # Bittensor Network Configuration
@@ -147,6 +153,32 @@ class Config:
         """Validate that required configuration is present."""
         if not cls.OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY is required. Please set it in your .env file.")
+
+        # Validate API key format (basic check - OpenAI keys start with 'sk-')
+        if not cls.OPENAI_API_KEY.startswith("sk-"):
+            raise ValueError("OPENAI_API_KEY appears invalid (should start with 'sk-')")
+
+        # Check .env file permissions if it exists
+        import os
+        import stat
+
+        env_file = ".env"
+        if os.path.exists(env_file):
+            file_stat = os.stat(env_file)
+            mode = file_stat.st_mode
+            # Check if file is readable by others (world-readable or group-readable)
+            if mode & (stat.S_IRGRP | stat.S_IROTH):
+                raise ValueError(
+                    f"SECURITY: .env file has insecure permissions ({oct(stat.S_IMODE(mode))}). "
+                    f"Run: chmod 600 {env_file}"
+                )
+
+        # CRITICAL: Prevent fail-open mode in production
+        if cls.MODERATION_FAIL_MODE == "open" and not cls.LOCAL_MODE:
+            raise ValueError(
+                "SECURITY: MODERATION_FAIL_MODE='open' is not allowed in production (LOCAL_MODE=false). "
+                "This would accept all content during API failures. Set MODERATION_FAIL_MODE='closed'."
+            )
 
         # Validate danger threshold
         if not 0 <= cls.DANGER_THRESHOLD <= 1:
