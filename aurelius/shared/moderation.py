@@ -16,12 +16,18 @@ class ModerationResult:
         category_scores: Dictionary of scores for each category
         categories: Dictionary of boolean flags for each category
         combined_score: Weighted combined score across all categories
+        high_category_triggered: Whether any individual category exceeded the high threshold
+        high_category_name: Name of the highest scoring category if threshold exceeded
+        high_category_score: Score of the highest category if threshold exceeded
     """
 
     flagged: bool
     category_scores: dict[str, float]
     categories: dict[str, bool]
     combined_score: float
+    high_category_triggered: bool = False
+    high_category_name: str | None = None
+    high_category_score: float | None = None
 
 
 class ModerationProvider(ABC):
@@ -59,7 +65,12 @@ class OpenAIModerationProvider(ModerationProvider):
         "violence/graphic": 1.2,
     }
 
-    def __init__(self, api_key: str, category_weights: dict[str, float] | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        category_weights: dict[str, float] | None = None,
+        single_category_threshold: float = 0.8,
+    ):
         """
         Initialize OpenAI moderation provider.
 
@@ -67,9 +78,11 @@ class OpenAIModerationProvider(ModerationProvider):
             api_key: OpenAI API key
             category_weights: Optional custom weights for categories.
                             If not provided, uses DEFAULT_CATEGORY_WEIGHTS.
+            single_category_threshold: Threshold for individual category scores (default 0.8)
         """
         self.client = OpenAI(api_key=api_key)
         self.category_weights = category_weights or self.DEFAULT_CATEGORY_WEIGHTS
+        self.single_category_threshold = single_category_threshold
 
     def moderate(self, text: str) -> ModerationResult:
         """
@@ -92,11 +105,17 @@ class OpenAIModerationProvider(ModerationProvider):
             # Calculate weighted combined score
             combined_score = self._calculate_combined_score(category_scores)
 
+            # Check for high individual category scores
+            high_cat_triggered, high_cat_name, high_cat_score = self._check_high_category_threshold(category_scores)
+
             return ModerationResult(
                 flagged=result.flagged,
                 category_scores=category_scores,
                 categories=categories,
                 combined_score=combined_score,
+                high_category_triggered=high_cat_triggered,
+                high_category_name=high_cat_name,
+                high_category_score=high_cat_score,
             )
 
         except Exception as e:
@@ -110,14 +129,30 @@ class OpenAIModerationProvider(ModerationProvider):
                 bt.logging.error(
                     "MODERATION_FAIL_MODE=closed: Rejecting content due to API error (SECURE default behavior)"
                 )
-                return ModerationResult(flagged=True, category_scores={}, categories={}, combined_score=1.0)
+                return ModerationResult(
+                    flagged=True,
+                    category_scores={},
+                    categories={},
+                    combined_score=1.0,
+                    high_category_triggered=True,
+                    high_category_name="api_error",
+                    high_category_score=1.0,
+                )
             else:
                 # Fail open: Accept content on error (permissive) - ONLY FOR LOCAL_MODE
                 bt.logging.error(
                     "SECURITY WARNING: MODERATION_FAIL_MODE=open: Accepting content despite API error. "
                     "This should ONLY be used in LOCAL_MODE for testing!"
                 )
-                return ModerationResult(flagged=False, category_scores={}, categories={}, combined_score=0.0)
+                return ModerationResult(
+                    flagged=False,
+                    category_scores={},
+                    categories={},
+                    combined_score=0.0,
+                    high_category_triggered=False,
+                    high_category_name=None,
+                    high_category_score=None,
+                )
 
     def _calculate_combined_score(self, category_scores: dict[str, float]) -> float:
         """
@@ -148,9 +183,42 @@ class OpenAIModerationProvider(ModerationProvider):
 
         return weighted_sum / total_weight
 
+    def _check_high_category_threshold(self, category_scores: dict[str, float]) -> tuple[bool, str | None, float | None]:
+        """
+        Check if any individual category score exceeds the high threshold.
+
+        This implements the dual-logic acceptance criteria: a prompt can be
+        flagged as dangerous either by having a high aggregate score OR by
+        having any single category with a very high score (top 20% of range).
+
+        Args:
+            category_scores: Dictionary of category names to scores
+
+        Returns:
+            Tuple of (triggered, category_name, category_score)
+            - triggered: True if any category >= threshold
+            - category_name: Name of highest scoring category if triggered
+            - category_score: Score of highest category if triggered
+        """
+        if not category_scores:
+            return False, None, None
+
+        # Find the highest scoring category
+        max_category = max(category_scores.items(), key=lambda x: x[1])
+        max_category_name, max_category_score = max_category
+
+        # Check if it exceeds the single category threshold
+        if max_category_score >= self.single_category_threshold:
+            return True, max_category_name, max_category_score
+
+        return False, None, None
+
 
 def create_moderation_provider(
-    provider_name: str, api_key: str, category_weights: dict[str, float] | None = None
+    provider_name: str,
+    api_key: str,
+    category_weights: dict[str, float] | None = None,
+    single_category_threshold: float = 0.8,
 ) -> ModerationProvider:
     """
     Factory function to create a moderation provider.
@@ -159,6 +227,7 @@ def create_moderation_provider(
         provider_name: Name of the provider ("openai", etc.)
         api_key: API key for the provider
         category_weights: Optional custom category weights
+        single_category_threshold: Threshold for individual category scores (default 0.8)
 
     Returns:
         ModerationProvider instance
@@ -167,6 +236,10 @@ def create_moderation_provider(
         ValueError: If provider_name is not recognized
     """
     if provider_name.lower() == "openai":
-        return OpenAIModerationProvider(api_key=api_key, category_weights=category_weights)
+        return OpenAIModerationProvider(
+            api_key=api_key,
+            category_weights=category_weights,
+            single_category_threshold=single_category_threshold,
+        )
     else:
         raise ValueError(f"Unknown moderation provider: {provider_name}")
