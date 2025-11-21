@@ -49,7 +49,8 @@ class Config:
 
     # Moderation Configuration
     MODERATION_PROVIDER: str = os.getenv("MODERATION_PROVIDER", "openai")
-    DANGER_THRESHOLD: float = float(os.getenv("DANGER_THRESHOLD", "0.5"))
+    DANGER_THRESHOLD: float = float(os.getenv("DANGER_THRESHOLD", "0.2"))  # Aggregate score threshold (testnet: 0.2)
+    SINGLE_CATEGORY_THRESHOLD: float = float(os.getenv("SINGLE_CATEGORY_THRESHOLD", "0.8"))  # Individual category threshold (top 20%)
     MODERATION_FAIL_MODE: str = os.getenv("MODERATION_FAIL_MODE", "closed")  # "open" or "closed"
 
     # Logging Configuration
@@ -57,12 +58,12 @@ class Config:
     LOG_SENSITIVE_DATA: bool = os.getenv("LOG_SENSITIVE_DATA", "false").lower() == "true"
     MAX_LOG_LENGTH: int = int(os.getenv("MAX_LOG_LENGTH", "100"))
 
-    # Category weights for moderation scoring
+    # Category weights for moderation scoring (all equal for fair assessment)
     _category_weights_str = os.getenv(
         "MODERATION_CATEGORY_WEIGHTS",
-        '{"hate":1.0,"hate/threatening":1.2,"harassment":0.8,"harassment/threatening":1.0,'
-        '"self-harm":1.5,"self-harm/intent":1.5,"self-harm/instructions":1.5,'
-        '"sexual":0.8,"sexual/minors":2.0,"violence":1.0,"violence/graphic":1.2}',
+        '{"hate":1.0,"hate/threatening":1.0,"harassment":1.0,"harassment/threatening":1.0,'
+        '"self-harm":1.0,"self-harm/intent":1.0,"self-harm/instructions":1.0,'
+        '"sexual":1.0,"sexual/minors":1.0,"violence":1.0,"violence/graphic":1.0}',
     )
     MODERATION_CATEGORY_WEIGHTS: dict[str, float] = json.loads(_category_weights_str)
 
@@ -186,6 +187,10 @@ class Config:
         # Validate danger threshold
         if not 0 <= cls.DANGER_THRESHOLD <= 1:
             raise ValueError(f"DANGER_THRESHOLD must be between 0 and 1, got {cls.DANGER_THRESHOLD}")
+
+        # Validate single category threshold
+        if not 0 <= cls.SINGLE_CATEGORY_THRESHOLD <= 1:
+            raise ValueError(f"SINGLE_CATEGORY_THRESHOLD must be between 0 and 1, got {cls.SINGLE_CATEGORY_THRESHOLD}")
 
         # Validate rate limit settings
         if cls.RATE_LIMIT_REQUESTS < 1:

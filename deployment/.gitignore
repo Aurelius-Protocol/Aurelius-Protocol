@@ -1,0 +1,9 @@
+# Server credentials - NEVER commit this!
+.passw
+
+# Backup files
+*.bak
+*~
+
+# Logs
+*.log

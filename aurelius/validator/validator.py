@@ -51,6 +51,7 @@ class Validator:
             provider_name=Config.MODERATION_PROVIDER,
             api_key=Config.OPENAI_API_KEY,
             category_weights=Config.MODERATION_CATEGORY_WEIGHTS,
+            single_category_threshold=Config.SINGLE_CATEGORY_THRESHOLD,
         )
 
         # Initialize per-miner rate limiter
@@ -364,19 +365,32 @@ class Validator:
             synapse.danger_score = danger_score
             synapse.category_scores = category_scores
 
-            # Step 5: Determine if accepted based on threshold
-            accepted = danger_score >= Config.DANGER_THRESHOLD
+            # Step 5: Determine if accepted based on dual logic
+            # Accept if EITHER: (1) any single category >= 0.8 OR (2) aggregate score >= threshold
+            high_category_triggered = moderation_result.high_category_triggered
+            aggregate_threshold_met = danger_score >= Config.DANGER_THRESHOLD
+            accepted = high_category_triggered or aggregate_threshold_met
             synapse.accepted = accepted
 
             if accepted:
                 synapse.rejection_reason = None
-                bt.logging.success(
-                    f"✓ Prompt ACCEPTED - Danger score {danger_score:.3f} >= threshold {Config.DANGER_THRESHOLD}"
-                )
+                if high_category_triggered:
+                    bt.logging.success(
+                        f"✓ Prompt ACCEPTED - High category '{moderation_result.high_category_name}' "
+                        f"score {moderation_result.high_category_score:.3f} >= {Config.SINGLE_CATEGORY_THRESHOLD}"
+                    )
+                else:
+                    bt.logging.success(
+                        f"✓ Prompt ACCEPTED - Aggregate score {danger_score:.3f} >= threshold {Config.DANGER_THRESHOLD}"
+                    )
             else:
-                synapse.rejection_reason = f"Danger score {danger_score:.3f} below threshold {Config.DANGER_THRESHOLD}"
+                synapse.rejection_reason = (
+                    f"Danger score {danger_score:.3f} below threshold {Config.DANGER_THRESHOLD} "
+                    f"and no category >= {Config.SINGLE_CATEGORY_THRESHOLD}"
+                )
                 bt.logging.info(
-                    f"✗ Prompt REJECTED - Danger score {danger_score:.3f} < threshold {Config.DANGER_THRESHOLD}"
+                    f"✗ Prompt REJECTED - Aggregate score {danger_score:.3f} < {Config.DANGER_THRESHOLD} "
+                    f"and no category >= {Config.SINGLE_CATEGORY_THRESHOLD}"
                 )
 
             # Calculate total processing duration
