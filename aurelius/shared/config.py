@@ -12,7 +12,12 @@ load_dotenv()
 class Config:
     """Subnet configuration loaded from environment variables."""
 
-    # OpenAI Configuration
+    # Chat Provider Configuration
+    CHAT_PROVIDER: str = os.getenv("CHAT_PROVIDER", "chutes")  # "chutes" or "openai"
+    CHUTES_API_KEY: str = os.getenv("CHUTES_API_KEY", "")
+    CHUTES_API_BASE_URL: str = os.getenv("CHUTES_API_BASE_URL", "https://llm.chutes.ai/v1")
+
+    # OpenAI Configuration (still required for moderation)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     OPENAI_MAX_TOKENS: int = int(os.getenv("OPENAI_MAX_TOKENS", "150"))
@@ -21,13 +26,14 @@ class Config:
     # Allowed vendors and their supported models
     _allowed_models_str = os.getenv(
         "ALLOWED_MODELS",
-        '{"openai": ["gpt-4o-mini", "gpt-4o", "o4-mini", "o3-mini", "gpt-4-turbo", "gpt-3.5-turbo"]}',
+        '{"chutes": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "deepseek-ai/DeepSeek-V3-0324"], '
+        '"openai": ["gpt-4o-mini", "gpt-4o", "o4-mini", "o3-mini", "gpt-4-turbo", "gpt-3.5-turbo"]}',
     )
     ALLOWED_MODELS: dict[str, list[str]] = json.loads(_allowed_models_str)
 
     # Default vendor and model (used when miner doesn't specify)
-    DEFAULT_VENDOR: str = os.getenv("DEFAULT_VENDOR", "openai")
-    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "gpt-4o-mini")
+    DEFAULT_VENDOR: str = os.getenv("DEFAULT_VENDOR", "chutes")
+    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "deepseek-ai/DeepSeek-V3")
 
     # Model parameter constraints
     MIN_TEMPERATURE: float = float(os.getenv("MIN_TEMPERATURE", "0.0"))
@@ -89,6 +95,20 @@ class Config:
     WINDOW_BLOCKS: int = int(os.getenv("WINDOW_BLOCKS", "1000"))  # ~3.3 hours at 12 sec/block
     HISTORY_RETENTION_BLOCKS: int = int(os.getenv("HISTORY_RETENTION_BLOCKS", "10000"))  # ~33 hours
     MAX_SUBMISSIONS_PER_WINDOW: int = int(os.getenv("MAX_SUBMISSIONS_PER_WINDOW", "100"))  # Cap submissions per miner per window
+
+    # Hit Rate Threshold (Reliability Filter)
+    MIN_HIT_RATE_THRESHOLD: float = float(os.getenv("MIN_HIT_RATE_THRESHOLD", "0.4"))  # Minimum acceptance rate (40% default) to receive rewards
+
+    # Top-N Reward Configuration (Winners Take All)
+    TOP_REWARDED_MINERS: int = int(os.getenv("TOP_REWARDED_MINERS", "3"))  # Only top N miners by contribution receive rewards (equal split)
+
+    # Novelty Detection Configuration
+    # Weight for novelty in final scoring: score = danger_sum × severity_avg × novelty_avg^NOVELTY_WEIGHT
+    NOVELTY_WEIGHT: float = float(os.getenv("NOVELTY_WEIGHT", "1.0"))  # Exponent for novelty multiplier (1.0 = linear)
+    # Minimum novelty score to receive any reward (filters out pure duplicates)
+    MIN_NOVELTY_THRESHOLD: float = float(os.getenv("MIN_NOVELTY_THRESHOLD", "0.3"))  # Below this = zero reward
+    # Central API endpoint for novelty checking (same as CENTRAL_API_ENDPOINT base)
+    NOVELTY_API_ENDPOINT: str = os.getenv("NOVELTY_API_ENDPOINT", "https://collector.aureliusaligned.ai/api/novelty")
 
     # Consensus Verification Configuration
     CONSENSUS_VALIDATORS: int = int(os.getenv("CONSENSUS_VALIDATORS", "5"))
@@ -155,12 +175,21 @@ class Config:
     @classmethod
     def validate(cls) -> None:
         """Validate that required configuration is present."""
-        if not cls.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is required. Please set it in your .env file.")
+        # Validate chat provider configuration
+        if cls.CHAT_PROVIDER not in ["chutes", "openai"]:
+            raise ValueError(f"CHAT_PROVIDER must be 'chutes' or 'openai', got '{cls.CHAT_PROVIDER}'")
 
-        # Validate API key format (basic check - OpenAI keys start with 'sk-')
-        if not cls.OPENAI_API_KEY.startswith("sk-"):
-            raise ValueError("OPENAI_API_KEY appears invalid (should start with 'sk-')")
+        if cls.CHAT_PROVIDER == "chutes":
+            if not cls.CHUTES_API_KEY:
+                raise ValueError("CHUTES_API_KEY is required when CHAT_PROVIDER=chutes. Please set it in your .env file.")
+        else:
+            # Using OpenAI for chat - validate OpenAI key format
+            if not cls.OPENAI_API_KEY.startswith("sk-"):
+                raise ValueError("OPENAI_API_KEY appears invalid (should start with 'sk-')")
+
+        # OpenAI API key is always required for moderation
+        if not cls.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required for moderation. Please set it in your .env file.")
 
         # Check .env file permissions if it exists
         import os
@@ -191,6 +220,17 @@ class Config:
         # Validate single category threshold
         if not 0 <= cls.SINGLE_CATEGORY_THRESHOLD <= 1:
             raise ValueError(f"SINGLE_CATEGORY_THRESHOLD must be between 0 and 1, got {cls.SINGLE_CATEGORY_THRESHOLD}")
+
+        # Validate hit rate threshold
+        if not 0 <= cls.MIN_HIT_RATE_THRESHOLD <= 1:
+            raise ValueError(f"MIN_HIT_RATE_THRESHOLD must be between 0 and 1, got {cls.MIN_HIT_RATE_THRESHOLD}")
+
+        # Validate novelty configuration
+        if cls.NOVELTY_WEIGHT < 0:
+            raise ValueError(f"NOVELTY_WEIGHT must be non-negative, got {cls.NOVELTY_WEIGHT}")
+
+        if not 0 <= cls.MIN_NOVELTY_THRESHOLD <= 1:
+            raise ValueError(f"MIN_NOVELTY_THRESHOLD must be between 0 and 1, got {cls.MIN_NOVELTY_THRESHOLD}")
 
         # Validate rate limit settings
         if cls.RATE_LIMIT_REQUESTS < 1:
@@ -359,7 +399,12 @@ class Config:
             warnings.append("CRITICAL: LOCAL_MODE is enabled - this should be FALSE in production")
 
         if "your-api-key" in cls.OPENAI_API_KEY.lower() or "your-openai" in cls.OPENAI_API_KEY.lower():
-            warnings.append("CRITICAL: OPENAI_API_KEY appears to be a placeholder - set a real API key")
+            warnings.append("CRITICAL: OPENAI_API_KEY appears to be a placeholder - set a real API key for moderation")
+
+        # Check Chutes API key if using Chutes provider
+        if cls.CHAT_PROVIDER == "chutes":
+            if "your-" in cls.CHUTES_API_KEY.lower() or not cls.CHUTES_API_KEY:
+                warnings.append("CRITICAL: CHUTES_API_KEY appears to be a placeholder or missing - set a real API key")
 
         # Security warnings
         if cls.DANGER_THRESHOLD < 0.3:

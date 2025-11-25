@@ -359,6 +359,7 @@ Key validator environment variables:
 | `BT_NETUID` | Subnet UID | ✓ Yes |
 | `DANGER_THRESHOLD` | Aggregate score threshold (0-1) | Default: 0.5, Testnet: 0.2 |
 | `SINGLE_CATEGORY_THRESHOLD` | Individual category threshold (0-1) | Default: 0.8 |
+| `MIN_HIT_RATE_THRESHOLD` | Minimum miner acceptance rate (0-1) | Default: 0.4, Testnet: 0.3 |
 | `OPENAI_MODEL` | Model to use | Default: gpt-4o-mini |
 | `ENABLE_CONSENSUS` | Enable multi-validator verification | Default: false |
 | `CENTRAL_API_ENDPOINT` | Data collection API URL | Optional |
@@ -418,7 +419,10 @@ When enabled, the validator will:
 Validators automatically calculate and set weights every `WEIGHT_UPDATE_INTERVAL` blocks (default: 100) based on:
 - **Window-based rewards**: Miners are rewarded proportionally to total danger scores of accepted submissions within the look-back window
 - **Minimum samples**: Miners must have at least `MIN_SAMPLES_FOR_WEIGHTS` accepted submissions
+- **Hit rate filter**: Miners must maintain minimum `MIN_HIT_RATE_THRESHOLD` acceptance rate (default: 40%) to receive any rewards
 - **Proportional distribution**: All qualifying miners split the reward pool based on their contribution
+
+**Hit Rate Threshold**: This reliability filter ensures miners are rewarded for quality over quantity. Miners who spam low-quality prompts with poor acceptance rates receive zero weight, even if they have some accepted submissions.
 
 ### Monitoring
 
