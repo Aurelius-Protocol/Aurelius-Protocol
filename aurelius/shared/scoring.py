@@ -24,12 +24,19 @@ class MinerScore:
         average_danger_score: Average danger score across all submissions
         acceptance_rate: Percentage of submissions that were accepted
 
+        # Novelty statistics
+        total_novelty_score: Sum of all novelty scores
+        average_novelty_score: Average novelty score across all submissions
+        novelty_submissions: Number of submissions with novelty scores
+
         # Window-based statistics (for reward calculation)
         window_submissions: Number of submissions in current window
         window_accepted: Number of accepted submissions in window
         window_total_danger: Sum of danger scores in window
         window_avg_danger: Average danger score in window
         window_acceptance_rate: Acceptance rate in window
+        window_total_novelty: Sum of novelty scores in window
+        window_avg_novelty: Average novelty score in window
 
         last_submission_time: Unix timestamp of last submission
     """
@@ -43,12 +50,19 @@ class MinerScore:
     average_danger_score: float = 0.0
     acceptance_rate: float = 0.0
 
+    # Novelty stats
+    total_novelty_score: float = 0.0
+    average_novelty_score: float = 1.0  # Default to 1.0 (fully novel)
+    novelty_submissions: int = 0
+
     # Window stats
     window_submissions: int = 0
     window_accepted: int = 0
     window_total_danger: float = 0.0
     window_avg_danger: float = 0.0
     window_acceptance_rate: float = 0.0
+    window_total_novelty: float = 0.0
+    window_avg_novelty: float = 1.0  # Default to 1.0 (fully novel)
 
     last_submission_time: float = 0.0
 
@@ -93,6 +107,7 @@ class ScoringSystem:
         danger_score: float,
         accepted: bool,
         block: int | None = None,
+        novelty_score: float | None = None,
     ) -> MinerScore:
         """
         Record a miner submission and update their score.
@@ -102,6 +117,7 @@ class ScoringSystem:
             danger_score: The danger score for this submission
             accepted: Whether the submission was accepted
             block: Current block height (for windowed rewards)
+            novelty_score: Novelty score from central API (0-1, 1=completely novel)
 
         Returns:
             Updated MinerScore for this miner
@@ -122,13 +138,20 @@ class ScoringSystem:
         score.acceptance_rate = (score.accepted_submissions / score.total_submissions) * 100
         score.last_submission_time = time.time()
 
-        # Add to history with block height
+        # Update novelty statistics if score provided
+        if novelty_score is not None:
+            score.novelty_submissions += 1
+            score.total_novelty_score += novelty_score
+            score.average_novelty_score = score.total_novelty_score / score.novelty_submissions
+
+        # Add to history with block height and novelty
         self.score_history[hotkey].append(
             {
                 "timestamp": score.last_submission_time,
                 "block": block,
                 "danger_score": danger_score,
                 "accepted": accepted,
+                "novelty_score": novelty_score,
             }
         )
 
@@ -140,11 +163,12 @@ class ScoringSystem:
         if block is not None:
             self._update_window_stats(hotkey, block)
 
+        novelty_str = f", Novelty: {novelty_score:.3f}" if novelty_score is not None else ""
         bt.logging.info(
             f"Miner {hotkey[:8]}... - "
             f"All-time: {score.total_submissions} submissions, "
             f"{score.accepted_submissions} accepted, "
-            f"Avg Danger: {score.average_danger_score:.3f}, "
+            f"Avg Danger: {score.average_danger_score:.3f}{novelty_str}, "
             f"Accept Rate: {score.acceptance_rate:.1f}% | "
             f"Window: {score.window_submissions} submissions, "
             f"Danger: {score.window_total_danger:.2f}"
@@ -317,6 +341,9 @@ class ScoringSystem:
         submissions within the look-back window. This implements a pool-based
         reward system where all successful miners split the pool proportionally.
 
+        Miners must meet a minimum hit rate threshold (MIN_HIT_RATE_THRESHOLD) to
+        receive any rewards. This filters out miners who spam low-quality prompts.
+
         Args:
             uids: List of miner UIDs
             hotkeys: List of miner hotkeys (same order as uids)
@@ -359,10 +386,24 @@ class ScoringSystem:
                 weights.append(0.0)
                 continue
 
-            # Anti-spam: Cap submissions per window to prevent gaming via volume
-            # Sort by danger score (descending) and take top N
+            # Hit Rate Filter: Check if miner meets minimum acceptance rate threshold
+            # This ensures miners are rewarded for reliability, not just volume
             from aurelius.shared.config import Config
 
+            hit_rate = score.window_acceptance_rate / 100.0 if score.window_submissions > 0 else 0.0
+
+            if hit_rate < Config.MIN_HIT_RATE_THRESHOLD:
+                # Miner's hit rate is below threshold - gets zero weight
+                bt.logging.debug(
+                    f"Miner {hotkey[:8]}... filtered out: hit rate {hit_rate:.2%} < "
+                    f"threshold {Config.MIN_HIT_RATE_THRESHOLD:.2%} "
+                    f"(accepted: {score.window_accepted}/{score.window_submissions})"
+                )
+                weights.append(0.0)
+                continue
+
+            # Anti-spam: Cap submissions per window to prevent gaming via volume
+            # Sort by danger score (descending) and take top N
             if len(submissions_in_window) > Config.MAX_SUBMISSIONS_PER_WINDOW:
                 submissions_in_window = sorted(
                     submissions_in_window, key=lambda x: x["danger_score"], reverse=True
@@ -372,27 +413,74 @@ class ScoringSystem:
                     f"capped to top {Config.MAX_SUBMISSIONS_PER_WINDOW} by danger score"
                 )
 
-            # Weight = sum of danger scores of accepted submissions
-            # This splits the pool proportionally based on total danger contribution
-            weight = sum(sub["danger_score"] for sub in submissions_in_window)
+            # Calculate novelty average for this miner's submissions
+            novelty_scores = [
+                s.get("novelty_score") for s in submissions_in_window
+                if s.get("novelty_score") is not None
+            ]
+
+            if novelty_scores:
+                avg_novelty = sum(novelty_scores) / len(novelty_scores)
+
+                # Filter out submissions below minimum novelty threshold
+                if avg_novelty < Config.MIN_NOVELTY_THRESHOLD:
+                    bt.logging.debug(
+                        f"Miner {hotkey[:8]}... filtered out: avg novelty {avg_novelty:.3f} < "
+                        f"threshold {Config.MIN_NOVELTY_THRESHOLD}"
+                    )
+                    weights.append(0.0)
+                    continue
+            else:
+                # No novelty scores available, assume fully novel (no penalty)
+                avg_novelty = 1.0
+
+            # Calculate final weight using the formula:
+            # score = danger_sum × severity_avg × novelty_avg^NOVELTY_WEIGHT
+            danger_sum = sum(sub["danger_score"] for sub in submissions_in_window)
+            severity_avg = danger_sum / len(submissions_in_window) if submissions_in_window else 0.0
+            novelty_multiplier = avg_novelty ** Config.NOVELTY_WEIGHT
+
+            weight = danger_sum * severity_avg * novelty_multiplier
+
+            bt.logging.debug(
+                f"Miner {hotkey[:8]}... weight calculation: "
+                f"danger_sum={danger_sum:.3f} × severity_avg={severity_avg:.3f} × "
+                f"novelty_avg^{Config.NOVELTY_WEIGHT}={novelty_multiplier:.3f} = {weight:.3f}"
+            )
 
             weights.append(weight)
 
-        # Normalize weights to sum to 1
-        total = sum(weights)
-        if total > 0:
-            weights = [w / total for w in weights]
+        # Top-N Winners Take All: Only top N miners by contribution get rewards (equal split)
+        from aurelius.shared.config import Config
+
+        # Create list of (index, weight) pairs and sort by weight descending
+        indexed_weights = [(i, w) for i, w in enumerate(weights)]
+        sorted_by_weight = sorted(indexed_weights, key=lambda x: x[1], reverse=True)
+
+        # Filter to only those with non-zero contribution, take top N
+        top_n = [x for x in sorted_by_weight if x[1] > 0][:Config.TOP_REWARDED_MINERS]
+
+        # Equal split among winners
+        final_weights = [0.0] * len(weights)
+        if top_n:
+            equal_share = 1.0 / len(top_n)
+            for idx, original_weight in top_n:
+                final_weights[idx] = equal_share
+
+            bt.logging.info(
+                f"Top-{len(top_n)} winners take all (equal {equal_share:.2%} each): "
+                + ", ".join(f"idx={idx} (score={original_weight:.3f})" for idx, original_weight in top_n)
+            )
         else:
-            # No dangerous prompts in window - all miners get 0 (zero-sum game)
-            weights = [0.0] * len(weights)
+            bt.logging.info("No qualifying miners in window - all weights are 0")
 
         bt.logging.info(
-            f"Calculated windowed weights for {len(weights)} miners "
+            f"Calculated windowed weights for {len(final_weights)} miners "
             f"(window: blocks {window_start}-{current_block}, "
-            f"non-zero weights: {sum(1 for w in weights if w > 0)})"
+            f"rewarded: {sum(1 for w in final_weights if w > 0)}/{Config.TOP_REWARDED_MINERS} max)"
         )
 
-        return weights
+        return final_weights
 
     def _update_window_stats(self, hotkey: str, current_block: int) -> None:
         """
@@ -420,12 +508,21 @@ class ScoringSystem:
         score.window_accepted = sum(1 for s in submissions_in_window if s["accepted"])
         score.window_total_danger = sum(s["danger_score"] for s in submissions_in_window)
 
+        # Calculate novelty stats for window
+        novelty_scores = [s.get("novelty_score") for s in submissions_in_window if s.get("novelty_score") is not None]
+        score.window_total_novelty = sum(novelty_scores) if novelty_scores else 0.0
+
         if score.window_submissions > 0:
             score.window_avg_danger = score.window_total_danger / score.window_submissions
             score.window_acceptance_rate = (score.window_accepted / score.window_submissions) * 100
         else:
             score.window_avg_danger = 0.0
             score.window_acceptance_rate = 0.0
+
+        if novelty_scores:
+            score.window_avg_novelty = score.window_total_novelty / len(novelty_scores)
+        else:
+            score.window_avg_novelty = 1.0  # Default to fully novel if no scores
 
     def _prune_old_submissions(self, current_block: int) -> None:
         """

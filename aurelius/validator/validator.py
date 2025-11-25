@@ -1,4 +1,4 @@
-"""Validator implementation - processes prompts using OpenAI API."""
+"""Validator implementation - processes prompts using configurable chat providers."""
 
 import argparse
 import sys
@@ -14,13 +14,14 @@ from aurelius.shared.config import Config
 from aurelius.shared.consensus import ConsensusCoordinator
 from aurelius.shared.dataset_logger import DatasetLogger
 from aurelius.shared.moderation import create_moderation_provider
+from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
 
 
 class Validator:
-    """Validator that processes prompts using OpenAI API."""
+    """Validator that processes prompts using configurable chat providers (Chutes.ai or OpenAI)."""
 
     def __init__(self):
         """Initialize the validator."""
@@ -41,9 +42,18 @@ class Validator:
                 bt.logging.warning(f"  - {warning}")
             bt.logging.warning("=" * 80)
 
-        # Initialize OpenAI client
-        self.openai_client = OpenAI(api_key=Config.OPENAI_API_KEY)
-        self.model = Config.OPENAI_MODEL
+        # Initialize chat client based on provider
+        if Config.CHAT_PROVIDER == "chutes":
+            self.chat_client = OpenAI(
+                api_key=Config.CHUTES_API_KEY,
+                base_url=Config.CHUTES_API_BASE_URL,
+            )
+            self.model = Config.DEFAULT_MODEL  # "deepseek-ai/DeepSeek-V3"
+            bt.logging.info(f"Using Chutes.ai chat provider with model: {self.model}")
+        else:
+            self.chat_client = OpenAI(api_key=Config.OPENAI_API_KEY)
+            self.model = Config.OPENAI_MODEL
+            bt.logging.info(f"Using OpenAI chat provider with model: {self.model}")
 
         # Initialize moderation provider
         bt.logging.info(f"Initializing moderation provider: {Config.MODERATION_PROVIDER}")
@@ -75,6 +85,13 @@ class Validator:
             window_blocks=Config.WINDOW_BLOCKS,
             history_retention_blocks=Config.HISTORY_RETENTION_BLOCKS,
         )
+
+        # Initialize novelty client for checking prompt uniqueness
+        self.novelty_client = get_novelty_client()
+        if self.novelty_client.is_available():
+            bt.logging.info(f"Novelty detection enabled: {Config.NOVELTY_API_ENDPOINT}")
+        else:
+            bt.logging.warning("Novelty detection not available (no API endpoint configured)")
 
         # Initialize consensus coordinator (will be set after wallet/subtensor init)
         self.consensus_coordinator = None
@@ -129,7 +146,7 @@ class Validator:
             bt.logging.info("Consensus verification disabled")
 
         bt.logging.info(f"Validator initialized on port {Config.BT_PORT_VALIDATOR}")
-        bt.logging.info(f"Using OpenAI model: {self.model}")
+        bt.logging.info(f"Using chat model: {self.model} (provider: {Config.CHAT_PROVIDER})")
         bt.logging.info(f"Danger threshold: {Config.DANGER_THRESHOLD}")
         bt.logging.info(
             f"Rate limit: {Config.RATE_LIMIT_REQUESTS} requests per {Config.RATE_LIMIT_WINDOW_HOURS} hour(s)"
@@ -329,7 +346,7 @@ class Validator:
             if actual_pres_penalty is not None:
                 api_params["presence_penalty"] = actual_pres_penalty
 
-            response = self.openai_client.chat.completions.create(**api_params)
+            response = self.chat_client.chat.completions.create(**api_params)
             api_duration = (time.time() - api_start_time) * 1000  # Convert to milliseconds
             timing_metrics["api_call_duration"] = round(api_duration, 2)
 
@@ -472,6 +489,7 @@ class Validator:
         """
         Log dataset entry in background thread to avoid blocking response.
         Collects network context here since it makes blocking blockchain calls.
+        Also checks novelty for accepted prompts.
 
         Args:
             prompt: The prompt text
@@ -488,6 +506,19 @@ class Validator:
 
             # Collect network context (blocking blockchain calls - OK in background)
             network_context = self._get_network_context(miner_hotkey)
+
+            # Check novelty for accepted prompts (novelty is calculated by central API when logged)
+            # The central API will return the novelty score in the response
+            novelty_score = None
+            if accepted and self.novelty_client.is_available():
+                novelty_result = self.novelty_client.check_novelty(prompt)
+                if novelty_result:
+                    novelty_score = novelty_result.novelty_score
+                    bt.logging.info(
+                        f"Novelty check: score={novelty_score:.3f}, "
+                        f"max_similarity={novelty_result.max_similarity:.3f}, "
+                        f"similar_count={novelty_result.similar_count}"
+                    )
 
             # Log to dataset
             self.dataset_logger.log_entry(
@@ -508,12 +539,13 @@ class Validator:
                 network_context=network_context,
             )
 
-            # Update scoring system
+            # Update scoring system with novelty
             self.scoring_system.record_submission(
                 hotkey=miner_hotkey or "unknown",
                 danger_score=danger_score,
                 accepted=accepted,
                 block=self._get_current_block(),
+                novelty_score=novelty_score,
             )
 
             bt.logging.debug("Background logging completed")
@@ -572,7 +604,7 @@ class Validator:
             scores = []
             for i in range(runs_per_validator):
                 try:
-                    response = self.openai_client.chat.completions.create(
+                    response = self.chat_client.chat.completions.create(
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=Config.OPENAI_MAX_TOKENS,
@@ -621,6 +653,18 @@ class Validator:
                 f"Consensus result: {consensus_result['votes']} (consensus: {consensus_result['consensus']})"
             )
 
+            # Check novelty for prompts that pass consensus
+            novelty_score = None
+            if consensus_result["consensus"] and self.novelty_client.is_available():
+                novelty_result = self.novelty_client.check_novelty(prompt)
+                if novelty_result:
+                    novelty_score = novelty_result.novelty_score
+                    bt.logging.info(
+                        f"Novelty check: score={novelty_score:.3f}, "
+                        f"max_similarity={novelty_result.max_similarity:.3f}, "
+                        f"similar_count={novelty_result.similar_count}"
+                    )
+
             # Step 5: If consensus reached, log to dataset
             if consensus_result["consensus"]:
                 # Calculate distribution statistics from all validator runs
@@ -666,12 +710,13 @@ class Validator:
                     network_context=network_context,
                 )
 
-                # Update scoring (accepted)
+                # Update scoring (accepted) with novelty
                 self.scoring_system.record_submission(
                     hotkey=miner_hotkey or "unknown",
                     danger_score=initial_danger_score,
                     accepted=True,
                     block=self.subtensor.block if self.subtensor else None,
+                    novelty_score=novelty_score,
                 )
 
                 bt.logging.success("✓ Consensus PASSED - Entry added to dataset")
@@ -725,6 +770,7 @@ class Validator:
                     danger_score=initial_danger_score,
                     accepted=False,  # Failed consensus = not accepted
                     block=self.subtensor.block if self.subtensor else None,
+                    novelty_score=None,  # No novelty for rejected prompts
                 )
 
                 bt.logging.warning("✗ Consensus FAILED - Entry logged as rejected")
@@ -819,7 +865,7 @@ class Validator:
             # Run the prompt multiple times (using adaptive runs_required)
             for i in range(runs_required):
                 try:
-                    response = self.openai_client.chat.completions.create(
+                    response = self.chat_client.chat.completions.create(
                         model=self.model,
                         messages=[{"role": "user", "content": prompt}],
                         max_tokens=Config.OPENAI_MAX_TOKENS,
