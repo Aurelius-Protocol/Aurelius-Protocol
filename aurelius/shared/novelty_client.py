@@ -65,12 +65,18 @@ class NoveltyClient:
         """Check if novelty detection is available."""
         return bool(self.api_endpoint)
 
-    def check_novelty(self, prompt: str, include_similar_prompt: bool = False) -> NoveltyResult | None:
+    def check_novelty(
+        self,
+        prompt: str,
+        prompt_embedding: list[float] | None = None,
+        include_similar_prompt: bool = False,
+    ) -> NoveltyResult | None:
         """
         Check novelty of a prompt against existing database.
 
         Args:
             prompt: The prompt text to check
+            prompt_embedding: Pre-computed embedding (384 dimensions). Required by API.
             include_similar_prompt: Whether to include similar prompt text in response
 
         Returns:
@@ -80,11 +86,16 @@ class NoveltyClient:
             bt.logging.debug("Novelty check skipped: no API endpoint configured")
             return None
 
+        if not prompt_embedding:
+            bt.logging.debug("Novelty check skipped: no embedding provided")
+            return None
+
         try:
             response = requests.post(
                 f"{self.api_endpoint}/check",
                 json={
                     "prompt": prompt,
+                    "prompt_embedding": prompt_embedding,
                     "include_similar_prompt": include_similar_prompt,
                 },
                 headers={"Content-Type": "application/json"},
@@ -99,9 +110,12 @@ class NoveltyClient:
                     similar_count=data.get("similar_count", 0),
                     most_similar_id=data.get("most_similar_id"),
                 )
+            elif response.status_code == 400:
+                bt.logging.warning(f"Novelty check: bad request - {response.text}")
+                return None
             elif response.status_code == 503:
-                # Service unavailable (embedding service not configured)
-                bt.logging.debug("Novelty check: embedding service not available")
+                # Service unavailable
+                bt.logging.debug("Novelty check: service not available")
                 return None
             else:
                 bt.logging.warning(f"Novelty check failed: HTTP {response.status_code} - {response.text}")
