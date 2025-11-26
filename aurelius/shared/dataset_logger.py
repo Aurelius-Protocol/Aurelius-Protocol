@@ -44,6 +44,7 @@ class DatasetEntry:
         model_config: Model configuration parameters (temperature, max_tokens, etc.)
         timing_metrics: Timing information (API call duration, moderation, total)
         network_context: Network context (subnet_uid, block_height, stakes)
+        prompt_embedding: Pre-computed embedding vector (384 dimensions)
     """
 
     timestamp: str
@@ -72,6 +73,7 @@ class DatasetEntry:
     model_config: dict | None = None
     timing_metrics: dict | None = None
     network_context: dict | None = None
+    prompt_embedding: list[float] | None = None
 
 
 class DatasetLogger:
@@ -261,6 +263,7 @@ class DatasetLogger:
         model_config: dict | None = None,
         timing_metrics: dict | None = None,
         network_context: dict | None = None,
+        prompt_embedding: list[float] | None = None,
     ) -> None:
         """
         Log a dataset entry.
@@ -294,6 +297,7 @@ class DatasetLogger:
             model_config: Model configuration parameters
             timing_metrics: Timing information
             network_context: Network context data
+            prompt_embedding: Pre-computed embedding vector (384 dimensions)
         """
         entry = DatasetEntry(
             timestamp=datetime.now(timezone.utc).isoformat(),
@@ -322,6 +326,7 @@ class DatasetLogger:
             model_config=model_config,
             timing_metrics=timing_metrics,
             network_context=network_context,
+            prompt_embedding=prompt_embedding,
         )
 
         # Save locally (blocking, fast)

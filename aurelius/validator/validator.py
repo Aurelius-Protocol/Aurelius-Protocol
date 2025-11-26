@@ -14,6 +14,7 @@ from aurelius.shared.config import Config
 from aurelius.shared.consensus import ConsensusCoordinator
 from aurelius.shared.dataset_logger import DatasetLogger
 from aurelius.shared.moderation import create_moderation_provider
+from aurelius.shared.embedding_client import get_embedding_client
 from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
@@ -85,6 +86,13 @@ class Validator:
             window_blocks=Config.WINDOW_BLOCKS,
             history_retention_blocks=Config.HISTORY_RETENTION_BLOCKS,
         )
+
+        # Initialize embedding client for generating prompt embeddings
+        self.embedding_client = get_embedding_client()
+        if self.embedding_client.is_available():
+            bt.logging.info(f"Embedding client enabled: {self.embedding_client._get_embeddings_url()}")
+        else:
+            bt.logging.warning("Embedding client not available (no API key configured)")
 
         # Initialize novelty client for checking prompt uniqueness
         self.novelty_client = get_novelty_client()
@@ -507,20 +515,32 @@ class Validator:
             # Collect network context (blocking blockchain calls - OK in background)
             network_context = self._get_network_context(miner_hotkey)
 
-            # Check novelty for accepted prompts (novelty is calculated by central API when logged)
-            # The central API will return the novelty score in the response
+            # Generate embedding for accepted prompts (validator pays for this API call)
+            prompt_embedding = None
             novelty_score = None
-            if accepted and self.novelty_client.is_available():
-                novelty_result = self.novelty_client.check_novelty(prompt)
-                if novelty_result:
-                    novelty_score = novelty_result.novelty_score
-                    bt.logging.info(
-                        f"Novelty check: score={novelty_score:.3f}, "
-                        f"max_similarity={novelty_result.max_similarity:.3f}, "
-                        f"similar_count={novelty_result.similar_count}"
-                    )
 
-            # Log to dataset
+            if accepted and self.embedding_client.is_available():
+                prompt_embedding = self.embedding_client.get_embedding(prompt)
+                if prompt_embedding:
+                    bt.logging.debug(f"Generated embedding: {len(prompt_embedding)} dimensions")
+
+                    # Check novelty using the embedding we just generated
+                    if self.novelty_client.is_available():
+                        novelty_result = self.novelty_client.check_novelty(
+                            prompt=prompt,
+                            prompt_embedding=prompt_embedding,
+                        )
+                        if novelty_result:
+                            novelty_score = novelty_result.novelty_score
+                            bt.logging.info(
+                                f"Novelty check: score={novelty_score:.3f}, "
+                                f"max_similarity={novelty_result.max_similarity:.3f}, "
+                                f"similar_count={novelty_result.similar_count}"
+                            )
+                else:
+                    bt.logging.warning("Failed to generate embedding for prompt")
+
+            # Log to dataset (includes embedding for storage in central API)
             self.dataset_logger.log_entry(
                 prompt=prompt,
                 response=response,
@@ -537,6 +557,7 @@ class Validator:
                 model_config=model_config,
                 timing_metrics=timing_metrics,
                 network_context=network_context,
+                prompt_embedding=prompt_embedding,
             )
 
             # Update scoring system with novelty
@@ -653,17 +674,26 @@ class Validator:
                 f"Consensus result: {consensus_result['votes']} (consensus: {consensus_result['consensus']})"
             )
 
-            # Check novelty for prompts that pass consensus
+            # Generate embedding and check novelty for prompts that pass consensus
+            prompt_embedding = None
             novelty_score = None
-            if consensus_result["consensus"] and self.novelty_client.is_available():
-                novelty_result = self.novelty_client.check_novelty(prompt)
-                if novelty_result:
-                    novelty_score = novelty_result.novelty_score
-                    bt.logging.info(
-                        f"Novelty check: score={novelty_score:.3f}, "
-                        f"max_similarity={novelty_result.max_similarity:.3f}, "
-                        f"similar_count={novelty_result.similar_count}"
-                    )
+            if consensus_result["consensus"] and self.embedding_client.is_available():
+                prompt_embedding = self.embedding_client.get_embedding(prompt)
+                if prompt_embedding:
+                    bt.logging.debug(f"Generated embedding: {len(prompt_embedding)} dimensions")
+
+                    if self.novelty_client.is_available():
+                        novelty_result = self.novelty_client.check_novelty(
+                            prompt=prompt,
+                            prompt_embedding=prompt_embedding,
+                        )
+                        if novelty_result:
+                            novelty_score = novelty_result.novelty_score
+                            bt.logging.info(
+                                f"Novelty check: score={novelty_score:.3f}, "
+                                f"max_similarity={novelty_result.max_similarity:.3f}, "
+                                f"similar_count={novelty_result.similar_count}"
+                            )
 
             # Step 5: If consensus reached, log to dataset
             if consensus_result["consensus"]:
@@ -708,6 +738,7 @@ class Validator:
                     model_config=model_config,
                     timing_metrics=timing_metrics,
                     network_context=network_context,
+                    prompt_embedding=prompt_embedding,
                 )
 
                 # Update scoring (accepted) with novelty
@@ -715,7 +746,7 @@ class Validator:
                     hotkey=miner_hotkey or "unknown",
                     danger_score=initial_danger_score,
                     accepted=True,
-                    block=self.subtensor.block if self.subtensor else None,
+                    block=self._get_current_block(),
                     novelty_score=novelty_score,
                 )
 
@@ -769,7 +800,7 @@ class Validator:
                     hotkey=miner_hotkey or "unknown",
                     danger_score=initial_danger_score,
                     accepted=False,  # Failed consensus = not accepted
-                    block=self.subtensor.block if self.subtensor else None,
+                    block=self._get_current_block(),
                     novelty_score=None,  # No novelty for rejected prompts
                 )
 
