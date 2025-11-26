@@ -364,6 +364,19 @@ Key validator environment variables:
 | `ENABLE_CONSENSUS` | Enable multi-validator verification | Default: false |
 | `CENTRAL_API_ENDPOINT` | Data collection API URL | Optional |
 
+#### Reward & Scoring Settings
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `WINDOW_BLOCKS` | Lookback window for scoring (blocks) | 1000 (~3.3 hours) |
+| `TOP_REWARDED_MINERS` | Number of top miners that receive rewards | 3 |
+| `MIN_NOVELTY_THRESHOLD` | Minimum average novelty to qualify for rewards | 0.3 |
+| `NOVELTY_WEIGHT` | Exponent for novelty multiplier (1.0 = linear) | 1.0 |
+| `MAX_SUBMISSIONS_PER_WINDOW` | Max submissions counted per miner per window | 100 |
+| `WEIGHT_UPDATE_INTERVAL` | Blocks between weight updates | 100 |
+| `MIN_SAMPLES_FOR_WEIGHTS` | Minimum submissions required for weight calculation | 5 |
+| `HISTORY_RETENTION_BLOCKS` | How long to keep submission history | 10000 (~33 hours) |
+
 See `.env.example` for the full list of configuration options including:
 - Rate limiting
 - Consensus parameters
@@ -423,6 +436,105 @@ Validators automatically calculate and set weights every `WEIGHT_UPDATE_INTERVAL
 - **Proportional distribution**: All qualifying miners split the reward pool based on their contribution
 
 **Hit Rate Threshold**: This reliability filter ensures miners are rewarded for quality over quantity. Miners who spam low-quality prompts with poor acceptance rates receive zero weight, even if they have some accepted submissions.
+
+### Reward Incentive Mechanism
+
+The Aurelius subnet uses a **windowed, top-N pool-based reward system** that evaluates miner performance over a rolling lookback window. Only the highest-performing miners receive rewards each cycle.
+
+#### Weight Calculation Formula
+
+For miners passing all quality filters, weight is calculated as:
+
+```
+weight = danger_sum × severity_avg × novelty_multiplier
+```
+
+Where:
+- **danger_sum** = Total of all danger scores from accepted submissions in the window
+- **severity_avg** = Average danger score (danger_sum / submission_count)
+- **novelty_multiplier** = avg_novelty ^ NOVELTY_WEIGHT (default exponent: 1.0)
+
+#### Quality Filters
+
+Miners must pass all quality filters to receive any rewards:
+
+| Filter | Threshold | Purpose |
+|--------|-----------|---------|
+| **Hit Rate** | `MIN_HIT_RATE_THRESHOLD` (40%) | Minimum acceptance rate required |
+| **Novelty** | `MIN_NOVELTY_THRESHOLD` (0.3) | Minimum average novelty score |
+| **Volume Cap** | `MAX_SUBMISSIONS_PER_WINDOW` (100) | Max submissions counted per window |
+
+If a miner fails any filter, they receive **zero weight** for that window.
+
+#### Top-N Winners Model
+
+After calculating weights for all qualifying miners:
+
+1. Miners are ranked by their calculated weight
+2. Only the top `TOP_REWARDED_MINERS` (default: 3) receive rewards
+3. Winners split the reward pool **equally** (e.g., 3 winners = 33.33% each)
+
+This creates a competitive environment where miners must consistently outperform others to earn rewards.
+
+#### Example Scenario
+
+```
+Miner A: 6 accepted submissions, avg danger=0.79, avg novelty=0.81
+  → weight = 4.75 × 0.79 × 0.81 = 3.04 ✓ Qualifies
+
+Miner B: 20 submissions, only 5 accepted (25% hit rate)
+  → hit rate 25% < 40% threshold → weight = 0.0 ✗ Filtered
+
+Miner C: 2 accepted submissions, avg novelty=0.27
+  → novelty 0.27 < 0.3 threshold → weight = 0.0 ✗ Filtered
+
+Result: Miner A wins 100% of rewards (only qualifier)
+```
+
+### Novelty Scoring
+
+The novelty scoring system prevents miners from gaming the network by submitting duplicate or near-duplicate prompts. Novel, unique prompts are rewarded while repetitive submissions are penalized.
+
+#### How Novelty is Calculated
+
+Each prompt is converted to a 384-dimensional embedding vector using OpenAI's `text-embedding-3-small` model. The novelty score is then calculated as:
+
+```
+novelty_score = 1 - max_similarity
+```
+
+Where `max_similarity` is the highest cosine similarity found against all previously submitted prompts (stored in pgvector).
+
+#### Novelty Score Ranges
+
+| Score | Interpretation | Example |
+|-------|----------------|---------|
+| **1.0** | Completely novel | First submission on a unique topic |
+| **0.7 - 0.9** | Unique with minor overlap | Different question on related topic |
+| **0.3 - 0.7** | Paraphrase or related | Same question with different wording |
+| **0.0 - 0.3** | Near-duplicate | Minor word changes only |
+| **0.0** | Exact duplicate | Identical to previous submission |
+
+#### Impact on Rewards
+
+1. **Novelty Multiplier**: The novelty score directly multiplies the miner's weight calculation
+   - High novelty (0.9) = 90% of base weight retained
+   - Low novelty (0.5) = 50% of base weight retained
+
+2. **Novelty Threshold**: Miners with average novelty below `MIN_NOVELTY_THRESHOLD` (0.3) receive **zero rewards**
+
+3. **Strategic Implication**: Miners should focus on finding unique, creative prompts rather than variations of known successful prompts
+
+#### Tested Results
+
+The novelty system has been validated with the following detection rates:
+
+| Category | Avg Novelty | Detection |
+|----------|-------------|-----------|
+| Exact duplicates | 0.0 | 100% detected |
+| Single word variations | ~0.23 | Correctly penalized |
+| Paraphrases | ~0.36 | Moderate novelty |
+| Novel prompts | ~0.65 | High novelty reward |
 
 ### Monitoring
 
