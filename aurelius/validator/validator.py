@@ -540,6 +540,9 @@ class Validator:
                 else:
                     bt.logging.warning("Failed to generate embedding for prompt")
 
+            # Resolve miner UID and coldkey from hotkey
+            miner_uid, miner_coldkey = self._get_miner_info(miner_hotkey)
+
             # Log to dataset (includes embedding for storage in central API)
             self.dataset_logger.log_entry(
                 prompt=prompt,
@@ -548,6 +551,8 @@ class Validator:
                 category_scores=category_scores,
                 accepted=accepted,
                 miner_hotkey=miner_hotkey,
+                miner_uid=miner_uid,
+                miner_coldkey=miner_coldkey,
                 validator_hotkey=self.wallet.hotkey.ss58_address if self.wallet else None,
                 validator_uid=self.uid if hasattr(self, "uid") else None,
                 validator_coldkey=self.wallet.coldkeypub.ss58_address if self.wallet and hasattr(self.wallet, "coldkeypub") else None,
@@ -713,6 +718,9 @@ class Validator:
                 total_runs = len(all_scores)
                 validator_count = consensus_result.get("total_validators", len(consensus_result["vote_details"]))
 
+                # Resolve miner UID and coldkey from hotkey
+                miner_uid, miner_coldkey = self._get_miner_info(miner_hotkey)
+
                 self.dataset_logger.log_entry(
                     prompt=prompt,
                     response=initial_response,  # Use initial response sent to miner
@@ -720,6 +728,8 @@ class Validator:
                     category_scores=category_scores,
                     accepted=True,
                     miner_hotkey=miner_hotkey,
+                    miner_uid=miner_uid,
+                    miner_coldkey=miner_coldkey,
                     validator_hotkey=self.wallet.hotkey.ss58_address if self.wallet else None,
                     validator_uid=self.uid if hasattr(self, "uid") else None,
                     validator_coldkey=self.wallet.coldkeypub.ss58_address if self.wallet and hasattr(self.wallet, "coldkeypub") else None,
@@ -769,6 +779,9 @@ class Validator:
                 total_runs = len(all_scores)
                 validator_count = consensus_result.get("total_validators", len(consensus_result["vote_details"]))
 
+                # Resolve miner UID and coldkey from hotkey
+                miner_uid, miner_coldkey = self._get_miner_info(miner_hotkey)
+
                 self.dataset_logger.log_entry(
                     prompt=prompt,
                     response=initial_response,
@@ -776,6 +789,8 @@ class Validator:
                     category_scores=category_scores,
                     accepted=False,  # Failed consensus = not accepted
                     miner_hotkey=miner_hotkey,
+                    miner_uid=miner_uid,
+                    miner_coldkey=miner_coldkey,
                     validator_hotkey=self.wallet.hotkey.ss58_address if self.wallet else None,
                     validator_uid=self.uid if hasattr(self, "uid") else None,
                     validator_coldkey=self.wallet.coldkeypub.ss58_address if self.wallet and hasattr(self.wallet, "coldkeypub") else None,
@@ -1079,6 +1094,29 @@ class Validator:
 
         except Exception as e:
             bt.logging.error(f"  Error during diagnosis: {e}")
+
+    def _get_miner_info(self, miner_hotkey: str | None) -> tuple[int | None, str | None]:
+        """
+        Resolve miner UID and coldkey from hotkey using the metagraph.
+
+        Args:
+            miner_hotkey: The miner's hotkey address
+
+        Returns:
+            Tuple of (miner_uid, miner_coldkey) if found, (None, None) otherwise
+        """
+        if not miner_hotkey or not self.subtensor:
+            return None, None
+        try:
+            with self.subtensor_lock:
+                metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+            for uid, hotkey in enumerate(metagraph.hotkeys):
+                if hotkey == miner_hotkey:
+                    coldkey = metagraph.coldkeys[uid] if hasattr(metagraph, 'coldkeys') else None
+                    return uid, coldkey
+            return None, None
+        except Exception:
+            return None, None
 
     def _get_network_context(self, miner_hotkey: str | None = None) -> dict:
         """

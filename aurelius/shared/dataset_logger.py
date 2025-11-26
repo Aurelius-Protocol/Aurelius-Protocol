@@ -26,6 +26,7 @@ class DatasetEntry:
         accepted: Whether prompt was accepted (met threshold)
         miner_hotkey: Miner's hotkey
         miner_uid: Miner's UID (if available)
+        miner_coldkey: Miner's coldkey (if available)
         validator_hotkey: Validator's hotkey
         validator_uid: Validator's UID (if available)
         validator_coldkey: Validator's coldkey (if available)
@@ -55,6 +56,7 @@ class DatasetEntry:
     accepted: bool
     miner_hotkey: str | None = None
     miner_uid: int | None = None
+    miner_coldkey: str | None = None
     validator_hotkey: str | None = None
     validator_uid: int | None = None
     validator_coldkey: str | None = None
@@ -245,6 +247,7 @@ class DatasetLogger:
         accepted: bool,
         miner_hotkey: str | None = None,
         miner_uid: int | None = None,
+        miner_coldkey: str | None = None,
         validator_hotkey: str | None = None,
         validator_uid: int | None = None,
         validator_coldkey: str | None = None,
@@ -279,6 +282,7 @@ class DatasetLogger:
             accepted: Whether prompt met threshold
             miner_hotkey: Miner's hotkey
             miner_uid: Miner's UID
+            miner_coldkey: Miner's coldkey
             validator_hotkey: Validator's hotkey
             validator_uid: Validator's UID
             validator_coldkey: Validator's coldkey
@@ -308,6 +312,7 @@ class DatasetLogger:
             accepted=accepted,
             miner_hotkey=miner_hotkey,
             miner_uid=miner_uid,
+            miner_coldkey=miner_coldkey,
             validator_hotkey=validator_hotkey,
             validator_uid=validator_uid,
             validator_coldkey=validator_coldkey,
