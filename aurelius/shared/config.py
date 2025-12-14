@@ -167,6 +167,12 @@ class Config:
     SIMULATED_BLOCK_TIME: float = float(os.getenv("SIMULATED_BLOCK_TIME", "12.0"))  # seconds per block
     FAST_BLOCK_MODE: bool = os.getenv("FAST_BLOCK_MODE", "false").lower() == "true"  # 1 sec per block
 
+    # Miner Burn Configuration
+    # Burns a percentage of miner emissions by allocating weight to a registered burn UID
+    MINER_BURN_ENABLED: bool = os.getenv("MINER_BURN_ENABLED", "false").lower() == "true"
+    MINER_BURN_PERCENTAGE: float = float(os.getenv("MINER_BURN_PERCENTAGE", "0.5"))  # 50% default
+    BURN_UID: int | None = int(os.getenv("BURN_UID")) if os.getenv("BURN_UID") else None
+
     # Local Multi-Validator Testing - Comma-separated list of other validators
     # Format: "host1:port1,host2:port2,host3:port3"
     # Example: "127.0.0.1:8092,127.0.0.1:8093,127.0.0.1:8094,127.0.0.1:8095"
@@ -231,6 +237,16 @@ class Config:
 
         if not 0 <= cls.MIN_NOVELTY_THRESHOLD <= 1:
             raise ValueError(f"MIN_NOVELTY_THRESHOLD must be between 0 and 1, got {cls.MIN_NOVELTY_THRESHOLD}")
+
+        # Validate miner burn configuration
+        if not 0 <= cls.MINER_BURN_PERCENTAGE <= 1:
+            raise ValueError(f"MINER_BURN_PERCENTAGE must be between 0 and 1, got {cls.MINER_BURN_PERCENTAGE}")
+
+        if cls.MINER_BURN_ENABLED and cls.BURN_UID is None:
+            raise ValueError(
+                "BURN_UID must be set when MINER_BURN_ENABLED=true. "
+                "Register a burn hotkey on the subnet and set BURN_UID to its UID."
+            )
 
         # Validate rate limit settings
         if cls.RATE_LIMIT_REQUESTS < 1:
