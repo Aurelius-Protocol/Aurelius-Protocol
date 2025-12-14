@@ -70,7 +70,7 @@ class SimulatedSubtensor:
         # Hybrid mode: connect to real blockchain for block heights
         if self._real_endpoint:
             try:
-                self._real_subtensor = bt.subtensor(network=self._real_endpoint)
+                self._real_subtensor = bt.Subtensor(network=self._real_endpoint)
                 bt.logging.success(f"✓ Hybrid mode enabled: Reading real block heights from {self._real_endpoint}")
                 bt.logging.info(f"  Current real blockchain block: {self._real_subtensor.block}")
             except Exception as e:

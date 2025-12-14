@@ -4,6 +4,7 @@ import argparse
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Tuple
 
@@ -43,16 +44,20 @@ class Validator:
                 bt.logging.warning(f"  - {warning}")
             bt.logging.warning("=" * 80)
 
+        # Default timeout for chat API calls (seconds) to prevent indefinite blocking
+        chat_api_timeout = 60.0
+
         # Initialize chat client based on provider
         if Config.CHAT_PROVIDER == "chutes":
             self.chat_client = OpenAI(
                 api_key=Config.CHUTES_API_KEY,
                 base_url=Config.CHUTES_API_BASE_URL,
+                timeout=chat_api_timeout,
             )
             self.model = Config.DEFAULT_MODEL  # "deepseek-ai/DeepSeek-V3"
             bt.logging.info(f"Using Chutes.ai chat provider with model: {self.model}")
         else:
-            self.chat_client = OpenAI(api_key=Config.OPENAI_API_KEY)
+            self.chat_client = OpenAI(api_key=Config.OPENAI_API_KEY, timeout=chat_api_timeout)
             self.model = Config.OPENAI_MODEL
             bt.logging.info(f"Using OpenAI chat provider with model: {self.model}")
 
@@ -107,12 +112,19 @@ class Validator:
         # Thread lock for subtensor operations to prevent websocket concurrency errors
         self.subtensor_lock = threading.RLock()
 
+        # Thread pool for background tasks (prevents DoS via thread explosion)
+        # Limits concurrent background operations to prevent resource exhaustion
+        self.background_executor = ThreadPoolExecutor(
+            max_workers=10,
+            thread_name_prefix="validator-bg"
+        )
+
         if Config.LOCAL_MODE:
             # Local mode: Use simulated subtensor for block height tracking
             bt.logging.info("LOCAL_MODE: Using simulated subtensor for testing")
 
             # Create a minimal wallet for the axon (not loaded from disk)
-            self.wallet = bt.wallet(name=Config.VALIDATOR_WALLET_NAME, hotkey=Config.VALIDATOR_HOTKEY)
+            self.wallet = bt.Wallet(name=Config.VALIDATOR_WALLET_NAME, hotkey=Config.VALIDATOR_HOTKEY)
             # In local mode, we don't need the actual keys loaded
 
             # Create simulated subtensor for block height simulation
@@ -130,10 +142,10 @@ class Validator:
             )
         else:
             # Normal mode: Initialize wallet and subtensor
-            self.wallet = bt.wallet(name=Config.VALIDATOR_WALLET_NAME, hotkey=Config.VALIDATOR_HOTKEY)
+            self.wallet = bt.Wallet(name=Config.VALIDATOR_WALLET_NAME, hotkey=Config.VALIDATOR_HOTKEY)
 
             subtensor_config = Config.get_subtensor_config()
-            self.subtensor = bt.subtensor(**subtensor_config)
+            self.subtensor = bt.Subtensor(**subtensor_config)
 
             # Load subnet hyperparameters from chain (network-level consensus on config values)
             Config.load_subnet_hyperparameters(self.subtensor)
@@ -142,7 +154,7 @@ class Validator:
         # Use configured host (may auto-detect external IP if enabled)
         validator_host = Config.get_validator_host()
         bt.logging.info(f"Validator host: {validator_host}")
-        self.axon = bt.axon(wallet=self.wallet, port=Config.BT_PORT_VALIDATOR, external_ip=validator_host)
+        self.axon = bt.Axon(wallet=self.wallet, port=Config.BT_PORT_VALIDATOR, external_ip=validator_host)
 
         # Initialize consensus coordinator
         if Config.ENABLE_CONSENSUS:
@@ -450,19 +462,19 @@ class Validator:
             if should_distribute:
                 # Initiate consensus verification in background - miner gets response immediately
                 # Network context will be collected in the background thread
-                threading.Thread(
-                    target=self._run_consensus_verification,
-                    args=(prompt, completion_text, danger_score, category_scores, miner_hotkey, timing_metrics, model_config),
-                    daemon=True,
-                ).start()
+                # Uses ThreadPoolExecutor to prevent DoS via thread explosion
+                self.background_executor.submit(
+                    self._run_consensus_verification,
+                    prompt, completion_text, danger_score, category_scores, miner_hotkey, timing_metrics, model_config
+                )
             else:
                 # For non-consensus requests, log in background to avoid blocking response
                 # This includes both accepted and rejected submissions
-                threading.Thread(
-                    target=self._log_dataset_entry_background,
-                    args=(prompt, completion_text, danger_score, category_scores, accepted, miner_hotkey, timing_metrics, model_config),
-                    daemon=True,
-                ).start()
+                # Uses ThreadPoolExecutor to prevent DoS via thread explosion
+                self.background_executor.submit(
+                    self._log_dataset_entry_background,
+                    prompt, completion_text, danger_score, category_scores, accepted, miner_hotkey, timing_metrics, model_config
+                )
 
             # Log immediate response return
             bt.logging.info("=" * 80)
@@ -1400,6 +1412,12 @@ class Validator:
 
         # Stop axon
         self.axon.stop()
+
+        # Shutdown background thread pool (wait for pending tasks to complete)
+        if hasattr(self, "background_executor"):
+            bt.logging.info("Shutting down background executor...")
+            self.background_executor.shutdown(wait=True, cancel_futures=False)
+            bt.logging.info("Background executor shutdown complete")
 
         # Stop dataset logger to flush any pending submissions
         if hasattr(self, "dataset_logger"):
