@@ -15,7 +15,7 @@ from aurelius.shared.validator_trust import ValidatorTrustTracker
 class ConsensusCoordinator:
     """Coordinates consensus verification across multiple validators."""
 
-    def __init__(self, wallet: bt.wallet, subtensor: bt.subtensor | None, netuid: int):
+    def __init__(self, wallet: "bt.Wallet", subtensor: "bt.Subtensor | None", netuid: int):
         """
         Initialize consensus coordinator.
 
@@ -27,7 +27,7 @@ class ConsensusCoordinator:
         self.wallet = wallet
         self.subtensor = subtensor
         self.netuid = netuid
-        self.dendrite = bt.dendrite(wallet=wallet)
+        self.dendrite = bt.Dendrite(wallet=wallet)
 
         # Cache metagraph
         self.metagraph = None
@@ -97,19 +97,26 @@ class ConsensusCoordinator:
             return False, "insufficient_runs"
 
         # Check 2: Are all scores identical? (suspicious - LLM responses vary)
-        # BUT: Skip this check if all scores are very low (< 0.01) - legitimately safe responses
+        # SECURITY: Always check for identical scores to prevent validators from
+        # gaming the system by returning fabricated constant values (e.g., all 0.0)
         mean_score = sum(runs) / len(runs) if runs else 0
 
-        if len(runs) >= 2 and mean_score >= 0.01:  # Only check variance for non-trivial scores
+        if len(runs) >= 2:
+            # ALWAYS check for identical scores - this prevents gaming via constant responses
+            # Even legitimately safe prompts should have SOME natural variance in LLM scoring
             if len(set(runs)) == 1:
-                # All identical scores
+                # All identical scores - suspicious regardless of whether they're high or low
+                # A malicious validator returning all 0.0 would be caught here
                 bt.logging.warning(
-                    f"Validator {validator_hotkey[:8]}... returned identical scores: {runs} (suspicious)"
+                    f"Validator {validator_hotkey[:8]}... returned identical scores: {runs} "
+                    f"(suspicious - natural LLM responses have variance)"
                 )
                 return False, "no_variance"
 
-            # Check variance is above threshold
-            if len(runs) >= 3:
+            # Check standard deviation for non-trivial scores
+            # For very low scores (< 0.01), we're more lenient on stdev since
+            # safe prompts genuinely have low but non-zero variance
+            if len(runs) >= 3 and mean_score >= 0.01:
                 try:
                     stdev = statistics.stdev(runs)
                     if stdev < Config.MAX_SCORE_VARIANCE_THRESHOLD:
@@ -120,12 +127,12 @@ class ConsensusCoordinator:
                         return False, "low_variance"
                 except statistics.StatisticsError:
                     pass  # Not enough data for stdev
-        elif mean_score < 0.01:
-            # Very low scores (safe responses) - skip variance check
-            bt.logging.debug(
-                f"Validator {validator_hotkey[:8]}... returned safe scores "
-                f"(mean={mean_score:.4f}), skipping variance check"
-            )
+            elif mean_score < 0.01:
+                # Low scores passed identical-check, so they have SOME variance
+                bt.logging.debug(
+                    f"Validator {validator_hotkey[:8]}... returned safe scores "
+                    f"(mean={mean_score:.4f}) with natural variance"
+                )
 
         # Check 3: Did they respond too fast? (running multiple API calls takes time)
         # Each run takes ~2-5 seconds (API call + moderation)

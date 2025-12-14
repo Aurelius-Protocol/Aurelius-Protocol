@@ -42,10 +42,10 @@ def send_prompt(
     bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
 
     # Initialize wallet
-    wallet = bt.wallet(name=Config.MINER_WALLET_NAME, hotkey=Config.MINER_HOTKEY)
+    wallet = bt.Wallet(name=Config.MINER_WALLET_NAME, hotkey=Config.MINER_HOTKEY)
 
     # Initialize dendrite (for sending requests)
-    dendrite = bt.dendrite(wallet=wallet)
+    dendrite = bt.Dendrite(wallet=wallet)
 
     bt.logging.info(f"Prompt: {prompt}")
     if vendor or model_requested:
@@ -86,7 +86,7 @@ def send_prompt(
     else:
         # Normal mode: Query metagraph for validator UID
         subtensor_config = Config.get_subtensor_config()
-        subtensor = bt.subtensor(**subtensor_config)
+        subtensor = bt.Subtensor(**subtensor_config)
         metagraph = subtensor.metagraph(netuid=Config.BT_NETUID)
 
         bt.logging.info(f"Sending prompt to validator UID {validator_uid}")
