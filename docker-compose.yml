@@ -1,0 +1,91 @@
+# =============================================================================
+# Aurelius Protocol Validator - Docker Compose Configuration
+# =============================================================================
+#
+# Usage:
+#   Development:  docker compose up
+#   Background:   docker compose up -d
+#   With logs:    docker compose up -d && docker compose logs -f
+#   Production:   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Prerequisites:
+#   1. Copy .env.example to .env and configure your API keys
+#   2. Ensure your Bittensor wallet is in ~/.bittensor/wallets/
+#
+# =============================================================================
+
+services:
+  validator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aurelius-validator:local
+    container_name: aurelius-validator
+
+    # Restart policy - restart unless explicitly stopped
+    restart: unless-stopped
+
+    # Port mapping - expose validator port
+    ports:
+      - "${BT_PORT_VALIDATOR:-8091}:8091"
+
+    # Environment configuration
+    env_file:
+      - .env
+
+    # Override/add environment variables for Docker context
+    environment:
+      # Data paths inside container (override any .env settings)
+      - LOCAL_DATASET_PATH=/var/lib/aurelius/datasets
+      - MINER_SCORES_PATH=/var/lib/aurelius/miner_scores.json
+      - VALIDATOR_TRUST_PERSISTENCE_PATH=/var/lib/aurelius/validator_trust.json
+      # Network binding for container
+      - VALIDATOR_HOST=0.0.0.0
+      # Auto-detect external IP for Bittensor registration
+      - AUTO_DETECT_EXTERNAL_IP=true
+
+    # Volume mounts for persistent data and wallet access
+    volumes:
+      # Bittensor wallet - REQUIRED
+      # Mount your wallet directory as read-only for security
+      # Default: ~/.bittensor/wallets
+      # Custom: Replace with your wallet path
+      - ${BITTENSOR_WALLET_PATH:-~/.bittensor/wallets}:/home/aurelius/.bittensor/wallets:ro
+
+      # Persistent data storage using named volumes
+      # These survive container restarts and rebuilds
+      - aurelius-datasets:/var/lib/aurelius/datasets
+      - aurelius-data:/var/lib/aurelius
+
+    # Resource limits - adjust based on your system
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
+
+    # Logging configuration
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "5"
+
+    # Health check - matches Dockerfile
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8091"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+# Named volumes for data persistence
+# Data survives container removal; delete with: docker compose down -v
+volumes:
+  aurelius-datasets:
+    driver: local
+    name: aurelius-datasets
+  aurelius-data:
+    driver: local
+    name: aurelius-data
