@@ -141,7 +141,7 @@ jobs:
       # Post-build
       # -----------------------------------------------------------------------
       - name: Output image digest
-        run: echo "Digest: ${{ steps.build-push.outputs.digest }}"
+        run: 'echo "Digest: ${{ steps.build-push.outputs.digest }}"'
 
       - name: Output image tags
         run: |
