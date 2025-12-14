@@ -29,7 +29,7 @@ class ValidatorStats:
     agreements_with_consensus: int = 0
     total_responses: int = 0
     failed_responses: int = 0
-    trust_score: float = 1.0  # Start with perfect trust
+    trust_score: float = 0.3  # Start with limited trust (prevents Sybil attacks)
     last_seen: str = ""
     flags: list[str] = None
 
@@ -40,6 +40,14 @@ class ValidatorStats:
 
 class ValidatorTrustTracker:
     """Tracks validator reputation and trust scores."""
+
+    # Minimum verifications required before a validator can achieve full trust
+    # This prevents Sybil attacks where new validators immediately get full voting rights
+    # ~50 verifications at ~1 per block = ~10 minutes of activity
+    MIN_VERIFICATIONS_FOR_FULL_TRUST = 50
+
+    # Initial trust score for brand new validators (before warm-up)
+    INITIAL_TRUST_SCORE = 0.3
 
     def __init__(
         self,
@@ -176,11 +184,13 @@ class ValidatorTrustTracker:
         Trust score formula:
         - Base: agreement_rate (agreements / total_verifications)
         - Penalty: failed_responses reduce score
+        - Warm-up: New validators must earn trust over MIN_VERIFICATIONS_FOR_FULL_TRUST
         - Floor: Never goes below 0.0
         - Ceiling: Capped at 1.0
         """
         if stats.total_verifications == 0:
-            stats.trust_score = 1.0  # New validators start with full trust
+            # Brand new validators start with limited trust (prevents Sybil attacks)
+            stats.trust_score = self.INITIAL_TRUST_SCORE
             return
 
         # Agreement rate (0-1)
@@ -200,6 +210,17 @@ class ValidatorTrustTracker:
             penalty = self.trust_decay_rate**stats.failed_responses
             trust_score *= penalty
 
+        # Apply warm-up factor: new validators must earn full trust over time
+        # This prevents Sybil attacks where attackers create many new validators
+        if stats.total_verifications < self.MIN_VERIFICATIONS_FOR_FULL_TRUST:
+            warmup_factor = stats.total_verifications / self.MIN_VERIFICATIONS_FOR_FULL_TRUST
+            # Interpolate between initial trust and calculated trust
+            trust_score = self.INITIAL_TRUST_SCORE + (trust_score - self.INITIAL_TRUST_SCORE) * warmup_factor
+            bt.logging.debug(
+                f"Validator warm-up: {stats.total_verifications}/{self.MIN_VERIFICATIONS_FOR_FULL_TRUST} "
+                f"verifications, warmup_factor={warmup_factor:.2f}, trust={trust_score:.3f}"
+            )
+
         # Clamp to [0, 1]
         stats.trust_score = max(0.0, min(1.0, trust_score))
 
@@ -211,10 +232,11 @@ class ValidatorTrustTracker:
             hotkey: Validator's hotkey
 
         Returns:
-            Trust score (0-1), or 1.0 if validator is new
+            Trust score (0-1), or INITIAL_TRUST_SCORE if validator is new
         """
         if hotkey not in self.validators:
-            return 1.0  # New validators get benefit of the doubt
+            # New validators start with limited trust (prevents Sybil attacks)
+            return self.INITIAL_TRUST_SCORE
 
         return self.validators[hotkey].trust_score
 
