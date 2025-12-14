@@ -3,6 +3,7 @@
 import atexit
 import json
 import os
+import tempfile
 import threading
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -112,6 +113,9 @@ class DatasetLogger:
         self.worker_thread = None
         self.running = False
 
+        # Thread lock for atomic file writes
+        self._file_write_lock = threading.Lock()
+
         # Submission statistics
         self.submissions_successful = 0
         self.submissions_failed = 0
@@ -209,9 +213,10 @@ class DatasetLogger:
 
     def _save_local(self, entry: DatasetEntry) -> bool:
         """
-        Save entry to local JSON file.
+        Save entry to local JSON file using atomic write pattern.
 
         Creates one file per day in YYYY-MM-DD.jsonl format.
+        Uses thread lock and temp file to prevent corruption from concurrent writes.
 
         Args:
             entry: Dataset entry to save
@@ -225,17 +230,46 @@ class DatasetLogger:
         try:
             # Create filename based on date
             date_str = datetime.now().strftime("%Y-%m-%d")
-            filepath = os.path.join(self.local_path, f"{date_str}.jsonl")
+            filepath = Path(self.local_path) / f"{date_str}.jsonl"
 
-            # Append to JSONL file (one JSON object per line)
-            with open(filepath, "a") as f:
-                json.dump(asdict(entry), f)
-                f.write("\n")
+            # Serialize entry to JSON string first (outside lock)
+            json_line = json.dumps(asdict(entry)) + "\n"
+
+            # Use lock to prevent concurrent writes corrupting the file
+            with self._file_write_lock:
+                # Write to temp file first, then append atomically
+                # This prevents partial writes from corrupting the file
+                with tempfile.NamedTemporaryFile(
+                    mode='w',
+                    dir=self.local_path,
+                    suffix='.tmp',
+                    delete=False
+                ) as tmp_file:
+                    tmp_file.write(json_line)
+                    tmp_file.flush()
+                    os.fsync(tmp_file.fileno())  # Ensure data is on disk
+                    tmp_path = tmp_file.name
+
+                # Append temp file contents to main file
+                with open(filepath, "a") as main_file:
+                    with open(tmp_path, "r") as tmp_read:
+                        main_file.write(tmp_read.read())
+                    main_file.flush()
+                    os.fsync(main_file.fileno())
+
+                # Clean up temp file
+                os.unlink(tmp_path)
 
             return True
 
         except Exception as e:
             bt.logging.error(f"Failed to save local backup: {e}")
+            # Clean up temp file on error
+            try:
+                if 'tmp_path' in locals():
+                    os.unlink(tmp_path)
+            except:
+                pass
             return False
 
     def log_entry(

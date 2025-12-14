@@ -65,11 +65,15 @@ class OpenAIModerationProvider(ModerationProvider):
         "violence/graphic": 1.2,
     }
 
+    # Default timeout for API calls (seconds)
+    DEFAULT_API_TIMEOUT = 30.0
+
     def __init__(
         self,
         api_key: str,
         category_weights: dict[str, float] | None = None,
         single_category_threshold: float = 0.8,
+        timeout: float | None = None,
     ):
         """
         Initialize OpenAI moderation provider.
@@ -79,8 +83,11 @@ class OpenAIModerationProvider(ModerationProvider):
             category_weights: Optional custom weights for categories.
                             If not provided, uses DEFAULT_CATEGORY_WEIGHTS.
             single_category_threshold: Threshold for individual category scores (default 0.8)
+            timeout: API request timeout in seconds (default 30s)
         """
-        self.client = OpenAI(api_key=api_key)
+        self.timeout = timeout or self.DEFAULT_API_TIMEOUT
+        # SECURITY: Configure client with timeout to prevent indefinite blocking
+        self.client = OpenAI(api_key=api_key, timeout=self.timeout)
         self.category_weights = category_weights or self.DEFAULT_CATEGORY_WEIGHTS
         self.single_category_threshold = single_category_threshold
 
@@ -121,38 +128,21 @@ class OpenAIModerationProvider(ModerationProvider):
         except Exception as e:
             bt.logging.error(f"CRITICAL: OpenAI moderation API failure: {e}")
 
-            # Handle error based on fail mode configuration
-            from aurelius.shared.config import Config
-
-            if Config.MODERATION_FAIL_MODE == "closed":
-                # Fail closed: Reject content on error (conservative/secure)
-                bt.logging.error(
-                    "MODERATION_FAIL_MODE=closed: Rejecting content due to API error (SECURE default behavior)"
-                )
-                return ModerationResult(
-                    flagged=True,
-                    category_scores={},
-                    categories={},
-                    combined_score=1.0,
-                    high_category_triggered=True,
-                    high_category_name="api_error",
-                    high_category_score=1.0,
-                )
-            else:
-                # Fail open: Accept content on error (permissive) - ONLY FOR LOCAL_MODE
-                bt.logging.error(
-                    "SECURITY WARNING: MODERATION_FAIL_MODE=open: Accepting content despite API error. "
-                    "This should ONLY be used in LOCAL_MODE for testing!"
-                )
-                return ModerationResult(
-                    flagged=False,
-                    category_scores={},
-                    categories={},
-                    combined_score=0.0,
-                    high_category_triggered=False,
-                    high_category_name=None,
-                    high_category_score=None,
-                )
+            # SECURITY: Always fail-closed on API errors
+            # This prevents dangerous content from being accepted during outages
+            # The fail-open mode has been removed as it creates security vulnerabilities
+            bt.logging.error(
+                "Rejecting content due to API error (fail-closed security behavior)"
+            )
+            return ModerationResult(
+                flagged=True,
+                category_scores={},
+                categories={},
+                combined_score=1.0,
+                high_category_triggered=True,
+                high_category_name="api_error",
+                high_category_score=1.0,
+            )
 
     def _calculate_combined_score(self, category_scores: dict[str, float]) -> float:
         """
@@ -219,6 +209,7 @@ def create_moderation_provider(
     api_key: str,
     category_weights: dict[str, float] | None = None,
     single_category_threshold: float = 0.8,
+    timeout: float | None = None,
 ) -> ModerationProvider:
     """
     Factory function to create a moderation provider.
@@ -228,6 +219,7 @@ def create_moderation_provider(
         api_key: API key for the provider
         category_weights: Optional custom category weights
         single_category_threshold: Threshold for individual category scores (default 0.8)
+        timeout: API request timeout in seconds (default 30s)
 
     Returns:
         ModerationProvider instance
@@ -240,6 +232,7 @@ def create_moderation_provider(
             api_key=api_key,
             category_weights=category_weights,
             single_category_threshold=single_category_threshold,
+            timeout=timeout,
         )
     else:
         raise ValueError(f"Unknown moderation provider: {provider_name}")

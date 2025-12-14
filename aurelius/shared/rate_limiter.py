@@ -184,11 +184,21 @@ class PerMinerRateLimiter:
         Check if a request from a specific miner should be allowed.
 
         Args:
-            hotkey: Miner's hotkey
+            hotkey: Miner's hotkey (must be valid non-empty string)
 
         Returns:
             Tuple of (allowed, reason, remaining_quota)
         """
+        # SECURITY: Validate hotkey to prevent bypass via None/empty values
+        if not hotkey or not isinstance(hotkey, str) or len(hotkey.strip()) == 0:
+            bt.logging.warning(f"Rate limiter: Invalid hotkey provided: {repr(hotkey)}")
+            return False, "Invalid or missing hotkey", 0
+
+        # Basic SS58 address format validation (Bittensor hotkeys are 48 chars)
+        if len(hotkey) < 46 or len(hotkey) > 50:
+            bt.logging.warning(f"Rate limiter: Suspicious hotkey format: {hotkey[:20]}...")
+            return False, "Invalid hotkey format", 0
+
         with self.lock:
             current_time = time.time()
 
@@ -217,8 +227,17 @@ class PerMinerRateLimiter:
         Record a request from a miner.
 
         Args:
-            hotkey: Miner's hotkey
+            hotkey: Miner's hotkey (must be valid non-empty string)
         """
+        # SECURITY: Validate hotkey to prevent tracking under invalid keys
+        if not hotkey or not isinstance(hotkey, str) or len(hotkey.strip()) == 0:
+            bt.logging.warning(f"Rate limiter: Refusing to record request for invalid hotkey: {repr(hotkey)}")
+            return
+
+        if len(hotkey) < 46 or len(hotkey) > 50:
+            bt.logging.warning(f"Rate limiter: Refusing to record request for suspicious hotkey: {hotkey[:20]}...")
+            return
+
         with self.lock:
             current_time = time.time()
 

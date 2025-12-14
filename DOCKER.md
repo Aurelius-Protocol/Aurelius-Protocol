@@ -8,16 +8,14 @@ This guide covers Docker deployment of the Aurelius Protocol validator for the B
 # Pull the latest image
 docker pull ghcr.io/aurelius-protocol/aurelius-validator:latest
 
-# Or from Docker Hub
-docker pull aureliusprotocol/validator:latest
-
 # Run with minimal configuration
 docker run -d \
   --name aurelius-validator \
+  --restart unless-stopped \
   -p 8091:8091 \
   --env-file .env \
   -v ~/.bittensor/wallets:/home/aurelius/.bittensor/wallets:ro \
-  -v aurelius-data:/var/lib/aurelius \
+  -v /var/lib/aurelius:/var/lib/aurelius \
   ghcr.io/aurelius-protocol/aurelius-validator:latest
 ```
 
@@ -28,14 +26,13 @@ docker run -d \
 - A registered Bittensor wallet on subnet 290
 - API keys (OpenAI required, Chutes optional)
 
-## Image Registries
+## Image Registry
 
-The validator image is published to two registries:
+The validator image is published to GitHub Container Registry (GHCR):
 
 | Registry | Image |
 |----------|-------|
 | GitHub Container Registry | `ghcr.io/aurelius-protocol/aurelius-validator` |
-| Docker Hub | `aureliusprotocol/validator` |
 
 ## Configuration
 
@@ -406,15 +403,9 @@ The GitHub Actions workflow (`.github/workflows/docker-publish.yml`) automatical
 
 1. Builds on push to `main` and version tags
 2. Creates multi-architecture images (AMD64 + ARM64)
-3. Pushes to both Docker Hub and GHCR
+3. Pushes to GitHub Container Registry (GHCR)
 4. Runs security scans with Trivy
-5. Updates Docker Hub description from README
 
 ### Required GitHub Secrets
 
-| Secret | Description |
-|--------|-------------|
-| `DOCKERHUB_USERNAME` | Docker Hub username |
-| `DOCKERHUB_TOKEN` | Docker Hub access token (not password) |
-
-`GITHUB_TOKEN` is automatically provided by GitHub Actions.
+`GITHUB_TOKEN` is automatically provided by GitHub Actions - no additional secrets required.

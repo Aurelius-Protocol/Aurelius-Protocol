@@ -697,6 +697,168 @@ See `aurelius/shared/moderation.py` for implementation details.
 
 ---
 
+## Docker Deployment
+
+The validator can be deployed using Docker for easier management and portability. Images are published to GitHub Container Registry (GHCR).
+
+### Quick Start
+
+```bash
+# 1. Install Docker (if not already installed)
+apt-get update && apt-get install -y docker.io
+systemctl enable docker && systemctl start docker
+
+# 2. Pull the image
+docker pull ghcr.io/aurelius-protocol/aurelius-validator:latest
+
+# 3. Run the validator
+docker run -d \
+  --name aurelius-validator \
+  --restart unless-stopped \
+  -p 8091:8091 \
+  --env-file /path/to/your/.env \
+  -v ~/.bittensor/wallets:/home/aurelius/.bittensor/wallets:ro \
+  -v /var/lib/aurelius:/var/lib/aurelius \
+  ghcr.io/aurelius-protocol/aurelius-validator:latest
+
+# 4. Check logs
+docker logs -f aurelius-validator
+```
+
+### Environment Setup
+
+Before running the Docker container, configure your environment:
+
+1. **Create your `.env` file:**
+   ```bash
+   cp .env.example .env
+   # Edit with your settings
+   nano .env
+   ```
+
+2. **Required environment variables:**
+
+   | Variable | Required | Description |
+   |----------|----------|-------------|
+   | `OPENAI_API_KEY` | Yes | OpenAI API key (always required for moderation) |
+   | `CHAT_PROVIDER` | Yes | `chutes` (recommended) or `openai` |
+   | `CHUTES_API_KEY` | If using Chutes | Chutes.ai API key |
+   | `BT_NETWORK` | Yes | `test` (testnet) or `finney` (mainnet) |
+   | `BT_NETUID` | Yes | Subnet UID (`290` for testnet) |
+   | `VALIDATOR_WALLET_NAME` | Yes | Your Bittensor wallet name |
+   | `VALIDATOR_HOTKEY` | Yes | Your wallet hotkey name |
+   | `DANGER_THRESHOLD` | No | Aggregate score threshold (default: 0.5) |
+
+3. **Optional: Miner burn configuration:**
+
+   | Variable | Default | Description |
+   |----------|---------|-------------|
+   | `MINER_BURN_ENABLED` | `false` | Enable burning a % of miner rewards |
+   | `MINER_BURN_PERCENTAGE` | `0.5` | Percentage to burn (0.0-1.0) |
+   | `BURN_UID` | - | UID of registered burn wallet (required if burn enabled) |
+
+   To enable miner burn, register a burn hotkey on the subnet and set its UID. The burn wallet should never claim emissions.
+
+4. **Ensure your Bittensor wallet exists:**
+   ```bash
+   ls ~/.bittensor/wallets/<VALIDATOR_WALLET_NAME>/hotkeys/<VALIDATOR_HOTKEY>
+   ```
+
+### Production Deployment
+
+For production deployments, use additional security and resource options:
+
+**Using Docker Run:**
+```bash
+# Create data directory
+sudo mkdir -p /var/lib/aurelius/datasets
+sudo chown -R 1000:1000 /var/lib/aurelius
+
+# Run with production settings
+docker run -d \
+  --name aurelius-validator \
+  --restart always \
+  -p 8091:8091 \
+  --env-file /opt/validator/.env \
+  --security-opt no-new-privileges:true \
+  --memory 4g \
+  --cpus 2 \
+  -v ~/.bittensor/wallets:/home/aurelius/.bittensor/wallets:ro \
+  -v /var/lib/aurelius:/var/lib/aurelius \
+  ghcr.io/aurelius-protocol/aurelius-validator:latest
+```
+
+**Using Docker Compose:**
+```bash
+# Configure environment
+cp .env.example .env
+# Edit .env with your settings
+
+# Run with production overrides
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+**Production considerations:**
+- Use `--restart always` for automatic recovery after reboots
+- Set memory limits (`--memory 4g`) to prevent runaway processes
+- Use bind mounts (`/var/lib/aurelius`) instead of named volumes for easier backups
+- Enable `no-new-privileges` security option
+- Store `.env` file with restricted permissions (`chmod 600 .env`)
+
+### Using Docker Compose
+
+```bash
+# Configure environment
+cp .env.example .env
+# Edit .env with your API keys and wallet settings
+
+# Start validator
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Stop
+docker compose down
+```
+
+### Volume Mounts
+
+| Container Path | Purpose |
+|---------------|---------|
+| `/home/aurelius/.bittensor/wallets` | Bittensor wallet (required, read-only) |
+| `/var/lib/aurelius` | Persistent data (datasets, scores, trust) |
+
+### Multi-Architecture Support
+
+Images are built for both AMD64 and ARM64 (Apple Silicon, AWS Graviton).
+
+### Common Commands
+
+```bash
+# View logs
+docker logs -f aurelius-validator
+
+# Restart validator
+docker restart aurelius-validator
+
+# Stop validator
+docker stop aurelius-validator
+
+# Update to latest image
+docker pull ghcr.io/aurelius-protocol/aurelius-validator:latest
+docker stop aurelius-validator
+docker rm aurelius-validator
+# Re-run docker run command above
+
+# Check container status
+docker ps -a | grep aurelius
+```
+
+For complete Docker documentation including backup procedures and troubleshooting, see **[DOCKER.md](DOCKER.md)**.
+
+---
+
 ## Development
 
 ### Project Structure
