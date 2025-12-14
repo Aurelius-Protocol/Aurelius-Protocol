@@ -1,0 +1,59 @@
+# =============================================================================
+# Aurelius Protocol Validator - Production Overrides
+# =============================================================================
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# This file overrides docker-compose.yml settings for production:
+#   - Uses pre-built image from registry instead of building locally
+#   - Stricter restart policy
+#   - Tighter resource limits
+#   - Enhanced security options
+#   - Bind mounts for easier backups
+#
+# =============================================================================
+
+services:
+  validator:
+    # Use pre-built image from GitHub Container Registry
+    # Alternative: aureliusprotocol/validator:latest (Docker Hub)
+    image: ghcr.io/aurelius-protocol/aurelius-validator:latest
+
+    # Disable local build - use registry image
+    build: !reset null
+
+    # Production restart policy - always restart
+    restart: always
+
+    # Tighter resource constraints for production
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2'
+        reservations:
+          memory: 1G
+          cpus: '0.5'
+
+    # Security hardening
+    security_opt:
+      - no-new-privileges:true
+
+    # Use bind mounts for production (easier backups and management)
+    # Create directories first: sudo mkdir -p /var/lib/aurelius/datasets
+    volumes:
+      # Bittensor wallet - read-only
+      - ${BITTENSOR_WALLET_PATH:-~/.bittensor/wallets}:/home/aurelius/.bittensor/wallets:ro
+
+      # Persistent data - bind mounts for easier backup
+      - /var/lib/aurelius/datasets:/var/lib/aurelius/datasets
+      - /var/lib/aurelius/miner_scores.json:/var/lib/aurelius/miner_scores.json
+      - /var/lib/aurelius/validator_trust.json:/var/lib/aurelius/validator_trust.json
+
+    # Production logging - more retention
+    logging:
+      driver: json-file
+      options:
+        max-size: "200m"
+        max-file: "10"
