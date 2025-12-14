@@ -10,11 +10,8 @@
 #
 # Publishes to:
 #   - GitHub Container Registry (ghcr.io)
-#   - Docker Hub
 #
 # Required Secrets:
-#   - DOCKERHUB_USERNAME: Docker Hub username
-#   - DOCKERHUB_TOKEN: Docker Hub access token
 #   - GITHUB_TOKEN: Automatically provided
 #
 # =============================================================================
@@ -40,7 +37,6 @@ on:
 
 env:
   # Registry configuration
-  DOCKER_HUB_REPO: aureliusprotocol/validator
   GHCR_REPO: ghcr.io/${{ github.repository_owner }}/aurelius-validator
 
   # Build configuration
@@ -80,7 +76,6 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.DOCKER_HUB_REPO }}
             ${{ env.GHCR_REPO }}
           tags: |
             # Branch name (e.g., main)
@@ -102,13 +97,6 @@ jobs:
       # -----------------------------------------------------------------------
       # Authentication
       # -----------------------------------------------------------------------
-      - name: Login to Docker Hub
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Login to GitHub Container Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -177,26 +165,4 @@ jobs:
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
-        continue-on-error: true
-
-  # ===========================================================================
-  # Update Docker Hub Description
-  # ===========================================================================
-  update-dockerhub-description:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Update Docker Hub description
-        uses: peter-evans/dockerhub-description@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DOCKER_HUB_REPO }}
-          readme-filepath: ./README.md
-          short-description: "Bittensor subnet validator for AI alignment research (testnet 290)"
         continue-on-error: true
