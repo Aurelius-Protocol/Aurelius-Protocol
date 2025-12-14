@@ -460,16 +460,20 @@ class ScoringSystem:
         # Filter to only those with non-zero contribution, take top N
         top_n = [x for x in sorted_by_weight if x[1] > 0][:Config.TOP_REWARDED_MINERS]
 
-        # Equal split among winners
+        # Weighted distribution among winners (proportional to contribution)
+        # This ensures high-quality miners get proportionally more rewards
         final_weights = [0.0] * len(weights)
         if top_n:
-            equal_share = 1.0 / len(top_n)
+            total_weight = sum(w for _, w in top_n)
             for idx, original_weight in top_n:
-                final_weights[idx] = equal_share
+                final_weights[idx] = original_weight / total_weight if total_weight > 0 else 0.0
 
             bt.logging.info(
-                f"Top-{len(top_n)} winners take all (equal {equal_share:.2%} each): "
-                + ", ".join(f"idx={idx} (score={original_weight:.3f})" for idx, original_weight in top_n)
+                f"Top-{len(top_n)} miners receive weighted rewards: "
+                + ", ".join(
+                    f"idx={idx} (score={original_weight:.3f}, share={final_weights[idx]:.2%})"
+                    for idx, original_weight in top_n
+                )
             )
         else:
             bt.logging.info("No qualifying miners in window - all weights are 0")
@@ -479,6 +483,28 @@ class ScoringSystem:
             f"(window: blocks {window_start}-{current_block}, "
             f"rewarded: {sum(1 for w in final_weights if w > 0)}/{Config.TOP_REWARDED_MINERS} max)"
         )
+
+        # Apply miner burn if enabled
+        if Config.MINER_BURN_ENABLED and Config.BURN_UID is not None:
+            burn_percentage = Config.MINER_BURN_PERCENTAGE
+
+            # Ensure burn UID exists in the weights array
+            if Config.BURN_UID < len(final_weights):
+                # Scale down all miner weights by (1 - burn_percentage)
+                scaled_weights = [w * (1 - burn_percentage) for w in final_weights]
+
+                # Allocate burn_percentage to the burn UID
+                scaled_weights[Config.BURN_UID] = burn_percentage
+                final_weights = scaled_weights
+
+                bt.logging.info(
+                    f"Applied {burn_percentage:.0%} miner burn to UID {Config.BURN_UID}"
+                )
+            else:
+                bt.logging.warning(
+                    f"BURN_UID {Config.BURN_UID} not in metagraph (size: {len(final_weights)}). "
+                    f"Burn not applied - ensure burn hotkey is registered."
+                )
 
         return final_weights
 
