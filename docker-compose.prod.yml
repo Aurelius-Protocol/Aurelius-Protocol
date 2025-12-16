@@ -47,10 +47,9 @@ services:
       # Bittensor wallet - read-only
       - ${BITTENSOR_WALLET_PATH:-~/.bittensor/wallets}:/home/aurelius/.bittensor/wallets:ro
 
-      # Persistent data - bind mounts for easier backup
-      - /var/lib/aurelius/datasets:/var/lib/aurelius/datasets
-      - /var/lib/aurelius/miner_scores.json:/var/lib/aurelius/miner_scores.json
-      - /var/lib/aurelius/validator_trust.json:/var/lib/aurelius/validator_trust.json
+      # Persistent data - directory-level bind mount for easier backup
+      # JSON files (miner_scores.json, validator_trust.json) are auto-created by entrypoint
+      - /var/lib/aurelius:/var/lib/aurelius
 
     # Production logging - more retention
     logging:
