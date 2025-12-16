@@ -41,7 +41,8 @@ services:
       - no-new-privileges:true
 
     # Use bind mounts for production (easier backups and management)
-    # Create directories first: sudo mkdir -p /var/lib/aurelius/datasets
+    # Create directory first: sudo mkdir -p /var/lib/aurelius/datasets
+    # Note: JSON files are auto-created by entrypoint if missing
     volumes:
       # Bittensor wallet - read-only
       - ${BITTENSOR_WALLET_PATH:-~/.bittensor/wallets}:/home/aurelius/.bittensor/wallets:ro

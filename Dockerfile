@@ -104,6 +104,10 @@ COPY --chown=aurelius:aurelius aurelius/__init__.py ./aurelius/
 COPY --chown=aurelius:aurelius validator.py ./
 COPY --chown=aurelius:aurelius pyproject.toml ./
 
+# Entrypoint script to handle volume initialization
+COPY --chown=aurelius:aurelius docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Switch to non-root user
 USER aurelius
 
@@ -128,8 +132,8 @@ EXPOSE 8091
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD nc -z localhost 8091 || exit 1
 
-# Entry point - run the validator
-ENTRYPOINT ["python", "validator.py"]
+# Entry point - initialize volumes then run validator
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
-# Default command arguments (can be overridden)
-CMD []
+# Default command (can be overridden)
+CMD ["python", "validator.py"]
