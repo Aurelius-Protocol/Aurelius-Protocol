@@ -485,7 +485,7 @@ class ScoringSystem:
         )
 
         # Apply miner burn if enabled
-        if Config.MINER_BURN_ENABLED and Config.BURN_UID is not None:
+        if Config.MINER_BURN_ENABLED:
             burn_percentage = Config.MINER_BURN_PERCENTAGE
 
             # Ensure burn UID exists in the weights array

@@ -171,7 +171,7 @@ class Config:
     # Burns a percentage of miner emissions by allocating weight to a registered burn UID
     MINER_BURN_ENABLED: bool = os.getenv("MINER_BURN_ENABLED", "false").lower() == "true"
     MINER_BURN_PERCENTAGE: float = float(os.getenv("MINER_BURN_PERCENTAGE", "0.9"))  # 90% default
-    BURN_UID: int | None = int(os.getenv("BURN_UID")) if os.getenv("BURN_UID") else None
+    BURN_UID: int = int(os.getenv("BURN_UID", "200"))
 
     # Local Multi-Validator Testing - Comma-separated list of other validators
     # Format: "host1:port1,host2:port2,host3:port3"
@@ -241,12 +241,6 @@ class Config:
         # Validate miner burn configuration
         if not 0 <= cls.MINER_BURN_PERCENTAGE <= 1:
             raise ValueError(f"MINER_BURN_PERCENTAGE must be between 0 and 1, got {cls.MINER_BURN_PERCENTAGE}")
-
-        if cls.MINER_BURN_ENABLED and cls.BURN_UID is None:
-            raise ValueError(
-                "BURN_UID must be set when MINER_BURN_ENABLED=true. "
-                "Register a burn hotkey on the subnet and set BURN_UID to its UID."
-            )
 
         # Validate rate limit settings
         if cls.RATE_LIMIT_REQUESTS < 1:
