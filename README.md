@@ -153,7 +153,7 @@ Accepted:      YES
 
 - OpenAI API key (always required for moderation)
 - Chutes.ai API key (if using Chutes as chat provider)
-- Sufficient stake (100+ TAO testnet, 1000+ TAO mainnet)
+- Sufficient stake
 
 ### Configuration
 
