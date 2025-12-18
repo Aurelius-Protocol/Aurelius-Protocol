@@ -885,7 +885,7 @@ class Validator:
             bt.logging.info("   Result: ACCEPTED (not blacklisted)")
             bt.logging.info("=" * 80)
         else:
-            bt.logging.debug(f"Blacklist check: synapse={synapse.name}, accepted=True")
+            bt.logging.info(f"🔍 Blacklist check: synapse={synapse.name}, accepted=True")
 
         # For hello world, accept all requests
         return False, ""
@@ -910,7 +910,7 @@ class Validator:
         if Config.LOG_CONNECTION_DETAILS:
             bt.logging.info(f"⚖️  Priority check: miner={miner_hotkey[:16]}... priority=1.0")
         else:
-            bt.logging.debug(f"Priority check: miner={miner_hotkey[:16]}... priority=1.0")
+            bt.logging.info(f"⚖️  Priority check: miner={miner_hotkey[:16]}... priority=1.0")
 
         # For hello world, all requests have equal priority
         return 1.0
@@ -1017,7 +1017,7 @@ class Validator:
         if Config.LOG_CONNECTION_DETAILS:
             bt.logging.info(f"✅ Verify: miner={miner_hotkey[:16]}... mode={'LOCAL' if Config.LOCAL_MODE else 'BITTENSOR'}")
         else:
-            bt.logging.debug(f"Verify check: miner={miner_hotkey[:16]}... local_mode={Config.LOCAL_MODE}")
+            bt.logging.info(f"✅ Verify check: miner={miner_hotkey[:16]}... local_mode={Config.LOCAL_MODE}")
 
         if Config.LOCAL_MODE:
             # Skip verification in local mode

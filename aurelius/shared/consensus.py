@@ -275,9 +275,9 @@ class ConsensusCoordinator:
             bt.logging.info(f"   Min stake requirement: {min_stake} TAO")
             bt.logging.info(f"   Selected UIDs: {selected_uids[:5]}{'...' if len(selected_uids) > 5 else ''}")
         else:
-            bt.logging.debug(
-                f"Selected {len(selected_uids)} validators from {len(eligible_validators)} eligible "
-                f"(min_stake={min_stake}, excluded self)"
+            bt.logging.info(
+                f"🎯 Selected {len(selected_uids)} validators from {len(eligible_validators)} eligible "
+                f"(min_stake={min_stake})"
             )
 
         return selected_uids
