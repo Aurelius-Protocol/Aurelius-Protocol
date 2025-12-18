@@ -63,7 +63,17 @@ class ConsensusCoordinator:
             )
             bt.logging.info("Validator trust tracking enabled")
 
-        bt.logging.info("Consensus coordinator initialized")
+        bt.logging.info("=" * 60)
+        bt.logging.info("🤝 CONSENSUS COORDINATOR INITIALIZED")
+        bt.logging.info(f"   Mode: {'LOCAL' if Config.LOCAL_MODE else 'NETWORK'}")
+        bt.logging.info(f"   Netuid: {netuid}")
+        bt.logging.info(f"   Required votes: {Config.CONSENSUS_REQUIRED_VOTES}")
+        bt.logging.info(f"   Total validators: {Config.CONSENSUS_VALIDATORS}")
+        bt.logging.info(f"   Min validator stake: {Config.MIN_VALIDATOR_STAKE}")
+        bt.logging.info(f"   Trust tracking: {'ENABLED' if Config.ENABLE_VALIDATOR_TRUST_TRACKING else 'DISABLED'}")
+        if Config.LOCAL_MODE and self.local_validator_axons:
+            bt.logging.info(f"   Local validator endpoints: {len(self.local_validator_axons)}")
+        bt.logging.info("=" * 60)
 
     def validate_verification_result(
         self, result: dict, runs_required: int, validator_hotkey: str, response_time: float
@@ -207,15 +217,20 @@ class ConsensusCoordinator:
                 # Return up to 'count' local validator axons
                 selected_count = min(count, len(self.local_validator_axons))
                 selected = secure_random.sample(self.local_validator_axons, selected_count)
-                bt.logging.info(f"LOCAL_MODE: Selected {len(selected)} local validators for consensus")
+                if Config.LOG_CONSENSUS_DETAILS:
+                    bt.logging.info(f"🎯 LOCAL_MODE: Selected {len(selected)}/{len(self.local_validator_axons)} local validators")
+                    for axon in selected:
+                        bt.logging.info(f"   → {axon.ip}:{axon.port}")
                 return selected
             else:
                 # No local endpoints configured
-                bt.logging.warning("LOCAL_MODE: Cannot select other validators for consensus")
+                bt.logging.info("ℹ️  LOCAL_MODE: No other validators configured for consensus (LOCAL_VALIDATOR_ENDPOINTS empty)")
+                bt.logging.info("   Running in single-validator mode")
                 return []
 
         if not self.metagraph:
-            bt.logging.error("No metagraph available for validator selection")
+            bt.logging.error("❌ No metagraph available for validator selection")
+            bt.logging.error("   Cannot perform consensus without metagraph")
             return []
 
         # Find validators with sufficient stake
@@ -247,16 +262,23 @@ class ConsensusCoordinator:
             eligible_validators.append(uid)
 
         if len(eligible_validators) < count:
-            bt.logging.warning(f"Only {len(eligible_validators)} eligible validators found, requested {count}")
+            bt.logging.info(f"ℹ️  Validator selection: {len(eligible_validators)} eligible (requested {count})")
+            bt.logging.info(f"   This is normal during early network growth")
 
         # Randomly select from eligible using cryptographically secure randomness
         selected_count = min(count, len(eligible_validators))
         selected_uids = secure_random.sample(eligible_validators, selected_count)
 
-        bt.logging.debug(
-            f"Selected {len(selected_uids)} validators from {len(eligible_validators)} eligible "
-            f"(min_stake={min_stake}, excluded self)"
-        )
+        if Config.LOG_CONSENSUS_DETAILS:
+            bt.logging.info(f"🎯 Validator selection: {len(selected_uids)} validators selected")
+            bt.logging.info(f"   Eligible validators: {len(eligible_validators)}")
+            bt.logging.info(f"   Min stake requirement: {min_stake} TAO")
+            bt.logging.info(f"   Selected UIDs: {selected_uids[:5]}{'...' if len(selected_uids) > 5 else ''}")
+        else:
+            bt.logging.debug(
+                f"Selected {len(selected_uids)} validators from {len(eligible_validators)} eligible "
+                f"(min_stake={min_stake}, excluded self)"
+            )
 
         return selected_uids
 
@@ -280,7 +302,14 @@ class ConsensusCoordinator:
                 'vote_details': List[Dict],  # All validator votes
             }
         """
-        bt.logging.info(f"Initiating consensus verification for prompt: {prompt[:50]}...")
+        if Config.LOG_CONSENSUS_DETAILS:
+            bt.logging.info("=" * 60)
+            bt.logging.info("🗳️  INITIATING CONSENSUS VERIFICATION")
+            bt.logging.info(f"   Prompt: {prompt[:50]}...")
+            bt.logging.info(f"   Our vote: {primary_result.get('vote', 'N/A')}")
+            bt.logging.info("=" * 60)
+        else:
+            bt.logging.info(f"Initiating consensus verification for prompt: {prompt[:50]}...")
 
         # Generate unique request ID
         request_id = str(uuid.uuid4())
@@ -293,8 +322,9 @@ class ConsensusCoordinator:
         )
 
         if not validators:
-            # Can't do consensus if no other validators
-            bt.logging.warning("Cannot perform consensus: no other validators available")
+            # Can't do consensus if no other validators - this is informational, not a warning
+            bt.logging.info("ℹ️  Running in single-validator mode (no other validators available)")
+            bt.logging.info("   Consensus will use only this validator's result")
             return {
                 "consensus": primary_result["vote"],  # Trust our own vote
                 "votes": "1/1",
@@ -315,7 +345,12 @@ class ConsensusCoordinator:
         )
 
         # Query other validators
-        bt.logging.info(f"Querying {len(validators)} validators for consensus")
+        if Config.LOG_CONSENSUS_DETAILS:
+            bt.logging.info(f"📡 Querying {len(validators)} validators for consensus")
+            bt.logging.info(f"   Runs per validator: {runs_per_validator}")
+            bt.logging.info(f"   Timeout: {Config.CONSENSUS_TIMEOUT}s")
+        else:
+            bt.logging.info(f"Querying {len(validators)} validators for consensus")
 
         try:
             # In LOCAL_MODE, validators is a list of AxonInfo
@@ -417,16 +452,27 @@ class ConsensusCoordinator:
             # Consensus: need CONSENSUS_REQUIRED_VOTES out of total
             consensus_reached = dangerous_votes >= Config.CONSENSUS_REQUIRED_VOTES
 
-            bt.logging.info(
-                f"Consensus result: {dangerous_votes}/{total_votes} votes for dangerous "
-                f"(consensus: {consensus_reached})"
-            )
+            if Config.LOG_CONSENSUS_DETAILS:
+                bt.logging.info("=" * 60)
+                bt.logging.info("📊 CONSENSUS RESULT")
+                bt.logging.info(f"   Votes for dangerous: {dangerous_votes}/{total_votes}")
+                bt.logging.info(f"   Required for consensus: {Config.CONSENSUS_REQUIRED_VOTES}")
+                bt.logging.info(f"   Consensus reached: {'✅ YES' if consensus_reached else '❌ NO'}")
+                bt.logging.info("=" * 60)
+            else:
+                bt.logging.info(
+                    f"Consensus result: {dangerous_votes}/{total_votes} votes for dangerous "
+                    f"(consensus: {consensus_reached})"
+                )
 
             if excluded_validators:
                 bt.logging.info(
-                    f"Excluded {len(excluded_validators)} validators: "
-                    f"{list(excluded_validators.keys())[:3]}"  # Show first 3
+                    f"ℹ️  Excluded {len(excluded_validators)} validators from consensus:"
                 )
+                for hotkey, reason in list(excluded_validators.items())[:5]:
+                    bt.logging.info(f"   {hotkey[:16]}...: {reason}")
+                if len(excluded_validators) > 5:
+                    bt.logging.info(f"   ... and {len(excluded_validators) - 5} more")
 
             # Update trust scores based on consensus agreement (post-hoc)
             if self.trust_tracker and consensus_reached:
