@@ -228,7 +228,7 @@ class PerMinerRateLimiter:
                 return False, reason, 0
 
             if Config.LOG_RATE_LIMIT_DETAILS:
-                bt.logging.debug(f"✅ Rate limit check PASSED for miner {hotkey[:16]}... ({current_count}/{self.config.max_requests}, {remaining} remaining)")
+                bt.logging.info(f"✅ Rate limit check PASSED for miner {hotkey[:16]}... ({current_count}/{self.config.max_requests}, {remaining} remaining)")
 
             return True, "", remaining
 
@@ -258,7 +258,7 @@ class PerMinerRateLimiter:
 
             if Config.LOG_RATE_LIMIT_DETAILS:
                 count = len(self.miner_requests[hotkey])
-                bt.logging.debug(f"📥 Request recorded for miner {hotkey[:16]}... ({count}/{self.config.max_requests})")
+                bt.logging.info(f"📥 Request recorded for miner {hotkey[:16]}... ({count}/{self.config.max_requests})")
 
     def get_active_miners_count(self) -> int:
         """
