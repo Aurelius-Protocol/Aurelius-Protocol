@@ -165,12 +165,24 @@ class Validator:
         else:
             bt.logging.info("Consensus verification disabled")
 
-        bt.logging.info(f"Validator initialized on port {Config.BT_PORT_VALIDATOR}")
-        bt.logging.info(f"Using chat model: {self.model} (provider: {Config.CHAT_PROVIDER})")
-        bt.logging.info(f"Danger threshold: {Config.DANGER_THRESHOLD}")
-        bt.logging.info(
-            f"Rate limit: {Config.RATE_LIMIT_REQUESTS} requests per {Config.RATE_LIMIT_WINDOW_HOURS} hour(s)"
-        )
+        bt.logging.info("=" * 80)
+        bt.logging.info("🚀 VALIDATOR INITIALIZATION COMPLETE")
+        bt.logging.info("=" * 80)
+        bt.logging.info(f"  Port: {Config.BT_PORT_VALIDATOR}")
+        bt.logging.info(f"  Host: {validator_host}")
+        bt.logging.info(f"  Network: {Config.BT_NETWORK}")
+        bt.logging.info(f"  Netuid: {Config.BT_NETUID}")
+        bt.logging.info(f"  Chat Model: {self.model} (provider: {Config.CHAT_PROVIDER})")
+        bt.logging.info(f"  Danger Threshold: {Config.DANGER_THRESHOLD}")
+        bt.logging.info(f"  Rate Limit: {Config.RATE_LIMIT_REQUESTS} requests per {Config.RATE_LIMIT_WINDOW_HOURS} hour(s)")
+        bt.logging.info(f"  Local Mode: {Config.LOCAL_MODE}")
+        bt.logging.info(f"  Log Level: {Config.LOG_LEVEL}")
+        bt.logging.info(f"  Log Connection Details: {Config.LOG_CONNECTION_DETAILS}")
+        bt.logging.info(f"  Consensus Enabled: {Config.ENABLE_CONSENSUS}")
+        if self.wallet:
+            bt.logging.info(f"  Wallet Name: {Config.VALIDATOR_WALLET_NAME}")
+            bt.logging.info(f"  Hotkey: {self.wallet.hotkey.ss58_address if hasattr(self.wallet.hotkey, 'ss58_address') else 'N/A'}")
+        bt.logging.info("=" * 80)
 
     def _get_current_block(self):
         """Safely get current block number with thread locking."""
@@ -855,17 +867,25 @@ class Validator:
         Returns:
             Tuple of (should_blacklist, reason)
         """
-        bt.logging.info("=" * 80)
-        bt.logging.info("🔍 BLACKLIST CHECK CALLED")
-        bt.logging.info(f"   Synapse name: {synapse.name}")
-        bt.logging.info(f"   Synapse type: {type(synapse).__name__}")
-        if hasattr(synapse, 'dendrite') and synapse.dendrite:
-            bt.logging.info(f"   Dendrite hotkey: {synapse.dendrite.hotkey}")
-            bt.logging.info(f"   Dendrite IP: {synapse.dendrite.ip}")
+        if Config.LOG_CONNECTION_DETAILS:
+            bt.logging.info("=" * 80)
+            bt.logging.info("🔍 BLACKLIST CHECK - INCOMING CONNECTION")
+            bt.logging.info(f"   Synapse name: {synapse.name}")
+            bt.logging.info(f"   Synapse type: {type(synapse).__name__}")
+            if hasattr(synapse, 'dendrite') and synapse.dendrite:
+                bt.logging.info(f"   Miner hotkey: {synapse.dendrite.hotkey}")
+                bt.logging.info(f"   Miner IP: {synapse.dendrite.ip}")
+                bt.logging.info(f"   Miner port: {getattr(synapse.dendrite, 'port', 'N/A')}")
+                bt.logging.info(f"   Miner version: {getattr(synapse.dendrite, 'version', 'N/A')}")
+            else:
+                bt.logging.info("   Dendrite: None (direct connection or missing info)")
+            if hasattr(synapse, 'axon') and synapse.axon:
+                bt.logging.info(f"   Axon IP: {synapse.axon.ip}")
+                bt.logging.info(f"   Axon port: {synapse.axon.port}")
+            bt.logging.info("   Result: ACCEPTED (not blacklisted)")
+            bt.logging.info("=" * 80)
         else:
-            bt.logging.info(f"   Dendrite: None")
-        bt.logging.info(f"   Result: ACCEPT (not blacklisted)")
-        bt.logging.info("=" * 80)
+            bt.logging.debug(f"Blacklist check: synapse={synapse.name}, accepted=True")
 
         # For hello world, accept all requests
         return False, ""
@@ -886,11 +906,11 @@ class Validator:
         Returns:
             Priority value (higher = more priority)
         """
-        bt.logging.info("=" * 80)
-        bt.logging.info("⚖️  PRIORITY CHECK CALLED")
-        bt.logging.info(f"   Synapse name: {synapse.name}")
-        bt.logging.info(f"   Priority assigned: 1.0")
-        bt.logging.info("=" * 80)
+        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, 'dendrite') and synapse.dendrite else 'unknown'
+        if Config.LOG_CONNECTION_DETAILS:
+            bt.logging.info(f"⚖️  Priority check: miner={miner_hotkey[:16]}... priority=1.0")
+        else:
+            bt.logging.debug(f"Priority check: miner={miner_hotkey[:16]}... priority=1.0")
 
         # For hello world, all requests have equal priority
         return 1.0
@@ -993,14 +1013,11 @@ class Validator:
         Args:
             synapse: The incoming synapse
         """
-        bt.logging.info("=" * 80)
-        bt.logging.info("✅ VERIFY CHECK CALLED")
-        bt.logging.info(f"   Synapse name: {synapse.name}")
-        bt.logging.info(f"   LOCAL_MODE: {Config.LOCAL_MODE}")
-        if hasattr(synapse, 'dendrite') and synapse.dendrite:
-            bt.logging.info(f"   Dendrite hotkey: {synapse.dendrite.hotkey}")
-        bt.logging.info(f"   Verification mode: {'SKIPPED (local)' if Config.LOCAL_MODE else 'AUTOMATIC (Bittensor)'}")
-        bt.logging.info("=" * 80)
+        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, 'dendrite') and synapse.dendrite else 'unknown'
+        if Config.LOG_CONNECTION_DETAILS:
+            bt.logging.info(f"✅ Verify: miner={miner_hotkey[:16]}... mode={'LOCAL' if Config.LOCAL_MODE else 'BITTENSOR'}")
+        else:
+            bt.logging.debug(f"Verify check: miner={miner_hotkey[:16]}... local_mode={Config.LOCAL_MODE}")
 
         if Config.LOCAL_MODE:
             # Skip verification in local mode
@@ -1210,11 +1227,13 @@ class Validator:
                 if blocks_since_update < Config.WEIGHT_UPDATE_INTERVAL:
                     continue
 
-                bt.logging.info(
-                    f"Updating weights at block {current_block} ({blocks_since_update} blocks since last update)"
-                )
+                bt.logging.info("=" * 60)
+                bt.logging.info(f"📊 WEIGHT UPDATE CYCLE at block {current_block}")
+                bt.logging.info(f"   Blocks since last update: {blocks_since_update}")
+                bt.logging.info("=" * 60)
 
                 # Sync metagraph to get current miners (with thread safety)
+                bt.logging.info("🔄 Syncing metagraph...")
                 with self.subtensor_lock:
                     metagraph = self.subtensor.metagraph(Config.BT_NETUID)
 
@@ -1225,7 +1244,23 @@ class Validator:
                 uids = list(range(len(metagraph.hotkeys)))
                 hotkeys = [metagraph.hotkeys[uid] for uid in uids]
 
-                bt.logging.info(f"Calculating weights for {len(uids)} miners in metagraph at block {current_block}")
+                # Log metagraph state
+                bt.logging.info(f"📋 Metagraph state:")
+                bt.logging.info(f"   Total neurons: {len(uids)}")
+                bt.logging.info(f"   Netuid: {Config.BT_NETUID}")
+
+                # Count neurons by type (validators vs miners) based on stake
+                if hasattr(metagraph, 'S'):
+                    validators_count = sum(1 for s in metagraph.S if s >= Config.MIN_VALIDATOR_STAKE)
+                    miners_count = len(uids) - validators_count
+                    bt.logging.info(f"   Validators (stake >= {Config.MIN_VALIDATOR_STAKE}): {validators_count}")
+                    bt.logging.info(f"   Miners: {miners_count}")
+
+                # Log miners we're tracking
+                tracked_miners = len(self.scoring_system.miner_scores)
+                bt.logging.info(f"   Tracked miners with submissions: {tracked_miners}")
+
+                bt.logging.info(f"🔢 Calculating weights for {len(uids)} neurons...")
 
                 # Calculate weights using windowed method
                 weights = self.scoring_system.calculate_weights_windowed(
@@ -1235,14 +1270,17 @@ class Validator:
                     min_submissions=Config.MIN_SAMPLES_FOR_WEIGHTS,
                 )
 
-                # Log non-zero weights
+                # Log weight calculation results
                 non_zero = [(uid, hotkeys[i][:8], weights[i]) for i, uid in enumerate(uids) if weights[i] > 0]
                 if non_zero:
-                    bt.logging.info(f"Non-zero weights ({len(non_zero)}):")
+                    bt.logging.info(f"📊 Weight calculation complete - {len(non_zero)} miners with non-zero weights:")
                     for uid, hotkey, weight in non_zero[:10]:  # Show top 10
-                        bt.logging.info(f"  UID {uid} ({hotkey}...): {weight:.6f}")
+                        bt.logging.info(f"   UID {uid} ({hotkey}...): {weight:.6f}")
+                    if len(non_zero) > 10:
+                        bt.logging.info(f"   ... and {len(non_zero) - 10} more miners with weights")
                 else:
-                    bt.logging.warning("No miners qualified for rewards in this window")
+                    # Changed from WARNING to INFO - this is normal when there are no recent submissions
+                    bt.logging.info("📊 No miners qualified for rewards in this window (normal if no recent activity)")
 
                 # Set weights on chain (skip if SKIP_WEIGHT_SETTING is enabled)
                 if Config.SKIP_WEIGHT_SETTING:
@@ -1353,33 +1391,53 @@ class Validator:
         if Config.LOCAL_MODE:
             # Local mode: Skip blockchain registration, just start the server
             bt.logging.info("=" * 60)
-            bt.logging.info("LOCAL MODE ENABLED")
+            bt.logging.info("🏠 LOCAL MODE ENABLED")
             bt.logging.info("=" * 60)
-            bt.logging.info("Skipping blockchain registration (no stake required)")
-            bt.logging.info(f"Starting axon server on port {Config.BT_PORT_VALIDATOR}")
-            bt.logging.info("Miners should connect directly to this IP:PORT")
+            bt.logging.info("  Blockchain registration: SKIPPED (no stake required)")
+            bt.logging.info(f"  Listening on: {Config.VALIDATOR_HOST}:{Config.BT_PORT_VALIDATOR}")
+            bt.logging.info("  Connection method: Direct IP:PORT")
+            bt.logging.info("  Miners should connect to this address directly")
+            bt.logging.info("=" * 60)
         else:
             # Normal mode: Register axon on the blockchain
-            bt.logging.info(f"Serving validator on netuid {Config.BT_NETUID}")
+            bt.logging.info("=" * 60)
+            bt.logging.info("🌐 BLOCKCHAIN MODE - Registering with network")
+            bt.logging.info("=" * 60)
+            bt.logging.info(f"  Network: {Config.BT_NETWORK}")
+            bt.logging.info(f"  Netuid: {Config.BT_NETUID}")
+            bt.logging.info(f"  Port: {Config.BT_PORT_VALIDATOR}")
+
+            bt.logging.info("🔗 Registering axon with subtensor...")
             self.axon.serve(netuid=Config.BT_NETUID, subtensor=self.subtensor)
+            bt.logging.info("✅ Axon registered successfully")
 
             # Determine our UID from the metagraph
             try:
+                bt.logging.info("🔍 Looking up validator UID in metagraph...")
                 with self.subtensor_lock:
                     metagraph = self.subtensor.metagraph(Config.BT_NETUID)
                 validator_hotkey = self.wallet.hotkey.ss58_address
                 if validator_hotkey in metagraph.hotkeys:
                     self.uid = metagraph.hotkeys.index(validator_hotkey)
-                    bt.logging.success(f"Validator UID determined: {self.uid}")
+                    bt.logging.success(f"✅ Validator UID: {self.uid}")
+                    bt.logging.info(f"   Hotkey: {validator_hotkey}")
+                    if hasattr(metagraph, 'S'):
+                        stake = metagraph.S[self.uid]
+                        bt.logging.info(f"   Stake: {stake} TAO")
                 else:
-                    bt.logging.warning(f"Validator hotkey {validator_hotkey} not found in metagraph")
+                    bt.logging.info(f"ℹ️  Validator hotkey {validator_hotkey[:16]}... not found in metagraph")
+                    bt.logging.info("   This is normal if the validator is not yet registered on the subnet")
+                    bt.logging.info("   To register, run: btcli subnet register --netuid {Config.BT_NETUID}")
                     self.uid = None
             except Exception as e:
-                bt.logging.error(f"Failed to determine validator UID: {e}")
+                bt.logging.error(f"❌ Failed to determine validator UID: {e}")
                 self.uid = None
+            bt.logging.info("=" * 60)
 
-        bt.logging.success(f"Validator is running on port {Config.BT_PORT_VALIDATOR}!")
-        bt.logging.info("Waiting for requests from miners...")
+        bt.logging.success("=" * 60)
+        bt.logging.success(f"🟢 VALIDATOR READY - Listening on port {Config.BT_PORT_VALIDATOR}")
+        bt.logging.success("=" * 60)
+        bt.logging.info("📡 Waiting for miner connections...")
 
         # Start the axon server
         self.axon.start()

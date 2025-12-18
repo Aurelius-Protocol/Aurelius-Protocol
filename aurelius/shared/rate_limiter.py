@@ -6,6 +6,8 @@ from threading import Lock
 
 import bittensor as bt
 
+from aurelius.shared.config import Config
+
 
 @dataclass
 class RateLimitConfig:
@@ -191,20 +193,23 @@ class PerMinerRateLimiter:
         """
         # SECURITY: Validate hotkey to prevent bypass via None/empty values
         if not hotkey or not isinstance(hotkey, str) or len(hotkey.strip()) == 0:
-            bt.logging.warning(f"Rate limiter: Invalid hotkey provided: {repr(hotkey)}")
+            bt.logging.warning(f"🚫 Rate limiter: Invalid hotkey provided: {repr(hotkey)}")
             return False, "Invalid or missing hotkey", 0
 
         # Basic SS58 address format validation (Bittensor hotkeys are 48 chars)
         if len(hotkey) < 46 or len(hotkey) > 50:
-            bt.logging.warning(f"Rate limiter: Suspicious hotkey format: {hotkey[:20]}...")
+            bt.logging.warning(f"🚫 Rate limiter: Suspicious hotkey format: {hotkey[:20]}...")
             return False, "Invalid hotkey format", 0
 
         with self.lock:
             current_time = time.time()
 
             # Initialize if first request from this miner
-            if hotkey not in self.miner_requests:
+            is_new_miner = hotkey not in self.miner_requests
+            if is_new_miner:
                 self.miner_requests[hotkey] = []
+                if Config.LOG_RATE_LIMIT_DETAILS:
+                    bt.logging.info(f"📝 New miner connected: {hotkey[:16]}...")
 
             # Clean up old requests
             self._clean_old_requests(current_time, hotkey)
@@ -218,7 +223,12 @@ class PerMinerRateLimiter:
                     f"Per-miner rate limit exceeded: {current_count}/{self.config.max_requests} "
                     f"requests in the last {self.config.window_hours} hour(s)"
                 )
+                if Config.LOG_RATE_LIMIT_DETAILS:
+                    bt.logging.info(f"🚫 Rate limit EXCEEDED for miner {hotkey[:16]}... ({current_count}/{self.config.max_requests})")
                 return False, reason, 0
+
+            if Config.LOG_RATE_LIMIT_DETAILS:
+                bt.logging.debug(f"✅ Rate limit check PASSED for miner {hotkey[:16]}... ({current_count}/{self.config.max_requests}, {remaining} remaining)")
 
             return True, "", remaining
 
@@ -245,3 +255,56 @@ class PerMinerRateLimiter:
                 self.miner_requests[hotkey] = []
 
             self.miner_requests[hotkey].append(RequestRecord(timestamp=current_time, hotkey=hotkey))
+
+            if Config.LOG_RATE_LIMIT_DETAILS:
+                count = len(self.miner_requests[hotkey])
+                bt.logging.debug(f"📥 Request recorded for miner {hotkey[:16]}... ({count}/{self.config.max_requests})")
+
+    def get_active_miners_count(self) -> int:
+        """
+        Get the number of miners with requests in the current window.
+
+        Returns:
+            Number of active miners
+        """
+        with self.lock:
+            current_time = time.time()
+            window_seconds = self.config.window_hours * 3600
+            cutoff_time = current_time - window_seconds
+
+            active_count = 0
+            for hotkey in self.miner_requests:
+                recent_requests = [r for r in self.miner_requests[hotkey] if r.timestamp > cutoff_time]
+                if recent_requests:
+                    active_count += 1
+
+            return active_count
+
+    def get_stats(self) -> dict:
+        """
+        Get current rate limiter statistics.
+
+        Returns:
+            Dictionary with current stats
+        """
+        with self.lock:
+            current_time = time.time()
+            window_seconds = self.config.window_hours * 3600
+            cutoff_time = current_time - window_seconds
+
+            total_requests = 0
+            active_miners = 0
+
+            for hotkey in self.miner_requests:
+                recent_requests = [r for r in self.miner_requests[hotkey] if r.timestamp > cutoff_time]
+                if recent_requests:
+                    active_miners += 1
+                    total_requests += len(recent_requests)
+
+            return {
+                "active_miners": active_miners,
+                "total_miners_seen": len(self.miner_requests),
+                "total_requests_in_window": total_requests,
+                "max_requests_per_miner": self.config.max_requests,
+                "window_hours": self.config.window_hours,
+            }
