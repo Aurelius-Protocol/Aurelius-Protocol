@@ -9,6 +9,8 @@ from pathlib import Path
 
 import bittensor as bt
 
+from aurelius.shared.config import Config
+
 
 @dataclass
 class MinerScore:
@@ -476,13 +478,21 @@ class ScoringSystem:
                 )
             )
         else:
-            bt.logging.info("No qualifying miners in window - all weights are 0")
+            # Changed from warning to info - this is normal when there are no recent submissions
+            bt.logging.info("📊 No qualifying miners in current window (normal if no recent activity)")
 
-        bt.logging.info(
-            f"Calculated windowed weights for {len(final_weights)} miners "
-            f"(window: blocks {window_start}-{current_block}, "
-            f"rewarded: {sum(1 for w in final_weights if w > 0)}/{Config.TOP_REWARDED_MINERS} max)"
-        )
+        if Config.LOG_WEIGHT_CALCULATIONS:
+            bt.logging.info(
+                f"📊 Weight calculation summary: "
+                f"{sum(1 for w in final_weights if w > 0)}/{Config.TOP_REWARDED_MINERS} miners rewarded "
+                f"(window: blocks {window_start}-{current_block})"
+            )
+        else:
+            bt.logging.info(
+                f"Calculated windowed weights for {len(final_weights)} miners "
+                f"(window: blocks {window_start}-{current_block}, "
+                f"rewarded: {sum(1 for w in final_weights if w > 0)}/{Config.TOP_REWARDED_MINERS} max)"
+            )
 
         # Apply miner burn if enabled
         if Config.MINER_BURN_ENABLED:

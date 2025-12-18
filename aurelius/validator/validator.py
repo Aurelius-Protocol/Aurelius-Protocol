@@ -1,6 +1,7 @@
 """Validator implementation - processes prompts using configurable chat providers."""
 
 import argparse
+import socket
 import sys
 import threading
 import time
@@ -20,6 +21,86 @@ from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
+
+
+def check_port_available(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
+    """
+    Check if a port is available for binding (not already in use).
+
+    Args:
+        host: Host address to check
+        port: Port number to check
+        timeout: Connection timeout in seconds
+
+    Returns:
+        Tuple of (is_available, message)
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(timeout)
+            sock.bind((host, port))
+            return True, "Port is available"
+    except socket.error as e:
+        if e.errno == 98 or "Address already in use" in str(e):
+            return False, f"Port {port} is already in use by another process"
+        elif e.errno == 13 or "Permission denied" in str(e):
+            return False, f"Permission denied to bind to port {port} (try a port > 1024 or run as root)"
+        else:
+            return False, f"Cannot bind to port {port}: {e}"
+
+
+def check_port_accessible(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
+    """
+    Check if a port is accessible (can accept connections).
+
+    Args:
+        host: Host address to check
+        port: Port number to check
+        timeout: Connection timeout in seconds
+
+    Returns:
+        Tuple of (is_accessible, message)
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            if result == 0:
+                return True, "Port is accessible"
+            else:
+                return False, f"Port {port} is not accessible (connection refused)"
+    except socket.timeout:
+        return False, f"Port {port} connection timed out (may be blocked by firewall)"
+    except socket.error as e:
+        return False, f"Port {port} check failed: {e}"
+
+
+def check_external_port_accessible(port: int, timeout: float = 5.0) -> tuple[bool, str, str | None]:
+    """
+    Check if a port is accessible from the internet using external service.
+
+    Args:
+        port: Port number to check
+        timeout: Request timeout in seconds
+
+    Returns:
+        Tuple of (is_accessible, message, external_ip)
+    """
+    import requests
+
+    try:
+        # Use a port checking service
+        response = requests.get(
+            f"https://api.ipify.org?format=json",
+            timeout=timeout
+        )
+        if response.status_code == 200:
+            external_ip = response.json().get("ip")
+            return True, "External IP detected", external_ip
+        return False, "Could not detect external IP", None
+    except Exception as e:
+        return False, f"External check failed: {e}", None
 
 
 class Validator:
@@ -165,12 +246,24 @@ class Validator:
         else:
             bt.logging.info("Consensus verification disabled")
 
-        bt.logging.info(f"Validator initialized on port {Config.BT_PORT_VALIDATOR}")
-        bt.logging.info(f"Using chat model: {self.model} (provider: {Config.CHAT_PROVIDER})")
-        bt.logging.info(f"Danger threshold: {Config.DANGER_THRESHOLD}")
-        bt.logging.info(
-            f"Rate limit: {Config.RATE_LIMIT_REQUESTS} requests per {Config.RATE_LIMIT_WINDOW_HOURS} hour(s)"
-        )
+        bt.logging.info("=" * 80)
+        bt.logging.info("🚀 VALIDATOR INITIALIZATION COMPLETE")
+        bt.logging.info("=" * 80)
+        bt.logging.info(f"  Port: {Config.BT_PORT_VALIDATOR}")
+        bt.logging.info(f"  Host: {validator_host}")
+        bt.logging.info(f"  Network: {Config.BT_NETWORK}")
+        bt.logging.info(f"  Netuid: {Config.BT_NETUID}")
+        bt.logging.info(f"  Chat Model: {self.model} (provider: {Config.CHAT_PROVIDER})")
+        bt.logging.info(f"  Danger Threshold: {Config.DANGER_THRESHOLD}")
+        bt.logging.info(f"  Rate Limit: {Config.RATE_LIMIT_REQUESTS} requests per {Config.RATE_LIMIT_WINDOW_HOURS} hour(s)")
+        bt.logging.info(f"  Local Mode: {Config.LOCAL_MODE}")
+        bt.logging.info(f"  Log Level: {Config.LOG_LEVEL}")
+        bt.logging.info(f"  Log Connection Details: {Config.LOG_CONNECTION_DETAILS}")
+        bt.logging.info(f"  Consensus Enabled: {Config.ENABLE_CONSENSUS}")
+        if self.wallet:
+            bt.logging.info(f"  Wallet Name: {Config.VALIDATOR_WALLET_NAME}")
+            bt.logging.info(f"  Hotkey: {self.wallet.hotkey.ss58_address if hasattr(self.wallet.hotkey, 'ss58_address') else 'N/A'}")
+        bt.logging.info("=" * 80)
 
     def _get_current_block(self):
         """Safely get current block number with thread locking."""
@@ -855,17 +948,25 @@ class Validator:
         Returns:
             Tuple of (should_blacklist, reason)
         """
-        bt.logging.info("=" * 80)
-        bt.logging.info("🔍 BLACKLIST CHECK CALLED")
-        bt.logging.info(f"   Synapse name: {synapse.name}")
-        bt.logging.info(f"   Synapse type: {type(synapse).__name__}")
-        if hasattr(synapse, 'dendrite') and synapse.dendrite:
-            bt.logging.info(f"   Dendrite hotkey: {synapse.dendrite.hotkey}")
-            bt.logging.info(f"   Dendrite IP: {synapse.dendrite.ip}")
+        if Config.LOG_CONNECTION_DETAILS:
+            bt.logging.info("=" * 80)
+            bt.logging.info("🔍 BLACKLIST CHECK - INCOMING CONNECTION")
+            bt.logging.info(f"   Synapse name: {synapse.name}")
+            bt.logging.info(f"   Synapse type: {type(synapse).__name__}")
+            if hasattr(synapse, 'dendrite') and synapse.dendrite:
+                bt.logging.info(f"   Miner hotkey: {synapse.dendrite.hotkey}")
+                bt.logging.info(f"   Miner IP: {synapse.dendrite.ip}")
+                bt.logging.info(f"   Miner port: {getattr(synapse.dendrite, 'port', 'N/A')}")
+                bt.logging.info(f"   Miner version: {getattr(synapse.dendrite, 'version', 'N/A')}")
+            else:
+                bt.logging.info("   Dendrite: None (direct connection or missing info)")
+            if hasattr(synapse, 'axon') and synapse.axon:
+                bt.logging.info(f"   Axon IP: {synapse.axon.ip}")
+                bt.logging.info(f"   Axon port: {synapse.axon.port}")
+            bt.logging.info("   Result: ACCEPTED (not blacklisted)")
+            bt.logging.info("=" * 80)
         else:
-            bt.logging.info(f"   Dendrite: None")
-        bt.logging.info(f"   Result: ACCEPT (not blacklisted)")
-        bt.logging.info("=" * 80)
+            bt.logging.info(f"🔍 Blacklist check: synapse={synapse.name}, accepted=True")
 
         # For hello world, accept all requests
         return False, ""
@@ -886,11 +987,11 @@ class Validator:
         Returns:
             Priority value (higher = more priority)
         """
-        bt.logging.info("=" * 80)
-        bt.logging.info("⚖️  PRIORITY CHECK CALLED")
-        bt.logging.info(f"   Synapse name: {synapse.name}")
-        bt.logging.info(f"   Priority assigned: 1.0")
-        bt.logging.info("=" * 80)
+        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, 'dendrite') and synapse.dendrite else 'unknown'
+        if Config.LOG_CONNECTION_DETAILS:
+            bt.logging.info(f"⚖️  Priority check: miner={miner_hotkey[:16]}... priority=1.0")
+        else:
+            bt.logging.info(f"⚖️  Priority check: miner={miner_hotkey[:16]}... priority=1.0")
 
         # For hello world, all requests have equal priority
         return 1.0
@@ -993,14 +1094,11 @@ class Validator:
         Args:
             synapse: The incoming synapse
         """
-        bt.logging.info("=" * 80)
-        bt.logging.info("✅ VERIFY CHECK CALLED")
-        bt.logging.info(f"   Synapse name: {synapse.name}")
-        bt.logging.info(f"   LOCAL_MODE: {Config.LOCAL_MODE}")
-        if hasattr(synapse, 'dendrite') and synapse.dendrite:
-            bt.logging.info(f"   Dendrite hotkey: {synapse.dendrite.hotkey}")
-        bt.logging.info(f"   Verification mode: {'SKIPPED (local)' if Config.LOCAL_MODE else 'AUTOMATIC (Bittensor)'}")
-        bt.logging.info("=" * 80)
+        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, 'dendrite') and synapse.dendrite else 'unknown'
+        if Config.LOG_CONNECTION_DETAILS:
+            bt.logging.info(f"✅ Verify: miner={miner_hotkey[:16]}... mode={'LOCAL' if Config.LOCAL_MODE else 'BITTENSOR'}")
+        else:
+            bt.logging.info(f"✅ Verify check: miner={miner_hotkey[:16]}... local_mode={Config.LOCAL_MODE}")
 
         if Config.LOCAL_MODE:
             # Skip verification in local mode
@@ -1107,6 +1205,79 @@ class Validator:
         except Exception as e:
             bt.logging.error(f"  Error during diagnosis: {e}")
 
+    def _check_network_connectivity(self) -> None:
+        """
+        Check network connectivity and port accessibility.
+
+        Logs warnings if potential connectivity issues are detected that could
+        prevent miners from connecting to this validator.
+        """
+        port = Config.BT_PORT_VALIDATOR
+        host = Config.VALIDATOR_HOST
+
+        bt.logging.info("=" * 60)
+        bt.logging.info("🔌 NETWORK CONNECTIVITY CHECK")
+        bt.logging.info("=" * 60)
+
+        issues_found = False
+
+        # Check 1: Is the port available for binding?
+        bt.logging.info(f"  Checking port {port} availability...")
+        is_available, msg = check_port_available("0.0.0.0", port)
+        if not is_available:
+            bt.logging.warning(f"  ⚠️  PORT ISSUE: {msg}")
+            bt.logging.warning(f"     The validator may fail to start or miners won't be able to connect.")
+            bt.logging.warning(f"     Suggestions:")
+            bt.logging.warning(f"       - Check if another process is using port {port}: lsof -i :{port}")
+            bt.logging.warning(f"       - Use a different port: BT_PORT_VALIDATOR=<new_port>")
+            bt.logging.warning(f"       - Kill the process using the port: kill <pid>")
+            issues_found = True
+        else:
+            bt.logging.info(f"  ✅ Port {port} is available for binding")
+
+        # Check 2: For non-local mode, check if we can detect external IP
+        if not Config.LOCAL_MODE:
+            bt.logging.info("  Checking external connectivity...")
+            success, msg, external_ip = check_external_port_accessible(port)
+            if success and external_ip:
+                bt.logging.info(f"  ✅ External IP detected: {external_ip}")
+
+                # Check if configured host matches external IP
+                if Config.AUTO_DETECT_EXTERNAL_IP:
+                    bt.logging.info(f"  ✅ AUTO_DETECT_EXTERNAL_IP is enabled")
+                elif host not in ["0.0.0.0", external_ip]:
+                    bt.logging.warning(f"  ⚠️  VALIDATOR_HOST ({host}) differs from external IP ({external_ip})")
+                    bt.logging.warning(f"     Miners may not be able to connect. Consider:")
+                    bt.logging.warning(f"       - Setting AUTO_DETECT_EXTERNAL_IP=true")
+                    bt.logging.warning(f"       - Setting VALIDATOR_HOST={external_ip}")
+                    issues_found = True
+            else:
+                bt.logging.info(f"  ℹ️  Could not verify external connectivity: {msg}")
+                bt.logging.info(f"     This is normal if running behind NAT or without internet access")
+
+        # Check 3: Common firewall/port issues
+        bt.logging.info("  Firewall/NAT considerations:")
+        bt.logging.info(f"     - Ensure port {port} is open in your firewall")
+        bt.logging.info(f"     - If behind NAT, ensure port {port} is forwarded to this machine")
+        bt.logging.info(f"     - Cloud providers (AWS, GCP, etc.) require security group rules")
+
+        if not Config.LOCAL_MODE:
+            bt.logging.info("")
+            bt.logging.info("  Common firewall commands:")
+            bt.logging.info(f"     UFW:      sudo ufw allow {port}/tcp")
+            bt.logging.info(f"     iptables: sudo iptables -A INPUT -p tcp --dport {port} -j ACCEPT")
+            bt.logging.info(f"     firewalld: sudo firewall-cmd --add-port={port}/tcp --permanent")
+
+        if issues_found:
+            bt.logging.warning("=" * 60)
+            bt.logging.warning("⚠️  POTENTIAL CONNECTIVITY ISSUES DETECTED")
+            bt.logging.warning("   Miners may have trouble connecting to this validator.")
+            bt.logging.warning("   Review the warnings above and fix before proceeding.")
+            bt.logging.warning("=" * 60)
+        else:
+            bt.logging.info("  ✅ No obvious connectivity issues detected")
+            bt.logging.info("=" * 60)
+
     def _get_miner_info(self, miner_hotkey: str | None) -> tuple[int | None, str | None]:
         """
         Resolve miner UID and coldkey from hotkey using the metagraph.
@@ -1210,11 +1381,13 @@ class Validator:
                 if blocks_since_update < Config.WEIGHT_UPDATE_INTERVAL:
                     continue
 
-                bt.logging.info(
-                    f"Updating weights at block {current_block} ({blocks_since_update} blocks since last update)"
-                )
+                bt.logging.info("=" * 60)
+                bt.logging.info(f"📊 WEIGHT UPDATE CYCLE at block {current_block}")
+                bt.logging.info(f"   Blocks since last update: {blocks_since_update}")
+                bt.logging.info("=" * 60)
 
                 # Sync metagraph to get current miners (with thread safety)
+                bt.logging.info("🔄 Syncing metagraph...")
                 with self.subtensor_lock:
                     metagraph = self.subtensor.metagraph(Config.BT_NETUID)
 
@@ -1225,7 +1398,23 @@ class Validator:
                 uids = list(range(len(metagraph.hotkeys)))
                 hotkeys = [metagraph.hotkeys[uid] for uid in uids]
 
-                bt.logging.info(f"Calculating weights for {len(uids)} miners in metagraph at block {current_block}")
+                # Log metagraph state
+                bt.logging.info(f"📋 Metagraph state:")
+                bt.logging.info(f"   Total neurons: {len(uids)}")
+                bt.logging.info(f"   Netuid: {Config.BT_NETUID}")
+
+                # Count neurons by type (validators vs miners) based on stake
+                if hasattr(metagraph, 'S'):
+                    validators_count = sum(1 for s in metagraph.S if s >= Config.MIN_VALIDATOR_STAKE)
+                    miners_count = len(uids) - validators_count
+                    bt.logging.info(f"   Validators (stake >= {Config.MIN_VALIDATOR_STAKE}): {validators_count}")
+                    bt.logging.info(f"   Miners: {miners_count}")
+
+                # Log miners we're tracking
+                tracked_miners = len(self.scoring_system.miner_scores)
+                bt.logging.info(f"   Tracked miners with submissions: {tracked_miners}")
+
+                bt.logging.info(f"🔢 Calculating weights for {len(uids)} neurons...")
 
                 # Calculate weights using windowed method
                 weights = self.scoring_system.calculate_weights_windowed(
@@ -1235,14 +1424,17 @@ class Validator:
                     min_submissions=Config.MIN_SAMPLES_FOR_WEIGHTS,
                 )
 
-                # Log non-zero weights
+                # Log weight calculation results
                 non_zero = [(uid, hotkeys[i][:8], weights[i]) for i, uid in enumerate(uids) if weights[i] > 0]
                 if non_zero:
-                    bt.logging.info(f"Non-zero weights ({len(non_zero)}):")
+                    bt.logging.info(f"📊 Weight calculation complete - {len(non_zero)} miners with non-zero weights:")
                     for uid, hotkey, weight in non_zero[:10]:  # Show top 10
-                        bt.logging.info(f"  UID {uid} ({hotkey}...): {weight:.6f}")
+                        bt.logging.info(f"   UID {uid} ({hotkey}...): {weight:.6f}")
+                    if len(non_zero) > 10:
+                        bt.logging.info(f"   ... and {len(non_zero) - 10} more miners with weights")
                 else:
-                    bt.logging.warning("No miners qualified for rewards in this window")
+                    # Changed from WARNING to INFO - this is normal when there are no recent submissions
+                    bt.logging.info("📊 No miners qualified for rewards in this window (normal if no recent activity)")
 
                 # Set weights on chain (skip if SKIP_WEIGHT_SETTING is enabled)
                 if Config.SKIP_WEIGHT_SETTING:
@@ -1350,36 +1542,59 @@ class Validator:
         bt.logging.info(f"   All registered handlers: {list(self.axon.forward_class_types.keys())}")
         bt.logging.info("=" * 80)
 
+        # Check network connectivity before starting
+        self._check_network_connectivity()
+
         if Config.LOCAL_MODE:
             # Local mode: Skip blockchain registration, just start the server
             bt.logging.info("=" * 60)
-            bt.logging.info("LOCAL MODE ENABLED")
+            bt.logging.info("🏠 LOCAL MODE ENABLED")
             bt.logging.info("=" * 60)
-            bt.logging.info("Skipping blockchain registration (no stake required)")
-            bt.logging.info(f"Starting axon server on port {Config.BT_PORT_VALIDATOR}")
-            bt.logging.info("Miners should connect directly to this IP:PORT")
+            bt.logging.info("  Blockchain registration: SKIPPED (no stake required)")
+            bt.logging.info(f"  Listening on: {Config.VALIDATOR_HOST}:{Config.BT_PORT_VALIDATOR}")
+            bt.logging.info("  Connection method: Direct IP:PORT")
+            bt.logging.info("  Miners should connect to this address directly")
+            bt.logging.info("=" * 60)
         else:
             # Normal mode: Register axon on the blockchain
-            bt.logging.info(f"Serving validator on netuid {Config.BT_NETUID}")
+            bt.logging.info("=" * 60)
+            bt.logging.info("🌐 BLOCKCHAIN MODE - Registering with network")
+            bt.logging.info("=" * 60)
+            bt.logging.info(f"  Network: {Config.BT_NETWORK}")
+            bt.logging.info(f"  Netuid: {Config.BT_NETUID}")
+            bt.logging.info(f"  Port: {Config.BT_PORT_VALIDATOR}")
+
+            bt.logging.info("🔗 Registering axon with subtensor...")
             self.axon.serve(netuid=Config.BT_NETUID, subtensor=self.subtensor)
+            bt.logging.info("✅ Axon registered successfully")
 
             # Determine our UID from the metagraph
             try:
+                bt.logging.info("🔍 Looking up validator UID in metagraph...")
                 with self.subtensor_lock:
                     metagraph = self.subtensor.metagraph(Config.BT_NETUID)
                 validator_hotkey = self.wallet.hotkey.ss58_address
                 if validator_hotkey in metagraph.hotkeys:
                     self.uid = metagraph.hotkeys.index(validator_hotkey)
-                    bt.logging.success(f"Validator UID determined: {self.uid}")
+                    bt.logging.success(f"✅ Validator UID: {self.uid}")
+                    bt.logging.info(f"   Hotkey: {validator_hotkey}")
+                    if hasattr(metagraph, 'S'):
+                        stake = metagraph.S[self.uid]
+                        bt.logging.info(f"   Stake: {stake} TAO")
                 else:
-                    bt.logging.warning(f"Validator hotkey {validator_hotkey} not found in metagraph")
+                    bt.logging.info(f"ℹ️  Validator hotkey {validator_hotkey[:16]}... not found in metagraph")
+                    bt.logging.info("   This is normal if the validator is not yet registered on the subnet")
+                    bt.logging.info("   To register, run: btcli subnet register --netuid {Config.BT_NETUID}")
                     self.uid = None
             except Exception as e:
-                bt.logging.error(f"Failed to determine validator UID: {e}")
+                bt.logging.error(f"❌ Failed to determine validator UID: {e}")
                 self.uid = None
+            bt.logging.info("=" * 60)
 
-        bt.logging.success(f"Validator is running on port {Config.BT_PORT_VALIDATOR}!")
-        bt.logging.info("Waiting for requests from miners...")
+        bt.logging.success("=" * 60)
+        bt.logging.success(f"🟢 VALIDATOR READY - Listening on port {Config.BT_PORT_VALIDATOR}")
+        bt.logging.success("=" * 60)
+        bt.logging.info("📡 Waiting for miner connections...")
 
         # Start the axon server
         self.axon.start()
