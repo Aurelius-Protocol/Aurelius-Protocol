@@ -63,6 +63,11 @@ class Config:
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()  # DEBUG, INFO, WARNING, ERROR
     LOG_SENSITIVE_DATA: bool = os.getenv("LOG_SENSITIVE_DATA", "false").lower() == "true"
     MAX_LOG_LENGTH: int = int(os.getenv("MAX_LOG_LENGTH", "100"))
+    # Enhanced logging options for troubleshooting
+    LOG_CONNECTION_DETAILS: bool = os.getenv("LOG_CONNECTION_DETAILS", "true").lower() == "true"  # Log miner connection details
+    LOG_WEIGHT_CALCULATIONS: bool = os.getenv("LOG_WEIGHT_CALCULATIONS", "true").lower() == "true"  # Log weight calc details
+    LOG_CONSENSUS_DETAILS: bool = os.getenv("LOG_CONSENSUS_DETAILS", "true").lower() == "true"  # Log consensus verification details
+    LOG_RATE_LIMIT_DETAILS: bool = os.getenv("LOG_RATE_LIMIT_DETAILS", "true").lower() == "true"  # Log rate limiting decisions
 
     # Category weights for moderation scoring (all equal for fair assessment)
     _category_weights_str = os.getenv(
