@@ -1,6 +1,7 @@
 """Validator implementation - processes prompts using configurable chat providers."""
 
 import argparse
+import socket
 import sys
 import threading
 import time
@@ -20,6 +21,86 @@ from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
+
+
+def check_port_available(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
+    """
+    Check if a port is available for binding (not already in use).
+
+    Args:
+        host: Host address to check
+        port: Port number to check
+        timeout: Connection timeout in seconds
+
+    Returns:
+        Tuple of (is_available, message)
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.settimeout(timeout)
+            sock.bind((host, port))
+            return True, "Port is available"
+    except socket.error as e:
+        if e.errno == 98 or "Address already in use" in str(e):
+            return False, f"Port {port} is already in use by another process"
+        elif e.errno == 13 or "Permission denied" in str(e):
+            return False, f"Permission denied to bind to port {port} (try a port > 1024 or run as root)"
+        else:
+            return False, f"Cannot bind to port {port}: {e}"
+
+
+def check_port_accessible(host: str, port: int, timeout: float = 3.0) -> tuple[bool, str]:
+    """
+    Check if a port is accessible (can accept connections).
+
+    Args:
+        host: Host address to check
+        port: Port number to check
+        timeout: Connection timeout in seconds
+
+    Returns:
+        Tuple of (is_accessible, message)
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            if result == 0:
+                return True, "Port is accessible"
+            else:
+                return False, f"Port {port} is not accessible (connection refused)"
+    except socket.timeout:
+        return False, f"Port {port} connection timed out (may be blocked by firewall)"
+    except socket.error as e:
+        return False, f"Port {port} check failed: {e}"
+
+
+def check_external_port_accessible(port: int, timeout: float = 5.0) -> tuple[bool, str, str | None]:
+    """
+    Check if a port is accessible from the internet using external service.
+
+    Args:
+        port: Port number to check
+        timeout: Request timeout in seconds
+
+    Returns:
+        Tuple of (is_accessible, message, external_ip)
+    """
+    import requests
+
+    try:
+        # Use a port checking service
+        response = requests.get(
+            f"https://api.ipify.org?format=json",
+            timeout=timeout
+        )
+        if response.status_code == 200:
+            external_ip = response.json().get("ip")
+            return True, "External IP detected", external_ip
+        return False, "Could not detect external IP", None
+    except Exception as e:
+        return False, f"External check failed: {e}", None
 
 
 class Validator:
@@ -1124,6 +1205,79 @@ class Validator:
         except Exception as e:
             bt.logging.error(f"  Error during diagnosis: {e}")
 
+    def _check_network_connectivity(self) -> None:
+        """
+        Check network connectivity and port accessibility.
+
+        Logs warnings if potential connectivity issues are detected that could
+        prevent miners from connecting to this validator.
+        """
+        port = Config.BT_PORT_VALIDATOR
+        host = Config.VALIDATOR_HOST
+
+        bt.logging.info("=" * 60)
+        bt.logging.info("🔌 NETWORK CONNECTIVITY CHECK")
+        bt.logging.info("=" * 60)
+
+        issues_found = False
+
+        # Check 1: Is the port available for binding?
+        bt.logging.info(f"  Checking port {port} availability...")
+        is_available, msg = check_port_available("0.0.0.0", port)
+        if not is_available:
+            bt.logging.warning(f"  ⚠️  PORT ISSUE: {msg}")
+            bt.logging.warning(f"     The validator may fail to start or miners won't be able to connect.")
+            bt.logging.warning(f"     Suggestions:")
+            bt.logging.warning(f"       - Check if another process is using port {port}: lsof -i :{port}")
+            bt.logging.warning(f"       - Use a different port: BT_PORT_VALIDATOR=<new_port>")
+            bt.logging.warning(f"       - Kill the process using the port: kill <pid>")
+            issues_found = True
+        else:
+            bt.logging.info(f"  ✅ Port {port} is available for binding")
+
+        # Check 2: For non-local mode, check if we can detect external IP
+        if not Config.LOCAL_MODE:
+            bt.logging.info("  Checking external connectivity...")
+            success, msg, external_ip = check_external_port_accessible(port)
+            if success and external_ip:
+                bt.logging.info(f"  ✅ External IP detected: {external_ip}")
+
+                # Check if configured host matches external IP
+                if Config.AUTO_DETECT_EXTERNAL_IP:
+                    bt.logging.info(f"  ✅ AUTO_DETECT_EXTERNAL_IP is enabled")
+                elif host not in ["0.0.0.0", external_ip]:
+                    bt.logging.warning(f"  ⚠️  VALIDATOR_HOST ({host}) differs from external IP ({external_ip})")
+                    bt.logging.warning(f"     Miners may not be able to connect. Consider:")
+                    bt.logging.warning(f"       - Setting AUTO_DETECT_EXTERNAL_IP=true")
+                    bt.logging.warning(f"       - Setting VALIDATOR_HOST={external_ip}")
+                    issues_found = True
+            else:
+                bt.logging.info(f"  ℹ️  Could not verify external connectivity: {msg}")
+                bt.logging.info(f"     This is normal if running behind NAT or without internet access")
+
+        # Check 3: Common firewall/port issues
+        bt.logging.info("  Firewall/NAT considerations:")
+        bt.logging.info(f"     - Ensure port {port} is open in your firewall")
+        bt.logging.info(f"     - If behind NAT, ensure port {port} is forwarded to this machine")
+        bt.logging.info(f"     - Cloud providers (AWS, GCP, etc.) require security group rules")
+
+        if not Config.LOCAL_MODE:
+            bt.logging.info("")
+            bt.logging.info("  Common firewall commands:")
+            bt.logging.info(f"     UFW:      sudo ufw allow {port}/tcp")
+            bt.logging.info(f"     iptables: sudo iptables -A INPUT -p tcp --dport {port} -j ACCEPT")
+            bt.logging.info(f"     firewalld: sudo firewall-cmd --add-port={port}/tcp --permanent")
+
+        if issues_found:
+            bt.logging.warning("=" * 60)
+            bt.logging.warning("⚠️  POTENTIAL CONNECTIVITY ISSUES DETECTED")
+            bt.logging.warning("   Miners may have trouble connecting to this validator.")
+            bt.logging.warning("   Review the warnings above and fix before proceeding.")
+            bt.logging.warning("=" * 60)
+        else:
+            bt.logging.info("  ✅ No obvious connectivity issues detected")
+            bt.logging.info("=" * 60)
+
     def _get_miner_info(self, miner_hotkey: str | None) -> tuple[int | None, str | None]:
         """
         Resolve miner UID and coldkey from hotkey using the metagraph.
@@ -1387,6 +1541,9 @@ class Validator:
         bt.logging.info(f"   PromptSynapse in forward_fns: {'PromptSynapse' in self.axon.forward_fns}")
         bt.logging.info(f"   All registered handlers: {list(self.axon.forward_class_types.keys())}")
         bt.logging.info("=" * 80)
+
+        # Check network connectivity before starting
+        self._check_network_connectivity()
 
         if Config.LOCAL_MODE:
             # Local mode: Skip blockchain registration, just start the server
