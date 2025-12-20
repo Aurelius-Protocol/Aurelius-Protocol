@@ -178,6 +178,15 @@ class Config:
     MINER_WALLET_NAME: str = os.getenv("MINER_WALLET_NAME", "miner")
     MINER_HOTKEY: str = os.getenv("MINER_HOTKEY", "default")
 
+    # Miner Connection Configuration
+    MINER_TIMEOUT: int = int(os.getenv("MINER_TIMEOUT", "30"))  # Query timeout in seconds
+    MINER_MAX_RETRIES: int = int(os.getenv("MINER_MAX_RETRIES", "3"))  # Max retry attempts
+    MINER_RETRY_DELAY: float = float(os.getenv("MINER_RETRY_DELAY", "1.0"))  # Initial retry delay
+    MINER_RETRY_MAX_DELAY: float = float(os.getenv("MINER_RETRY_MAX_DELAY", "30.0"))  # Max retry delay
+    MINER_PREFLIGHT_CHECK: bool = os.getenv("MINER_PREFLIGHT_CHECK", "true").lower() == "true"
+    MINER_PREFLIGHT_TIMEOUT: float = float(os.getenv("MINER_PREFLIGHT_TIMEOUT", "5.0"))
+    MINER_COLORED_OUTPUT: bool = os.getenv("MINER_COLORED_OUTPUT", "true").lower() == "true"
+
     # Chain endpoint (for local development)
     SUBTENSOR_ENDPOINT: str | None = os.getenv("SUBTENSOR_ENDPOINT")
 
