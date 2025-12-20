@@ -9,6 +9,30 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+class ConfigurationError(Exception):
+    """Raised when configuration is invalid and cannot proceed."""
+
+    pass
+
+
+# Network-specific default configurations
+# These are applied based on BT_NETUID when apply_network_defaults() is called
+NETWORK_DEFAULTS = {
+    37: {  # Mainnet (Finney)
+        "DANGER_THRESHOLD": 0.5,
+        "MIN_HIT_RATE_THRESHOLD": 0.4,
+        "MIN_VALIDATOR_STAKE": 1000.0,
+        "MIN_NOVELTY_THRESHOLD": 0.7,
+    },
+    290: {  # Testnet
+        "DANGER_THRESHOLD": 0.2,
+        "MIN_HIT_RATE_THRESHOLD": 0.3,
+        "MIN_VALIDATOR_STAKE": 100.0,
+        "MIN_NOVELTY_THRESHOLD": 0.3,
+    },
+}
+
+
 class Config:
     """Subnet configuration loaded from environment variables."""
 
@@ -159,6 +183,11 @@ class Config:
     # Local Mode - Skip blockchain registration (for testing without stake)
     LOCAL_MODE: bool = os.getenv("LOCAL_MODE", "false").lower() == "true"
 
+    # Advanced Mode - Allow custom overrides of network defaults
+    # When False (default): Network defaults are ALWAYS used, custom values ignored with warning
+    # When True: Custom env values override network defaults (for advanced users)
+    ADVANCED_MODE: bool = os.getenv("ADVANCED_MODE", "false").lower() == "true"
+
     # Network Configuration
     AUTO_DETECT_EXTERNAL_IP: bool = os.getenv("AUTO_DETECT_EXTERNAL_IP", "false").lower() == "true"
     VALIDATOR_HOST: str = os.getenv("VALIDATOR_HOST", "127.0.0.1")
@@ -185,22 +214,65 @@ class Config:
 
     @classmethod
     def validate(cls) -> None:
-        """Validate that required configuration is present."""
-        # Validate chat provider configuration
-        if cls.CHAT_PROVIDER not in ["chutes", "openai"]:
-            raise ValueError(f"CHAT_PROVIDER must be 'chutes' or 'openai', got '{cls.CHAT_PROVIDER}'")
+        """
+        Validate that required configuration is present.
 
-        if cls.CHAT_PROVIDER == "chutes":
-            if not cls.CHUTES_API_KEY:
-                raise ValueError("CHUTES_API_KEY is required when CHAT_PROVIDER=chutes. Please set it in your .env file.")
-        else:
-            # Using OpenAI for chat - validate OpenAI key format
-            if not cls.OPENAI_API_KEY.startswith("sk-"):
-                raise ValueError("OPENAI_API_KEY appears invalid (should start with 'sk-')")
+        Raises:
+            ConfigurationError: For critical issues (missing/invalid API keys)
+            ValueError: For invalid configuration values
+        """
+        errors = []
+
+        # ================================================================
+        # CRITICAL: API Key Validation (hard failures)
+        # ================================================================
 
         # OpenAI API key is always required for moderation
         if not cls.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is required for moderation. Please set it in your .env file.")
+            errors.append(
+                "OPENAI_API_KEY is required for content moderation.\n"
+                "  Get your API key from: https://platform.openai.com/api-keys\n"
+                "  Set with: export OPENAI_API_KEY='sk-...'"
+            )
+        elif cls.OPENAI_API_KEY.lower().startswith("your-") or "placeholder" in cls.OPENAI_API_KEY.lower():
+            errors.append(
+                "OPENAI_API_KEY appears to be a placeholder value.\n"
+                "  Replace with your actual API key from: https://platform.openai.com/api-keys"
+            )
+        elif not cls.OPENAI_API_KEY.startswith("sk-"):
+            errors.append(
+                "OPENAI_API_KEY appears invalid (should start with 'sk-').\n"
+                "  Get a valid API key from: https://platform.openai.com/api-keys"
+            )
+
+        # Chutes API key validation
+        if cls.CHAT_PROVIDER == "chutes":
+            if not cls.CHUTES_API_KEY:
+                errors.append(
+                    "CHUTES_API_KEY is required when CHAT_PROVIDER=chutes.\n"
+                    "  Get your API key from: https://chutes.ai\n"
+                    "  Set with: export CHUTES_API_KEY='...'"
+                )
+            elif cls.CHUTES_API_KEY.lower().startswith("your-") or "placeholder" in cls.CHUTES_API_KEY.lower():
+                errors.append(
+                    "CHUTES_API_KEY appears to be a placeholder value.\n"
+                    "  Replace with your actual API key from: https://chutes.ai"
+                )
+
+        # Chat provider validation
+        if cls.CHAT_PROVIDER not in ["chutes", "openai"]:
+            errors.append(f"CHAT_PROVIDER must be 'chutes' or 'openai', got '{cls.CHAT_PROVIDER}'")
+
+        # If there are critical errors, fail immediately with all of them
+        if errors:
+            error_msg = "\n\n".join([f"ERROR {i + 1}: {e}" for i, e in enumerate(errors)])
+            raise ConfigurationError(
+                f"\n{'=' * 60}\n"
+                f"CONFIGURATION ERRORS - Cannot start\n"
+                f"{'=' * 60}\n\n"
+                f"{error_msg}\n\n"
+                f"{'=' * 60}\n"
+            )
 
         # Check .env file permissions if it exists
         import os
@@ -471,6 +543,127 @@ class Config:
             )
 
         return warnings
+
+    @classmethod
+    def apply_network_defaults(cls) -> None:
+        """
+        Apply network-aware defaults based on BT_NETUID.
+
+        Behavior:
+        - ADVANCED_MODE=false (default): Network defaults are ALWAYS used.
+          If user sets a value in env, warn that it's being ignored.
+        - ADVANCED_MODE=true: User's explicit env vars override network defaults.
+
+        Network defaults:
+        - Netuid 37 (mainnet): Stricter thresholds for production
+        - Netuid 290 (testnet): Relaxed thresholds for testing
+        """
+        import bittensor as bt
+
+        netuid = cls.BT_NETUID
+        defaults = NETWORK_DEFAULTS.get(netuid, {})
+
+        if not defaults:
+            bt.logging.debug(f"No network defaults defined for netuid {netuid}")
+            return
+
+        network_name = "mainnet" if netuid == 37 else "testnet" if netuid == 290 else f"subnet {netuid}"
+
+        if cls.ADVANCED_MODE:
+            # Advanced mode: respect user's explicit env vars
+            bt.logging.warning("=" * 60)
+            bt.logging.warning("ADVANCED_MODE enabled - custom configuration will be used")
+            bt.logging.warning("Ensure your settings are appropriate for the network")
+            bt.logging.warning("=" * 60)
+
+            applied = []
+            for key, default_value in defaults.items():
+                if os.getenv(key) is None:
+                    setattr(cls, key, default_value)
+                    applied.append(f"{key}={default_value}")
+                else:
+                    bt.logging.info(f"Using custom value: {key}={os.getenv(key)}")
+
+            if applied:
+                bt.logging.info(f"Applied {network_name} defaults (not overridden): {', '.join(applied)}")
+        else:
+            # Standard mode: ALWAYS use network defaults, warn about ignored values
+            ignored = []
+            for key, default_value in defaults.items():
+                env_value = os.getenv(key)
+                if env_value is not None:
+                    # User set a value but ADVANCED_MODE is off - warn and ignore
+                    ignored.append(f"{key}={env_value} (using {default_value} instead)")
+                setattr(cls, key, default_value)
+
+            bt.logging.info(f"Applied {network_name} defaults for netuid {netuid}:")
+            for key, value in defaults.items():
+                bt.logging.info(f"  {key}={value}")
+
+            if ignored:
+                bt.logging.warning("=" * 60)
+                bt.logging.warning("CONFIGURATION VALUES IGNORED (ADVANCED_MODE not enabled)")
+                bt.logging.warning("=" * 60)
+                for item in ignored:
+                    bt.logging.warning(f"  {item}")
+                bt.logging.warning("")
+                bt.logging.warning("To use custom values, set ADVANCED_MODE=true")
+                bt.logging.warning("=" * 60)
+
+    @classmethod
+    def detect_and_set_wallet(cls, role: str = "validator") -> None:
+        """
+        Detect wallet automatically if not explicitly configured.
+
+        Auto-detection logic:
+        - If wallet env vars are explicitly set, use those values
+        - If exactly one wallet with one hotkey exists, auto-select it
+        - If multiple wallets/hotkeys exist, raise error with list
+        - If no wallets exist, raise error with instructions
+
+        Args:
+            role: "validator" or "miner" - determines which config vars to set
+
+        Raises:
+            ConfigurationError: If no wallet can be determined
+        """
+        import bittensor as bt
+
+        from aurelius.shared.wallet_detector import detect_wallet
+
+        wallet_var = f"{role.upper()}_WALLET_NAME"
+        hotkey_var = f"{role.upper()}_HOTKEY"
+
+        # Check if explicitly configured via environment
+        explicit_wallet = os.getenv(wallet_var)
+        explicit_hotkey = os.getenv(hotkey_var)
+
+        if explicit_wallet and explicit_hotkey:
+            bt.logging.info(f"Using configured wallet: {explicit_wallet}/{explicit_hotkey}")
+            return
+
+        # Attempt auto-detection
+        bt.logging.info("No wallet explicitly configured, attempting auto-detection...")
+        result = detect_wallet(role=role)
+
+        if result.error:
+            raise ConfigurationError(
+                f"\n{'=' * 60}\n"
+                f"WALLET CONFIGURATION ERROR\n"
+                f"{'=' * 60}\n\n"
+                f"{result.error}\n\n"
+                f"{'=' * 60}\n"
+            )
+
+        # Auto-detection succeeded
+        bt.logging.success(f"Auto-detected wallet: {result.wallet_name}/{result.hotkey}")
+
+        if role == "validator":
+            cls.VALIDATOR_WALLET_NAME = result.wallet_name
+            cls.VALIDATOR_HOTKEY = result.hotkey
+        else:
+            cls.MINER_WALLET_NAME = result.wallet_name
+            cls.MINER_HOTKEY = result.hotkey
 
     @classmethod
     def setup_logging(cls) -> None:
