@@ -19,7 +19,8 @@ class ConfigurationError(Exception):
 # These are applied based on BT_NETUID when apply_network_defaults() is called
 NETWORK_DEFAULTS = {
     37: {  # Mainnet (Finney)
-        "DANGER_THRESHOLD": 0.5,
+        "DANGER_THRESHOLD": 0.3,
+        "SINGLE_CATEGORY_THRESHOLD": 0.7,
         "MIN_HIT_RATE_THRESHOLD": 0.4,
         "MIN_VALIDATOR_STAKE": 1000.0,
         "MIN_NOVELTY_THRESHOLD": 0.7,
