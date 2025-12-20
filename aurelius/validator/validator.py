@@ -12,7 +12,7 @@ from typing import Tuple
 import bittensor as bt
 from openai import OpenAI
 
-from aurelius.shared.config import Config
+from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.consensus import ConsensusCoordinator
 from aurelius.shared.dataset_logger import DatasetLogger
 from aurelius.shared.moderation import create_moderation_provider
@@ -111,10 +111,26 @@ class Validator:
         # Setup logging based on LOG_LEVEL configuration
         Config.setup_logging()
 
+        # Apply network-aware defaults based on BT_NETUID
+        # This sets thresholds appropriate for mainnet (37) or testnet (290)
+        Config.apply_network_defaults()
+
+        # Detect wallet if not explicitly configured
+        # This allows turnkey operation when only one wallet exists
+        try:
+            Config.detect_and_set_wallet(role="validator")
+        except ConfigurationError as e:
+            bt.logging.error(str(e))
+            sys.exit(1)
+
         bt.logging.info(f"Initializing validator with wallet: {Config.VALIDATOR_WALLET_NAME}")
 
-        # Validate configuration
-        Config.validate()
+        # Validate configuration (will hard-fail on missing/invalid API keys)
+        try:
+            Config.validate()
+        except ConfigurationError as e:
+            bt.logging.error(str(e))
+            sys.exit(1)
 
         # Check for production configuration warnings
         production_warnings = Config.validate_production()

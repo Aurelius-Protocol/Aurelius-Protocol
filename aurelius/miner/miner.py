@@ -5,7 +5,7 @@ import sys
 
 import bittensor as bt
 
-from aurelius.shared.config import Config
+from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.protocol import PromptSynapse
 
 
@@ -39,6 +39,19 @@ def send_prompt(
     Returns:
         The response from the validator (OpenAI completion)
     """
+    # Setup logging
+    Config.setup_logging()
+
+    # Apply network-aware defaults based on BT_NETUID
+    Config.apply_network_defaults()
+
+    # Detect wallet if not explicitly configured
+    try:
+        Config.detect_and_set_wallet(role="miner")
+    except ConfigurationError as e:
+        bt.logging.error(str(e))
+        sys.exit(1)
+
     bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
 
     # Initialize wallet
