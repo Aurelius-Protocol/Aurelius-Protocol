@@ -5,6 +5,14 @@ import sys
 
 import bittensor as bt
 
+from aurelius.miner.errors import (
+    DiagnosticsFormatter,
+    ErrorCategory,
+    classify_error,
+    create_error,
+)
+from aurelius.miner.health import ValidatorHealthChecker
+from aurelius.miner.retry import RetryConfig, RetryHandler
 from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.protocol import PromptSynapse
 
@@ -20,6 +28,10 @@ def send_prompt(
     presence_penalty: float | None = None,
     min_chars: int | None = None,
     max_chars: int | None = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
+    skip_preflight: bool = False,
+    use_colors: bool | None = None,
 ) -> str:
     """
     Send a prompt to a validator and return the response.
@@ -35,6 +47,10 @@ def send_prompt(
         presence_penalty: Presence penalty (-2.0 to 2.0)
         min_chars: Minimum response length in characters
         max_chars: Maximum response length in characters
+        timeout: Query timeout in seconds (default: from config)
+        max_retries: Maximum retry attempts (default: from config)
+        skip_preflight: Skip pre-flight health check
+        use_colors: Use colored output for diagnostics (default: from config)
 
     Returns:
         The response from the validator (OpenAI completion)
@@ -45,20 +61,72 @@ def send_prompt(
     # Apply network-aware defaults based on BT_NETUID
     Config.apply_network_defaults()
 
+    # Get effective configuration
+    effective_timeout = timeout if timeout is not None else Config.MINER_TIMEOUT
+    effective_retries = max_retries if max_retries is not None else Config.MINER_MAX_RETRIES
+    effective_colors = use_colors if use_colors is not None else Config.MINER_COLORED_OUTPUT
+    do_preflight = not skip_preflight and Config.MINER_PREFLIGHT_CHECK
+
+    # Initialize components
+    formatter = DiagnosticsFormatter(use_colors=effective_colors)
+    health_checker = ValidatorHealthChecker(timeout=Config.MINER_PREFLIGHT_TIMEOUT)
+    retry_handler = RetryHandler(
+        RetryConfig(
+            max_attempts=effective_retries,
+            initial_delay_seconds=Config.MINER_RETRY_DELAY,
+            max_delay_seconds=Config.MINER_RETRY_MAX_DELAY,
+        )
+    )
+
+    # Context for error messages
+    context = {
+        "netuid": Config.BT_NETUID,
+        "network": Config.BT_NETWORK,
+        "timeout": effective_timeout,
+        "max_length": Config.MAX_PROMPT_LENGTH,
+    }
+
     # Detect wallet if not explicitly configured
     try:
         Config.detect_and_set_wallet(role="miner")
     except ConfigurationError as e:
-        bt.logging.error(str(e))
+        error = create_error(
+            ErrorCategory.INVALID_WALLET,
+            {
+                **context,
+                "wallet": Config.MINER_WALLET_NAME,
+                "hotkey": Config.MINER_HOTKEY,
+            },
+            e,
+        )
+        print(formatter.format_error(error, context))
         sys.exit(1)
 
     bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
 
     # Initialize wallet
-    wallet = bt.Wallet(name=Config.MINER_WALLET_NAME, hotkey=Config.MINER_HOTKEY)
+    try:
+        wallet = bt.Wallet(name=Config.MINER_WALLET_NAME, hotkey=Config.MINER_HOTKEY)
+    except Exception as e:
+        error = create_error(
+            ErrorCategory.INVALID_WALLET,
+            {
+                **context,
+                "wallet": Config.MINER_WALLET_NAME,
+                "hotkey": Config.MINER_HOTKEY,
+            },
+            e,
+        )
+        print(formatter.format_error(error, context))
+        return ""
 
     # Initialize dendrite (for sending requests)
-    dendrite = bt.Dendrite(wallet=wallet)
+    try:
+        dendrite = bt.Dendrite(wallet=wallet)
+    except Exception as e:
+        error = classify_error(e, context)
+        print(formatter.format_error(error, context))
+        return ""
 
     bt.logging.info(f"Prompt: {prompt}")
     if vendor or model_requested:
@@ -80,12 +148,23 @@ def send_prompt(
     )
 
     # Determine target axon based on mode
+    target_axon = None
+
     if Config.LOCAL_MODE:
         # Local mode: Connect directly to validator IP:PORT
         bt.logging.info("=" * 60)
         bt.logging.info("LOCAL MODE ENABLED")
         bt.logging.info("=" * 60)
-        bt.logging.info(f"Connecting directly to validator at {Config.VALIDATOR_HOST}:{Config.BT_PORT_VALIDATOR}")
+        bt.logging.info(
+            f"Connecting directly to validator at {Config.VALIDATOR_HOST}:{Config.BT_PORT_VALIDATOR}"
+        )
+
+        context.update(
+            {
+                "host": Config.VALIDATOR_HOST,
+                "port": Config.BT_PORT_VALIDATOR,
+            }
+        )
 
         # Create a custom axon info for the local validator
         target_axon = bt.AxonInfo(
@@ -98,80 +177,181 @@ def send_prompt(
         )
     else:
         # Normal mode: Query metagraph for validator UID
-        subtensor_config = Config.get_subtensor_config()
-        subtensor = bt.Subtensor(**subtensor_config)
-        metagraph = subtensor.metagraph(netuid=Config.BT_NETUID)
+        context["uid"] = validator_uid
 
-        bt.logging.info(f"Sending prompt to validator UID {validator_uid}")
-        target_axon = metagraph.axons[validator_uid]
+        try:
+            subtensor_config = Config.get_subtensor_config()
+            subtensor = bt.Subtensor(**subtensor_config)
+            metagraph = subtensor.metagraph(netuid=Config.BT_NETUID)
 
-    # Query the validator
-    try:
-        responses = dendrite.query(
+            # Validate UID exists
+            if validator_uid < 0 or validator_uid >= len(metagraph.axons):
+                error = create_error(ErrorCategory.INVALID_VALIDATOR_UID, context)
+                print(formatter.format_error(error, context))
+                return ""
+
+            target_axon = metagraph.axons[validator_uid]
+            context.update(
+                {
+                    "host": target_axon.ip,
+                    "port": target_axon.port,
+                }
+            )
+
+            bt.logging.info(f"Sending prompt to validator UID {validator_uid}")
+
+        except IndexError:
+            error = create_error(ErrorCategory.INVALID_VALIDATOR_UID, context)
+            print(formatter.format_error(error, context))
+            return ""
+        except Exception as e:
+            error = classify_error(e, context)
+            print(formatter.format_error(error, context))
+            return ""
+
+    # Pre-flight health check
+    if do_preflight:
+        health_result = health_checker.check_validator_reachable(
+            host=context["host"],
+            port=context["port"],
+        )
+        print(
+            formatter.format_health_check(
+                is_healthy=health_result.is_healthy,
+                latency_ms=health_result.latency_ms,
+                error=health_result.error,
+                context=context,
+            )
+        )
+
+        if not health_result.is_healthy:
+            return ""
+
+    # Define the query operation for retry
+    def do_query():
+        return dendrite.query(
             axons=target_axon,
             synapse=synapse,
-            timeout=30,
+            timeout=effective_timeout,
             deserialize=False,  # Get full synapse back, not just deserialized string
         )
 
-        # dendrite.query can return different types:
-        # - Sometimes the deserialized response (string from synapse.deserialize())
-        # - Sometimes the synapse object itself
-        # - Sometimes a list
+    # Execute with retry
+    result = retry_handler.execute_with_retry(
+        operation=do_query,
+        context=context,
+        on_retry=lambda attempt, error, delay: print(
+            formatter.format_retry_progress(attempt, effective_retries, delay, error, context)
+        ),
+    )
 
-        # Extract the synapse from response
-        result_synapse = None
+    if not result.success:
+        print(formatter.format_error(result.last_error, context))
+        return ""
 
-        # dendrite.query returns the synapse itself when querying a single axon
-        # For lists, it returns a list of synapses
-        if isinstance(responses, PromptSynapse):
-            result_synapse = responses
-        elif isinstance(responses, list) and len(responses) > 0:
-            result_synapse = responses[0]
-        elif isinstance(responses, str):
-            # Shouldn't happen with single axon query, but handle it
-            # Create a dummy synapse with the response
-            result_synapse = PromptSynapse(prompt=prompt)
-            result_synapse.response = responses
-        else:
-            result_synapse = responses if responses else synapse
+    # Process response
+    responses = result.result
 
-        if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
-            # Display results
-            print("\n" + "=" * 60)
-            print("RESPONSE FROM VALIDATOR")
-            print("=" * 60)
-            print(f"Prompt:   {result_synapse.prompt}")
-            print(f"Response: {result_synapse.response}")
-            print(f"Model:    {result_synapse.model_used or 'unknown'}")
+    # dendrite.query can return different types:
+    # - Sometimes the deserialized response (string from synapse.deserialize())
+    # - Sometimes the synapse object itself
+    # - Sometimes a list
 
-            # Display moderation results if available
-            if result_synapse.danger_score is not None:
-                print("\n--- Moderation Results ---")
-                print(f"Danger Score:  {result_synapse.danger_score:.4f}")
-                print(f"Accepted:      {'✓ YES' if result_synapse.accepted else '✗ NO'}")
+    # Extract the synapse from response
+    result_synapse = None
 
-                if result_synapse.rejection_reason:
-                    print(f"Rejection:     {result_synapse.rejection_reason}")
+    # dendrite.query returns the synapse itself when querying a single axon
+    # For lists, it returns a list of synapses
+    if isinstance(responses, PromptSynapse):
+        result_synapse = responses
+    elif isinstance(responses, list) and len(responses) > 0:
+        result_synapse = responses[0]
+    elif isinstance(responses, str):
+        # Shouldn't happen with single axon query, but handle it
+        # Create a dummy synapse with the response
+        result_synapse = PromptSynapse(prompt=prompt)
+        result_synapse.response = responses
+    else:
+        result_synapse = responses if responses else synapse
 
-                if result_synapse.category_scores:
-                    print("\nTop Category Scores:")
-                    sorted_cats = sorted(result_synapse.category_scores.items(), key=lambda x: x[1], reverse=True)[:5]
-                    for category, score in sorted_cats:
-                        if score > 0.01:
-                            print(f"  {category:25s}: {score:.4f}")
+    # Check for validator-side errors
+    if result_synapse and hasattr(result_synapse, "rejection_reason") and result_synapse.rejection_reason:
+        rejection = result_synapse.rejection_reason.lower()
 
-            print("=" * 60 + "\n")
-            return result_synapse.response
-        else:
-            bt.logging.error("No response received")
+        if "rate limit" in rejection:
+            error = create_error(ErrorCategory.RATE_LIMITED, context)
+            context["reason"] = result_synapse.rejection_reason
+            print(formatter.format_error(error, context))
+            # Still show the rejection reason
+            print(f"Rejection: {result_synapse.rejection_reason}")
+            return ""
+        elif "error" in rejection:
+            error = create_error(ErrorCategory.API_ERROR, context)
+            context["reason"] = result_synapse.rejection_reason
+            print(formatter.format_error(error, context))
             return ""
 
-    except Exception as e:
-        bt.logging.error(f"Error querying validator: {e}")
-        import traceback
+    # Check for response with Error prefix
+    if (
+        result_synapse
+        and hasattr(result_synapse, "response")
+        and result_synapse.response
+        and result_synapse.response.startswith("Error:")
+    ):
+        error = create_error(ErrorCategory.API_ERROR, context)
+        print(formatter.format_error(error, context))
+        print(f"Validator response: {result_synapse.response}")
+        return ""
 
-        traceback.print_exc()
+    if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
+        # Display results
+        print("\n" + "=" * 60)
+        print("RESPONSE FROM VALIDATOR")
+        print("=" * 60)
+        print(f"Prompt:   {result_synapse.prompt}")
+        print(f"Response: {result_synapse.response}")
+        print(f"Model:    {result_synapse.model_used or 'unknown'}")
+
+        # Display moderation results if available
+        if result_synapse.danger_score is not None:
+            print("\n--- Moderation Results ---")
+            print(f"Danger Score:  {result_synapse.danger_score:.4f}")
+            print(f"Accepted:      {'✓ YES' if result_synapse.accepted else '✗ NO'}")
+
+            if result_synapse.rejection_reason:
+                print(f"Rejection:     {result_synapse.rejection_reason}")
+
+            if result_synapse.category_scores:
+                print("\nTop Category Scores:")
+                sorted_cats = sorted(
+                    result_synapse.category_scores.items(), key=lambda x: x[1], reverse=True
+                )[:5]
+                for category, score in sorted_cats:
+                    if score > 0.01:
+                        print(f"  {category:25s}: {score:.4f}")
+
+        print("=" * 60 + "\n")
+        return result_synapse.response
+    else:
+        # No response received - create appropriate error
+        error = create_error(
+            ErrorCategory.VALIDATOR_BUSY,
+            context,
+        )
+        # Customize for no response case
+        error.message = "No response received from validator"
+        error.cause = (
+            "The validator did not return a response. "
+            "This could indicate the validator is overloaded, misconfigured, "
+            "or the request was silently dropped."
+        )
+        error.suggestions = [
+            "Check validator logs for errors",
+            "Try a different validator: --validator-uid <other_uid>",
+            "Verify the validator is running and accepting requests",
+            "Increase timeout: --timeout 60",
+        ]
+        print(formatter.format_error(error, context))
         return ""
 
 
@@ -179,7 +359,9 @@ def main():
     """Main entry point for the miner."""
     parser = argparse.ArgumentParser(description="Bittensor Miner - Submit prompts to validators")
     parser.add_argument("--prompt", type=str, required=True, help="The prompt to send to the validator")
-    parser.add_argument("--validator-uid", type=int, default=1, help="The UID of the validator to query (default: 1)")
+    parser.add_argument(
+        "--validator-uid", type=int, default=1, help="The UID of the validator to query (default: 1)"
+    )
     parser.add_argument("--netuid", type=int, default=None, help=f"Override the netuid (default: {Config.BT_NETUID})")
 
     # Model specification arguments
@@ -191,6 +373,30 @@ def main():
     parser.add_argument("--presence-penalty", type=float, default=None, help="Presence penalty (-2.0 to 2.0)")
     parser.add_argument("--min-chars", type=int, default=None, help="Minimum response length in characters")
     parser.add_argument("--max-chars", type=int, default=None, help="Maximum response length in characters")
+
+    # Connection configuration arguments
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help=f"Query timeout in seconds (default: {Config.MINER_TIMEOUT})",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=None,
+        help=f"Maximum retry attempts (default: {Config.MINER_MAX_RETRIES})",
+    )
+    parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="Skip pre-flight health check",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable colored output",
+    )
 
     args = parser.parse_args()
 
@@ -210,6 +416,10 @@ def main():
         presence_penalty=args.presence_penalty,
         min_chars=args.min_chars,
         max_chars=args.max_chars,
+        timeout=args.timeout,
+        max_retries=args.retries,
+        skip_preflight=args.no_preflight,
+        use_colors=not args.no_color,
     )
 
 
