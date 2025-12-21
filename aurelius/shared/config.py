@@ -117,6 +117,22 @@ class Config:
     ENABLE_LOCAL_BACKUP: bool = os.getenv("ENABLE_LOCAL_BACKUP", "true").lower() == "true"
     DATASET_LOGGER_SHUTDOWN_TIMEOUT: int = int(os.getenv("DATASET_LOGGER_SHUTDOWN_TIMEOUT", "30"))  # seconds
 
+    # OpenTelemetry Configuration
+    TELEMETRY_ENABLED: bool = os.getenv("TELEMETRY_ENABLED", "true").lower() == "true"
+    TELEMETRY_TRACES_ENABLED: bool = os.getenv("TELEMETRY_TRACES_ENABLED", "true").lower() == "true"
+    TELEMETRY_LOGS_ENABLED: bool = os.getenv("TELEMETRY_LOGS_ENABLED", "true").lower() == "true"
+    TELEMETRY_TRACES_ENDPOINT: str = os.getenv(
+        "TELEMETRY_TRACES_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/telemetry/traces"
+    )
+    TELEMETRY_LOGS_ENDPOINT: str = os.getenv(
+        "TELEMETRY_LOGS_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/telemetry/logs"
+    )
+    TELEMETRY_BATCH_SIZE: int = int(os.getenv("TELEMETRY_BATCH_SIZE", "100"))
+    TELEMETRY_FLUSH_INTERVAL_MS: int = int(os.getenv("TELEMETRY_FLUSH_INTERVAL_MS", "5000"))
+    TELEMETRY_LOCAL_BACKUP_PATH: str | None = os.getenv("TELEMETRY_LOCAL_BACKUP_PATH", "./telemetry_backup")
+
     # Scoring Configuration
     WEIGHT_UPDATE_INTERVAL: int = int(os.getenv("WEIGHT_UPDATE_INTERVAL", "100"))
     MIN_SAMPLES_FOR_WEIGHTS: int = int(os.getenv("MIN_SAMPLES_FOR_WEIGHTS", "5"))

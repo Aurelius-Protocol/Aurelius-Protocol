@@ -2,13 +2,16 @@
 
 import secrets
 import statistics
+import time
 import uuid
 from datetime import datetime, timezone
 
 import bittensor as bt
+from opentelemetry.trace import SpanKind
 
 from aurelius.shared.config import Config
 from aurelius.shared.protocol import ConsensusVerificationSynapse
+from aurelius.shared.telemetry.otel_setup import get_tracer
 from aurelius.shared.validator_trust import ValidatorTrustTracker
 
 
@@ -62,6 +65,9 @@ class ConsensusCoordinator:
                 trust_decay_rate=Config.VALIDATOR_TRUST_DECAY_RATE,
             )
             bt.logging.info("Validator trust tracking enabled")
+
+        # Telemetry tracer
+        self._tracer = get_tracer("aurelius.consensus") if Config.TELEMETRY_ENABLED else None
 
         bt.logging.info("=" * 60)
         bt.logging.info("🤝 CONSENSUS COORDINATOR INITIALIZED")
@@ -302,6 +308,33 @@ class ConsensusCoordinator:
                 'vote_details': List[Dict],  # All validator votes
             }
         """
+        start_time = time.time()
+
+        # Wrap with tracing span if enabled
+        if self._tracer:
+            with self._tracer.start_as_current_span(
+                "consensus.initiate",
+                kind=SpanKind.INTERNAL,
+                attributes={
+                    "consensus.prompt_length": len(prompt),
+                    "consensus.primary_vote": primary_result.get("vote", False),
+                },
+            ) as span:
+                result = self._do_initiate_consensus(prompt, primary_result)
+                duration_ms = (time.time() - start_time) * 1000
+                span.set_attribute("duration_ms", round(duration_ms, 2))
+                span.set_attribute("consensus.reached", result.get("consensus", False))
+                span.set_attribute("consensus.votes", result.get("votes", "0/0"))
+                if "total_validators" in result:
+                    span.set_attribute("consensus.total_validators", result["total_validators"])
+                if "excluded_validators" in result:
+                    span.set_attribute("consensus.excluded_count", len(result["excluded_validators"]))
+                return result
+        else:
+            return self._do_initiate_consensus(prompt, primary_result)
+
+    def _do_initiate_consensus(self, prompt: str, primary_result: dict) -> dict:
+        """Internal method to perform consensus verification."""
         if Config.LOG_CONSENSUS_DETAILS:
             bt.logging.info("=" * 60)
             bt.logging.info("🗳️  INITIATING CONSENSUS VERIFICATION")
