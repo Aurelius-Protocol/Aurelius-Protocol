@@ -5,6 +5,10 @@ Exports traces and logs to the Aurelius collector API.
 
 from __future__ import annotations
 
+# Protocol version for version metadata tracking
+# Increment when making breaking changes to the telemetry protocol
+PROTOCOL_VERSION = "1.0.0"
+
 import json
 import threading
 import time
@@ -100,6 +104,7 @@ class AureliusSpanExporter(SpanExporter):
         self._running = False
         self._lock = threading.Lock()
         self._last_heartbeat: float = 0
+        self._heartbeat_in_progress = False  # A9: Prevent concurrent heartbeat sends
 
         # Statistics
         self.spans_exported = 0
@@ -112,9 +117,10 @@ class AureliusSpanExporter(SpanExporter):
     def _start_worker(self) -> None:
         """Start the background worker thread."""
         self._running = True
+        # A19: Use daemon=False to ensure proper cleanup and data flushing on shutdown
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
-            daemon=True,
+            daemon=False,
             name="AureliusSpanExporter"
         )
         self._worker_thread.start()
@@ -146,17 +152,24 @@ class AureliusSpanExporter(SpanExporter):
                     batch = []
                     last_flush = now
 
-                # Send heartbeat if interval elapsed (Fix 9: thread-safe access)
+                # A9: Send heartbeat if interval elapsed (fully thread-safe)
+                # Check and set in-progress flag atomically to prevent race conditions
                 with self._lock:
                     should_heartbeat = (
                         self.wallet and
+                        not self._heartbeat_in_progress and
                         now - self._last_heartbeat >= self.heartbeat_interval
                     )
                     if should_heartbeat:
+                        self._heartbeat_in_progress = True
                         self._last_heartbeat = now
 
                 if should_heartbeat:
-                    self._send_heartbeat()
+                    try:
+                        self._send_heartbeat()
+                    finally:
+                        with self._lock:
+                            self._heartbeat_in_progress = False
 
             except Exception as e:
                 bt.logging.error(f"Span exporter worker error: {e}")
@@ -250,6 +263,7 @@ class AureliusSpanExporter(SpanExporter):
 
         headers = {
             "Content-Type": "application/json",
+            "X-Protocol-Version": PROTOCOL_VERSION,
         }
 
         for attempt in range(self.max_retries):
@@ -302,6 +316,8 @@ class AureliusSpanExporter(SpanExporter):
 
     def _send_heartbeat(self) -> bool:
         """Send a heartbeat to the telemetry registry API."""
+        import hashlib
+
         if not self.wallet or not self.validator_hotkey:
             return False
 
@@ -314,19 +330,26 @@ class AureliusSpanExporter(SpanExporter):
             else:
                 heartbeat_endpoint = f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/heartbeat"
 
-            # Create signed message
+            # A13: Include body hash in signature message to prevent body tampering
+            body = {"hotkey": self.validator_hotkey}
+            body_json = json.dumps(body, separators=(',', ':'), sort_keys=True)
+            body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]  # Use first 16 chars
+
+            # Create signed message with body hash
             timestamp = int(time.time())
-            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}"
+            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}:{body_hash}"
             signature = self.wallet.hotkey.sign(message.encode()).hex()
 
             response = requests.post(
                 heartbeat_endpoint,
-                json={"hotkey": self.validator_hotkey},
+                json=body,
                 headers={
                     "Content-Type": "application/json",
                     "X-Validator-Hotkey": self.validator_hotkey,
                     "X-Validator-Signature": signature,
                     "X-Signature-Timestamp": str(timestamp),
+                    "X-Body-Hash": body_hash,  # A13: Send body hash for server verification
+                    "X-Protocol-Version": PROTOCOL_VERSION,
                 },
                 timeout=5,
             )
@@ -346,11 +369,17 @@ class AureliusSpanExporter(SpanExporter):
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """Export spans (called by OpenTelemetry SDK)."""
+        dropped = 0
         for span in spans:
             try:
                 self._queue.put_nowait(span)
             except Exception:
-                return SpanExportResult.FAILURE
+                # A17: Log when spans are dropped due to queue being full
+                dropped += 1
+
+        if dropped > 0:
+            bt.logging.warning(f"Dropped {dropped} spans - queue full (size: {self._queue.qsize()})")
+            return SpanExportResult.FAILURE
         return SpanExportResult.SUCCESS
 
     def shutdown(self) -> None:
@@ -361,12 +390,29 @@ class AureliusSpanExporter(SpanExporter):
         bt.logging.info(f"Span exporter shutdown. Exported: {self.spans_exported}, Failed: {self.spans_failed}")
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        """Force flush pending spans."""
-        try:
-            self._queue.join()
-            return True
-        except Exception:
+        """Force flush pending spans.
+
+        A10: Uses timeout to prevent deadlock if flush can't complete.
+        """
+        import threading
+
+        timeout_secs = timeout_millis / 1000.0
+
+        # Use a thread with timeout instead of blocking join()
+        def wait_for_queue():
+            try:
+                self._queue.join()
+            except Exception:
+                pass
+
+        flush_thread = threading.Thread(target=wait_for_queue, daemon=True)
+        flush_thread.start()
+        flush_thread.join(timeout=timeout_secs)
+
+        if flush_thread.is_alive():
+            bt.logging.warning(f"Force flush timed out after {timeout_secs}s")
             return False
+        return True
 
 
 class AureliusLogExporter(LogExporter):
@@ -425,9 +471,10 @@ class AureliusLogExporter(LogExporter):
     def _start_worker(self) -> None:
         """Start the background worker thread."""
         self._running = True
+        # A19: Use daemon=False to ensure proper cleanup and data flushing on shutdown
         self._worker_thread = threading.Thread(
             target=self._worker_loop,
-            daemon=True,
+            daemon=False,
             name="AureliusLogExporter"
         )
         self._worker_thread.start()
@@ -520,7 +567,10 @@ class AureliusLogExporter(LogExporter):
             "batch_id": str(uuid.uuid4()),
         }
 
-        headers = {"Content-Type": "application/json"}
+        headers = {
+            "Content-Type": "application/json",
+            "X-Protocol-Version": PROTOCOL_VERSION,
+        }
 
         for attempt in range(self.max_retries):
             try:
@@ -570,11 +620,17 @@ class AureliusLogExporter(LogExporter):
 
     def export(self, batch: Sequence[LogData]) -> LogExportResult:
         """Export logs (called by OpenTelemetry SDK)."""
+        dropped = 0
         for log in batch:
             try:
                 self._queue.put_nowait(log)
             except Exception:
-                return LogExportResult.FAILURE
+                # A17: Log when logs are dropped due to queue being full
+                dropped += 1
+
+        if dropped > 0:
+            bt.logging.warning(f"Dropped {dropped} logs - queue full (size: {self._queue.qsize()})")
+            return LogExportResult.FAILURE
         return LogExportResult.SUCCESS
 
     def shutdown(self) -> None:
@@ -585,9 +641,26 @@ class AureliusLogExporter(LogExporter):
         bt.logging.info(f"Log exporter shutdown. Exported: {self.logs_exported}, Failed: {self.logs_failed}")
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        """Force flush pending logs."""
-        try:
-            self._queue.join()
-            return True
-        except Exception:
+        """Force flush pending logs.
+
+        A10: Uses timeout to prevent deadlock if flush can't complete.
+        """
+        import threading
+
+        timeout_secs = timeout_millis / 1000.0
+
+        # Use a thread with timeout instead of blocking join()
+        def wait_for_queue():
+            try:
+                self._queue.join()
+            except Exception:
+                pass
+
+        flush_thread = threading.Thread(target=wait_for_queue, daemon=True)
+        flush_thread.start()
+        flush_thread.join(timeout=timeout_secs)
+
+        if flush_thread.is_alive():
+            bt.logging.warning(f"Force flush timed out after {timeout_secs}s")
             return False
+        return True

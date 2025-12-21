@@ -642,6 +642,46 @@ class Config:
                 bt.logging.warning("=" * 60)
 
     @classmethod
+    def validate_endpoints(cls) -> None:
+        """
+        A20: Validate that all API endpoints use HTTPS in production.
+
+        This prevents MITM attacks by ensuring secure transport.
+        Should be called during startup.
+        """
+        import bittensor as bt
+
+        if cls.LOCAL_MODE:
+            # Allow HTTP in local mode
+            return
+
+        endpoints = {
+            "CENTRAL_API_ENDPOINT": cls.CENTRAL_API_ENDPOINT,
+            "TELEMETRY_TRACES_ENDPOINT": cls.TELEMETRY_TRACES_ENDPOINT,
+            "TELEMETRY_LOGS_ENDPOINT": cls.TELEMETRY_LOGS_ENDPOINT,
+            "TELEMETRY_REGISTRY_ENDPOINT": cls.TELEMETRY_REGISTRY_ENDPOINT,
+            "NOVELTY_API_ENDPOINT": cls.NOVELTY_API_ENDPOINT,
+        }
+
+        insecure = []
+        for name, url in endpoints.items():
+            if url and not url.startswith("https://"):
+                insecure.append(f"{name}={url}")
+
+        if insecure:
+            bt.logging.error("=" * 70)
+            bt.logging.error("SECURITY ERROR: Insecure HTTP endpoints detected!")
+            bt.logging.error("=" * 70)
+            bt.logging.error("")
+            bt.logging.error("The following endpoints must use HTTPS in production:")
+            for endpoint in insecure:
+                bt.logging.error(f"  - {endpoint}")
+            bt.logging.error("")
+            bt.logging.error("Set LOCAL_MODE=true if testing locally, or fix the URLs.")
+            bt.logging.error("=" * 70)
+            raise ConfigurationError("Insecure HTTP endpoints are not allowed in production")
+
+    @classmethod
     def detect_and_set_wallet(cls, role: str = "validator") -> None:
         """
         Detect wallet automatically if not explicitly configured.
@@ -740,3 +780,52 @@ class Config:
             return text
 
         return text[: cls.MAX_LOG_LENGTH] + "... [TRUNCATED]"
+
+    @classmethod
+    def warn_default_endpoints(cls) -> None:
+        """
+        A6: Warn if using default/hardcoded production endpoints without explicit configuration.
+
+        This helps prevent MITM attacks by ensuring operators explicitly configure endpoints.
+        Should be called during validator/miner startup.
+        """
+        import bittensor as bt
+
+        # Mapping of env var names to their default values
+        default_endpoints = {
+            "CENTRAL_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/collections",
+            "TELEMETRY_TRACES_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/traces",
+            "TELEMETRY_LOGS_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/logs",
+            "TELEMETRY_REGISTRY_ENDPOINT": "https://collector.aureliusaligned.ai/api/validator-registry",
+            "NOVELTY_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/novelty",
+        }
+
+        using_defaults = []
+
+        for env_var, default_value in default_endpoints.items():
+            # Check if env var is explicitly set
+            explicit_value = os.getenv(env_var)
+            current_value = getattr(cls, env_var, None)
+
+            # If no explicit env var and using the default value
+            if explicit_value is None and current_value == default_value:
+                using_defaults.append(env_var)
+
+        if using_defaults:
+            bt.logging.warning("=" * 70)
+            bt.logging.warning("SECURITY NOTICE: Using default production endpoints")
+            bt.logging.warning("=" * 70)
+            bt.logging.warning("")
+            bt.logging.warning("The following endpoints are using hardcoded defaults:")
+            for env_var in using_defaults:
+                bt.logging.warning(f"  - {env_var}")
+            bt.logging.warning("")
+            bt.logging.warning("While these defaults point to official Aurelius infrastructure,")
+            bt.logging.warning("explicitly setting them in your .env file ensures you control")
+            bt.logging.warning("which servers receive your data and prevents MITM attacks.")
+            bt.logging.warning("")
+            bt.logging.warning("To suppress this warning, explicitly set these in your .env:")
+            for env_var in using_defaults:
+                default_val = default_endpoints[env_var]
+                bt.logging.warning(f"  {env_var}={default_val}")
+            bt.logging.warning("=" * 70)

@@ -19,7 +19,11 @@ from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
 from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry._logs import set_logger_provider
 
-from aurelius.shared.telemetry.otel_exporter import AureliusSpanExporter, AureliusLogExporter
+from aurelius.shared.telemetry.otel_exporter import (
+    AureliusSpanExporter,
+    AureliusLogExporter,
+    PROTOCOL_VERSION,
+)
 
 
 # Global providers (for cleanup on shutdown)
@@ -309,6 +313,7 @@ def register_with_telemetry_api(
                     "X-Validator-Hotkey": hotkey,
                     "X-Validator-Signature": signature,
                     "X-Signature-Timestamp": str(timestamp),
+                    "X-Protocol-Version": PROTOCOL_VERSION,
                 },
                 timeout=timeout,
             )
@@ -373,6 +378,7 @@ def send_heartbeat(
                 "X-Validator-Hotkey": hotkey,
                 "X-Validator-Signature": signature,
                 "X-Signature-Timestamp": str(timestamp),
+                "X-Protocol-Version": PROTOCOL_VERSION,
             },
             timeout=timeout,
         )

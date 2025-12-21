@@ -145,6 +145,16 @@ class Validator:
                 bt.logging.warning(f"  - {warning}")
             bt.logging.warning("=" * 80)
 
+        # A6: Warn if using default endpoints (MITM prevention)
+        Config.warn_default_endpoints()
+
+        # A20: Validate HTTPS endpoints in production
+        try:
+            Config.validate_endpoints()
+        except ConfigurationError as e:
+            bt.logging.error(str(e))
+            sys.exit(1)
+
         # Default timeout for chat API calls (seconds) to prevent indefinite blocking
         chat_api_timeout = 60.0
 
