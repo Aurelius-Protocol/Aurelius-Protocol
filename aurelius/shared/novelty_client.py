@@ -1,11 +1,14 @@
 """Novelty detection client for calculating prompt uniqueness via central API."""
 
+import time
 from dataclasses import dataclass
 
 import bittensor as bt
 import requests
+from opentelemetry.trace import SpanKind
 
 from aurelius.shared.config import Config
+from aurelius.shared.telemetry.otel_setup import get_tracer
 
 
 @dataclass
@@ -55,6 +58,7 @@ class NoveltyClient:
         """
         self.api_endpoint = api_endpoint or Config.NOVELTY_API_ENDPOINT
         self.timeout = timeout
+        self._tracer = get_tracer("aurelius.novelty") if Config.TELEMETRY_ENABLED else None
 
         if self.api_endpoint:
             bt.logging.info(f"Novelty client: API endpoint at {self.api_endpoint}")
@@ -90,6 +94,37 @@ class NoveltyClient:
             bt.logging.debug("Novelty check skipped: no embedding provided")
             return None
 
+        start_time = time.time()
+
+        # Wrap with tracing span if enabled
+        if self._tracer:
+            with self._tracer.start_as_current_span(
+                "novelty.check",
+                kind=SpanKind.CLIENT,
+                attributes={
+                    "novelty.endpoint": self.api_endpoint,
+                    "novelty.prompt_length": len(prompt),
+                    "novelty.has_embedding": True,
+                },
+            ) as span:
+                result = self._do_check_novelty(prompt, prompt_embedding, include_similar_prompt)
+                duration_ms = (time.time() - start_time) * 1000
+                span.set_attribute("duration_ms", round(duration_ms, 2))
+                if result:
+                    span.set_attribute("novelty.score", result.novelty_score)
+                    span.set_attribute("novelty.max_similarity", result.max_similarity)
+                    span.set_attribute("novelty.similar_count", result.similar_count)
+                return result
+        else:
+            return self._do_check_novelty(prompt, prompt_embedding, include_similar_prompt)
+
+    def _do_check_novelty(
+        self,
+        prompt: str,
+        prompt_embedding: list[float],
+        include_similar_prompt: bool,
+    ) -> NoveltyResult | None:
+        """Internal method to perform the novelty check API call."""
         try:
             response = requests.post(
                 f"{self.api_endpoint}/check",

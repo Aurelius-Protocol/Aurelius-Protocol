@@ -12,6 +12,9 @@ from typing import Tuple
 import bittensor as bt
 from openai import OpenAI
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode, SpanKind
+
 from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.consensus import ConsensusCoordinator
 from aurelius.shared.dataset_logger import DatasetLogger
@@ -21,6 +24,7 @@ from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
+from aurelius.shared.telemetry.otel_setup import setup_opentelemetry, get_tracer
 
 
 def check_port_available(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
@@ -262,6 +266,39 @@ class Validator:
         else:
             bt.logging.info("Consensus verification disabled")
 
+        # Initialize OpenTelemetry for distributed tracing
+        self._tracer = None
+        if Config.TELEMETRY_ENABLED:
+            try:
+                validator_hotkey = None
+                validator_uid = None
+                if self.wallet and hasattr(self.wallet.hotkey, 'ss58_address'):
+                    validator_hotkey = self.wallet.hotkey.ss58_address
+                if hasattr(self, 'uid'):
+                    validator_uid = self.uid
+
+                setup_opentelemetry(
+                    service_name="aurelius-validator",
+                    validator_hotkey=validator_hotkey,
+                    validator_uid=validator_uid,
+                    netuid=Config.BT_NETUID,
+                    network=Config.BT_NETWORK,
+                    traces_endpoint=Config.TELEMETRY_TRACES_ENDPOINT,
+                    logs_endpoint=Config.TELEMETRY_LOGS_ENDPOINT,
+                    enable_traces=Config.TELEMETRY_TRACES_ENABLED,
+                    enable_logs=Config.TELEMETRY_LOGS_ENABLED,
+                    trace_batch_size=Config.TELEMETRY_BATCH_SIZE,
+                    flush_interval_ms=Config.TELEMETRY_FLUSH_INTERVAL_MS,
+                    local_backup_path=Config.TELEMETRY_LOCAL_BACKUP_PATH,
+                )
+                self._tracer = get_tracer("aurelius.validator")
+                bt.logging.info("OpenTelemetry tracing initialized")
+            except Exception as e:
+                bt.logging.warning(f"Failed to initialize OpenTelemetry: {e}")
+                self._tracer = None
+        else:
+            bt.logging.info("OpenTelemetry tracing disabled")
+
         bt.logging.info("=" * 80)
         bt.logging.info("🚀 VALIDATOR INITIALIZATION COMPLETE")
         bt.logging.info("=" * 80)
@@ -368,14 +405,56 @@ class Validator:
 
         prompt = synapse.prompt
 
+        # Get miner hotkey for tracking
+        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, "dendrite") and synapse.dendrite else None
+
+        # Create OpenTelemetry span for the entire forward operation
+        span_context = None
+        if self._tracer:
+            span_context = self._tracer.start_as_current_span(
+                "validator.forward",
+                kind=SpanKind.SERVER,
+                attributes={
+                    "miner.hotkey": miner_hotkey[:16] if miner_hotkey else "unknown",
+                    "prompt.length": len(prompt),
+                    "synapse.name": synapse.name,
+                }
+            )
+            span_context.__enter__()
+
+        try:
+            result = self._forward_internal(synapse, miner_hotkey, prompt, start_time)
+            if span_context:
+                current_span = trace.get_current_span()
+                current_span.set_status(Status(StatusCode.OK))
+                current_span.set_attribute("response.accepted", result.accepted)
+                current_span.set_attribute("response.danger_score", result.danger_score or 0.0)
+            return result
+        except Exception as e:
+            if span_context:
+                current_span = trace.get_current_span()
+                current_span.set_status(Status(StatusCode.ERROR, str(e)))
+                current_span.record_exception(e)
+            raise
+        finally:
+            if span_context:
+                span_context.__exit__(None, None, None)
+
+    def _forward_internal(
+        self,
+        synapse: PromptSynapse,
+        miner_hotkey: str | None,
+        prompt: str,
+        start_time: float
+    ) -> PromptSynapse:
+        """Internal forward logic (separated for tracing)."""
+        import time
+
         bt.logging.info("=" * 80)
         bt.logging.info("🚀 FORWARD METHOD CALLED - REQUEST REACHED HANDLER!")
         bt.logging.info(f"   Synapse name: {synapse.name}")
         bt.logging.info(f"   Prompt: {Config.truncate_sensitive_data(prompt)}")
         bt.logging.info("=" * 80)
-
-        # Get miner hotkey for tracking
-        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, "dendrite") and synapse.dendrite else None
 
         # Input validation (security)
         # Check 1: Prompt length
@@ -475,8 +554,23 @@ class Validator:
             if actual_pres_penalty is not None:
                 api_params["presence_penalty"] = actual_pres_penalty
 
-            response = self.chat_client.chat.completions.create(**api_params)
-            api_duration = (time.time() - api_start_time) * 1000  # Convert to milliseconds
+            # Wrap chat API call with tracing span
+            if self._tracer:
+                with self._tracer.start_as_current_span(
+                    "chat_api.call",
+                    kind=SpanKind.CLIENT,
+                    attributes={
+                        "model": actual_model,
+                        "vendor": actual_vendor,
+                        "max_tokens": Config.OPENAI_MAX_TOKENS,
+                    }
+                ) as api_span:
+                    response = self.chat_client.chat.completions.create(**api_params)
+                    api_duration = (time.time() - api_start_time) * 1000
+                    api_span.set_attribute("duration_ms", round(api_duration, 2))
+            else:
+                response = self.chat_client.chat.completions.create(**api_params)
+                api_duration = (time.time() - api_start_time) * 1000
             timing_metrics["api_call_duration"] = round(api_duration, 2)
 
             # Extract the response text
@@ -497,8 +591,20 @@ class Validator:
 
             # Step 3: Moderate the OpenAI response (NOT the prompt)
             moderation_start_time = time.time()
-            moderation_result = self.moderation_provider.moderate(completion_text)
-            moderation_duration = (time.time() - moderation_start_time) * 1000
+            if self._tracer:
+                with self._tracer.start_as_current_span(
+                    "moderation.analyze",
+                    kind=SpanKind.CLIENT,
+                    attributes={"provider": Config.MODERATION_PROVIDER}
+                ) as mod_span:
+                    moderation_result = self.moderation_provider.moderate(completion_text)
+                    moderation_duration = (time.time() - moderation_start_time) * 1000
+                    mod_span.set_attribute("duration_ms", round(moderation_duration, 2))
+                    mod_span.set_attribute("danger_score", moderation_result.combined_score)
+                    mod_span.set_attribute("high_category_triggered", moderation_result.high_category_triggered)
+            else:
+                moderation_result = self.moderation_provider.moderate(completion_text)
+                moderation_duration = (time.time() - moderation_start_time) * 1000
             timing_metrics["moderation_duration"] = round(moderation_duration, 2)
 
             # Step 4: Calculate danger score

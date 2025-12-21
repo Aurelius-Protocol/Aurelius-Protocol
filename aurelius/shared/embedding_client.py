@@ -1,9 +1,13 @@
 """Embedding client for generating text embeddings via OpenAI API."""
 
+import time
+
 import bittensor as bt
 import requests
+from opentelemetry.trace import SpanKind
 
 from aurelius.shared.config import Config
+from aurelius.shared.telemetry.otel_setup import get_tracer
 
 # Embedding model details - OpenAI text-embedding-3-small supports dimension reduction
 EMBEDDING_MODEL = "text-embedding-3-small"
@@ -31,6 +35,7 @@ class EmbeddingClient:
         self.model = EMBEDDING_MODEL
         self.dimensions = EMBEDDING_DIMENSIONS
         self.embeddings_url = OPENAI_EMBEDDINGS_URL
+        self._tracer = get_tracer("aurelius.embedding") if Config.TELEMETRY_ENABLED else None
 
         if self.api_key:
             bt.logging.info(f"Embedding client initialized: {self.embeddings_url} (model: {self.model})")
@@ -59,6 +64,30 @@ class EmbeddingClient:
             bt.logging.debug("Embedding generation skipped: client not configured")
             return None
 
+        start_time = time.time()
+
+        # Wrap with tracing span if enabled
+        if self._tracer:
+            with self._tracer.start_as_current_span(
+                "embedding.generate",
+                kind=SpanKind.CLIENT,
+                attributes={
+                    "embedding.model": self.model,
+                    "embedding.dimensions": self.dimensions,
+                    "embedding.text_length": len(text),
+                    "http.url": self.embeddings_url,
+                },
+            ) as span:
+                result = self._do_get_embedding(text)
+                duration_ms = (time.time() - start_time) * 1000
+                span.set_attribute("duration_ms", round(duration_ms, 2))
+                span.set_attribute("embedding.success", result is not None)
+                return result
+        else:
+            return self._do_get_embedding(text)
+
+    def _do_get_embedding(self, text: str) -> list[float] | None:
+        """Internal method to perform the embedding API call."""
         try:
             response = requests.post(
                 self.embeddings_url,
