@@ -6,9 +6,11 @@ Provides a simple interface to configure OpenTelemetry with Aurelius custom expo
 from __future__ import annotations
 
 import atexit
+import time
 from typing import Any
 
 import bittensor as bt
+import requests
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
 from opentelemetry.sdk.trace import TracerProvider
@@ -41,6 +43,9 @@ def setup_opentelemetry(
     log_batch_size: int = 200,
     flush_interval_ms: int = 5000,
     local_backup_path: str | None = None,
+    wallet: "bt.wallet | None" = None,
+    heartbeat_interval_s: int = 300,
+    register_on_startup: bool = True,
 ) -> dict[str, Any]:
     """Configure OpenTelemetry with Aurelius custom exporters.
 
@@ -59,6 +64,9 @@ def setup_opentelemetry(
         log_batch_size: Number of logs to batch
         flush_interval_ms: Flush interval in milliseconds
         local_backup_path: Path for local backup on failure
+        wallet: Bittensor wallet for signing (enables heartbeat and registration)
+        heartbeat_interval_s: Heartbeat interval in seconds (default 5 minutes)
+        register_on_startup: Whether to register with telemetry API on startup
 
     Returns:
         Dictionary with tracer instance (and logger if enabled)
@@ -109,6 +117,8 @@ def setup_opentelemetry(
             batch_size=trace_batch_size,
             flush_interval=flush_interval_sec,
             local_backup_path=local_backup_path,
+            wallet=wallet,
+            heartbeat_interval=float(heartbeat_interval_s),
         )
 
         _tracer_provider = TracerProvider(resource=resource)
@@ -154,6 +164,25 @@ def setup_opentelemetry(
 
     # Register shutdown handler
     atexit.register(shutdown_opentelemetry)
+
+    # Register with telemetry API for health monitoring
+    # Fix 4: Only register if we have all required info including validator_uid
+    if register_on_startup and wallet and netuid is not None and network and validator_uid is not None:
+        try:
+            success = register_with_telemetry_api(
+                wallet=wallet,
+                validator_uid=validator_uid,
+                netuid=netuid,
+                network=network,
+                heartbeat_interval_s=heartbeat_interval_s,
+                telemetry_version=service_version or "1.0.0",
+            )
+            if not success:
+                bt.logging.warning("Telemetry registration failed after all retries")
+        except Exception as e:
+            bt.logging.warning(f"Failed to register with telemetry API: {e}")
+    elif register_on_startup and wallet and validator_uid is None:
+        bt.logging.warning("Skipping telemetry registration: validator_uid is required")
 
     _initialized = True
     return result
@@ -213,3 +242,145 @@ def is_initialized() -> bool:
         True if initialized, False otherwise
     """
     return _initialized
+
+
+def register_with_telemetry_api(
+    wallet: bt.wallet,
+    validator_uid: int | None,
+    netuid: int,
+    network: str,
+    registry_endpoint: str | None = None,
+    heartbeat_interval_s: int = 300,
+    telemetry_version: str = "1.0.0",
+    timeout: int = 10,
+    max_retries: int = 3,
+) -> bool:
+    """Register validator with the central telemetry API for health monitoring.
+
+    This function signs a message with the validator's hotkey and sends a registration
+    request to the telemetry API. The API will track this validator's health and
+    detect if it goes offline or experiences errors.
+
+    Args:
+        wallet: Bittensor wallet with hotkey for signing
+        validator_uid: Validator's UID on the subnet (can be None if unknown)
+        netuid: Subnet UID
+        network: Network name (finney, test, local)
+        registry_endpoint: Registry API endpoint (defaults to Config setting)
+        heartbeat_interval_s: Expected heartbeat interval in seconds
+        telemetry_version: Telemetry protocol version
+        timeout: Request timeout in seconds
+        max_retries: Maximum number of retry attempts (Fix 7)
+
+    Returns:
+        True if registration succeeded, False otherwise
+    """
+    from aurelius.shared.config import Config
+
+    endpoint = registry_endpoint or f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/register"
+    hotkey = wallet.hotkey.ss58_address
+    coldkey = wallet.coldkeypub.ss58_address if wallet.coldkeypub else None
+
+    # Prepare registration payload
+    payload = {
+        "hotkey": hotkey,
+        "uid": validator_uid,
+        "coldkey": coldkey,
+        "netuid": netuid,
+        "network": network,
+        "telemetry_version": telemetry_version,
+        "heartbeat_interval_s": heartbeat_interval_s,
+    }
+
+    # Fix 7: Retry with exponential backoff
+    for attempt in range(max_retries):
+        try:
+            # Create signed message for authentication (fresh timestamp each attempt)
+            timestamp = int(time.time())
+            message = f"aurelius-telemetry:{timestamp}:{hotkey}"
+            signature = wallet.hotkey.sign(message.encode()).hex()
+
+            # Send registration with signature headers
+            response = requests.post(
+                endpoint,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Validator-Hotkey": hotkey,
+                    "X-Validator-Signature": signature,
+                    "X-Signature-Timestamp": str(timestamp),
+                },
+                timeout=timeout,
+            )
+
+            if response.status_code in (200, 201):
+                bt.logging.info(f"Registered with telemetry API: {hotkey[:16]}... (uid={validator_uid})")
+                return True
+            else:
+                bt.logging.warning(
+                    f"Telemetry registration attempt {attempt + 1}/{max_retries} failed: "
+                    f"HTTP {response.status_code} - {response.text[:200]}"
+                )
+
+        except requests.RequestException as e:
+            bt.logging.warning(f"Telemetry registration attempt {attempt + 1}/{max_retries} failed: {e}")
+        except Exception as e:
+            bt.logging.error(f"Telemetry registration error: {e}")
+            return False  # Non-retryable error
+
+        # Wait before retry (exponential backoff)
+        if attempt < max_retries - 1:
+            wait_time = 2 ** attempt
+            bt.logging.debug(f"Retrying registration in {wait_time}s...")
+            time.sleep(wait_time)
+
+    bt.logging.error(f"Telemetry registration failed after {max_retries} attempts")
+    return False
+
+
+def send_heartbeat(
+    wallet: bt.wallet,
+    registry_endpoint: str | None = None,
+    timeout: int = 5,
+) -> bool:
+    """Send a heartbeat to the telemetry API to indicate validator is alive.
+
+    Args:
+        wallet: Bittensor wallet with hotkey for signing
+        registry_endpoint: Registry API endpoint (defaults to Config setting)
+        timeout: Request timeout in seconds
+
+    Returns:
+        True if heartbeat succeeded, False otherwise
+    """
+    from aurelius.shared.config import Config
+
+    endpoint = registry_endpoint or f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/heartbeat"
+    hotkey = wallet.hotkey.ss58_address
+
+    try:
+        # Create signed message
+        timestamp = int(time.time())
+        message = f"aurelius-telemetry:{timestamp}:{hotkey}"
+        signature = wallet.hotkey.sign(message.encode()).hex()
+
+        # Send heartbeat
+        response = requests.post(
+            endpoint,
+            json={"hotkey": hotkey},
+            headers={
+                "Content-Type": "application/json",
+                "X-Validator-Hotkey": hotkey,
+                "X-Validator-Signature": signature,
+                "X-Signature-Timestamp": str(timestamp),
+            },
+            timeout=timeout,
+        )
+
+        return response.status_code in (200, 201)
+
+    except requests.RequestException:
+        return False
+    except Exception as e:
+        bt.logging.debug(f"Heartbeat error: {e}")
+        return False

@@ -59,6 +59,9 @@ class AureliusSpanExporter(SpanExporter):
         max_retries: int = 3,
         timeout: int = 10,
         local_backup_path: str | None = None,
+        wallet: "bt.wallet | None" = None,
+        heartbeat_interval: float = 300.0,
+        registry_endpoint: str | None = None,
     ):
         """Initialize the Aurelius span exporter.
 
@@ -73,6 +76,9 @@ class AureliusSpanExporter(SpanExporter):
             max_retries: Maximum retry attempts for failed submissions
             timeout: Request timeout in seconds
             local_backup_path: Path for local backup files on failure
+            wallet: Bittensor wallet for signing heartbeat requests
+            heartbeat_interval: Seconds between heartbeats (default 5 minutes)
+            registry_endpoint: Explicit registry endpoint (fixes fragile endpoint construction)
         """
         self.endpoint = endpoint or "https://collector.aureliusaligned.ai/api/telemetry/traces"
         self.validator_hotkey = validator_hotkey
@@ -84,12 +90,16 @@ class AureliusSpanExporter(SpanExporter):
         self.max_retries = max_retries
         self.timeout = timeout
         self.local_backup_path = local_backup_path
+        self.wallet = wallet
+        self.heartbeat_interval = heartbeat_interval
+        self.registry_endpoint = registry_endpoint
 
         # Internal state
         self._queue: Queue[ReadableSpan] = Queue()
         self._worker_thread: threading.Thread | None = None
         self._running = False
         self._lock = threading.Lock()
+        self._last_heartbeat: float = 0
 
         # Statistics
         self.spans_exported = 0
@@ -135,6 +145,18 @@ class AureliusSpanExporter(SpanExporter):
                     self._send_batch(batch)
                     batch = []
                     last_flush = now
+
+                # Send heartbeat if interval elapsed (Fix 9: thread-safe access)
+                with self._lock:
+                    should_heartbeat = (
+                        self.wallet and
+                        now - self._last_heartbeat >= self.heartbeat_interval
+                    )
+                    if should_heartbeat:
+                        self._last_heartbeat = now
+
+                if should_heartbeat:
+                    self._send_heartbeat()
 
             except Exception as e:
                 bt.logging.error(f"Span exporter worker error: {e}")
@@ -277,6 +299,50 @@ class AureliusSpanExporter(SpanExporter):
             bt.logging.warning(f"Saved {len(payload['spans'])} spans to {filepath}")
         except Exception as e:
             bt.logging.error(f"Failed to save span backup: {e}")
+
+    def _send_heartbeat(self) -> bool:
+        """Send a heartbeat to the telemetry registry API."""
+        if not self.wallet or not self.validator_hotkey:
+            return False
+
+        try:
+            from aurelius.shared.config import Config
+
+            # Fix 3: Use explicit registry endpoint or fall back to Config
+            if self.registry_endpoint:
+                heartbeat_endpoint = f"{self.registry_endpoint}/heartbeat"
+            else:
+                heartbeat_endpoint = f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/heartbeat"
+
+            # Create signed message
+            timestamp = int(time.time())
+            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}"
+            signature = self.wallet.hotkey.sign(message.encode()).hex()
+
+            response = requests.post(
+                heartbeat_endpoint,
+                json={"hotkey": self.validator_hotkey},
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Validator-Hotkey": self.validator_hotkey,
+                    "X-Validator-Signature": signature,
+                    "X-Signature-Timestamp": str(timestamp),
+                },
+                timeout=5,
+            )
+
+            if response.status_code in (200, 201):
+                bt.logging.debug("Heartbeat sent successfully")
+                return True
+            else:
+                # Fix 8: Elevate heartbeat failures to warning level
+                bt.logging.warning(f"Heartbeat failed: HTTP {response.status_code} - {response.text[:200]}")
+                return False
+
+        except Exception as e:
+            # Fix 8: Elevate heartbeat errors to warning level
+            bt.logging.warning(f"Heartbeat error: {e}")
+            return False
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """Export spans (called by OpenTelemetry SDK)."""
