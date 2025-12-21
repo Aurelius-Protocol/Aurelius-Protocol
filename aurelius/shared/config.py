@@ -132,6 +132,11 @@ class Config:
     TELEMETRY_BATCH_SIZE: int = int(os.getenv("TELEMETRY_BATCH_SIZE", "100"))
     TELEMETRY_FLUSH_INTERVAL_MS: int = int(os.getenv("TELEMETRY_FLUSH_INTERVAL_MS", "5000"))
     TELEMETRY_LOCAL_BACKUP_PATH: str | None = os.getenv("TELEMETRY_LOCAL_BACKUP_PATH", "./telemetry_backup")
+    TELEMETRY_REGISTRY_ENDPOINT: str = os.getenv(
+        "TELEMETRY_REGISTRY_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/validator-registry"
+    )
+    TELEMETRY_HEARTBEAT_INTERVAL_S: int = int(os.getenv("TELEMETRY_HEARTBEAT_INTERVAL_S", "300"))  # 5 minutes
 
     # Scoring Configuration
     WEIGHT_UPDATE_INTERVAL: int = int(os.getenv("WEIGHT_UPDATE_INTERVAL", "100"))
