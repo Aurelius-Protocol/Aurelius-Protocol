@@ -493,6 +493,10 @@ class Config:
         bt.logging.set_debug(level == logging.DEBUG)
         bt.logging.set_trace(level == logging.DEBUG)
 
+        # Enable INFO level logging for bittensor (required for bt.logging.info() to output)
+        if level <= logging.INFO:
+            bt.logging.enable_info()
+
         # Also configure root Python logger
         logging.basicConfig(
             level=level, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"

@@ -732,7 +732,7 @@ class Validator:
             )
 
             # Step 2: Run the prompt multiple times for our vote
-            scores = []
+            run_results = []
             for i in range(runs_per_validator):
                 try:
                     response = self.chat_client.chat.completions.create(
@@ -744,30 +744,42 @@ class Validator:
 
                     # Moderate this run
                     moderation_result = self.moderation_provider.moderate(completion)
-                    scores.append(moderation_result.combined_score)
+                    run_results.append({
+                        "combined_score": moderation_result.combined_score,
+                        "high_category_triggered": moderation_result.high_category_triggered,
+                        "high_category_name": moderation_result.high_category_name,
+                        "high_category_score": moderation_result.high_category_score,
+                    })
 
                     bt.logging.info(
-                        f"Consensus run {i + 1}/{runs_per_validator}: score={moderation_result.combined_score:.4f}"
+                        f"Consensus run {i + 1}/{runs_per_validator}: score={moderation_result.combined_score:.4f}, "
+                        f"high_cat={moderation_result.high_category_triggered}"
                     )
 
                 except Exception as e:
                     bt.logging.error(f"Error in consensus run {i + 1}: {e}")
                     continue
 
-            if not scores:
+            if not run_results:
                 bt.logging.error("No successful consensus runs, aborting verification")
                 return
 
-            # Step 3: Determine our vote (majority of runs must exceed threshold)
-            dangerous_runs = sum(1 for s in scores if s >= Config.DANGER_THRESHOLD)
-            required_for_dangerous = len(scores) // 2 + 1  # Majority
+            # Step 3: Determine our vote (majority of runs must be dangerous)
+            # A run is dangerous if combined_score >= threshold OR any single category is very high
+            dangerous_runs = sum(
+                1 for run in run_results
+                if run["combined_score"] >= Config.DANGER_THRESHOLD or run["high_category_triggered"]
+            )
+            required_for_dangerous = len(run_results) // 2 + 1  # Majority
             our_vote = dangerous_runs >= required_for_dangerous
 
             bt.logging.info(
-                f"Our consensus vote: {our_vote} ({dangerous_runs}/{len(scores)} runs dangerous, "
+                f"Our consensus vote: {our_vote} ({dangerous_runs}/{len(run_results)} runs dangerous, "
                 f"needed {required_for_dangerous} for majority)"
             )
 
+            # Extract scores for backward compatibility
+            scores = [run["combined_score"] for run in run_results]
             primary_result = {
                 "vote": our_vote,
                 "scores": scores,
@@ -1017,7 +1029,7 @@ class Validator:
         try:
             prompt = synapse.prompt
             runs_required = synapse.runs_required
-            scores = []
+            run_results = []
 
             bt.logging.info(f"Running {runs_required} verification runs (adaptive distribution)")
 
@@ -1033,17 +1045,23 @@ class Validator:
 
                     # Moderate the response
                     moderation_result = self.moderation_provider.moderate(completion)
-                    scores.append(moderation_result.combined_score)
+                    run_results.append({
+                        "combined_score": moderation_result.combined_score,
+                        "high_category_triggered": moderation_result.high_category_triggered,
+                        "high_category_name": moderation_result.high_category_name,
+                        "high_category_score": moderation_result.high_category_score,
+                    })
 
                     bt.logging.info(
-                        f"Verification run {i + 1}/{runs_required}: score={moderation_result.combined_score:.4f}"
+                        f"Verification run {i + 1}/{runs_required}: score={moderation_result.combined_score:.4f}, "
+                        f"high_cat={moderation_result.high_category_triggered}"
                     )
 
                 except Exception as e:
                     bt.logging.error(f"Error in verification run {i + 1}: {e}")
                     continue
 
-            if not scores:
+            if not run_results:
                 # Failed to run any verification
                 bt.logging.error("No successful verification runs")
                 synapse.verification_result = {
@@ -1055,16 +1073,22 @@ class Validator:
                 }
                 return synapse
 
-            # Vote: dangerous if majority of runs exceed threshold
-            dangerous_runs = sum(1 for s in scores if s >= Config.DANGER_THRESHOLD)
-            required_for_dangerous = len(scores) // 2 + 1  # Majority (> 50%)
+            # Vote: dangerous if majority of runs are dangerous
+            # A run is dangerous if combined_score >= threshold OR any single category is very high
+            dangerous_runs = sum(
+                1 for run in run_results
+                if run["combined_score"] >= Config.DANGER_THRESHOLD or run["high_category_triggered"]
+            )
+            required_for_dangerous = len(run_results) // 2 + 1  # Majority (> 50%)
             vote = dangerous_runs >= required_for_dangerous
 
             bt.logging.info(
-                f"Our verification vote: {vote} ({dangerous_runs}/{len(scores)} runs dangerous, "
+                f"Our verification vote: {vote} ({dangerous_runs}/{len(run_results)} runs dangerous, "
                 f"needed {required_for_dangerous} for majority)"
             )
 
+            # Extract scores for backward compatibility
+            scores = [run["combined_score"] for run in run_results]
             synapse.verification_result = {
                 "runs": scores,
                 "vote": vote,
@@ -1445,14 +1469,25 @@ class Validator:
                     try:
                         # Set weights with thread safety
                         with self.subtensor_lock:
+                            # Log what we're about to set
+                            non_zero_uids = [uid for uid, w in zip(uids, weights) if w > 0]
+                            non_zero_weights = [w for w in weights if w > 0]
+                            bt.logging.info(f"Setting weights: UIDs={non_zero_uids}, weights={non_zero_weights}")
+                            bt.logging.info(f"Total UIDs: {len(uids)}, sum of weights: {sum(weights):.6f}")
+
+                            # Use default parameters which handle commit-reveal properly
+                            # version_key defaults to 10000001
+                            # commit_reveal_version defaults to 4
+                            # wait_for_revealed_execution defaults to True
                             success = self.subtensor.set_weights(
                                 netuid=Config.BT_NETUID,
                                 wallet=self.wallet,
                                 uids=uids,
                                 weights=weights,
-                                wait_for_inclusion=False,
-                                wait_for_finalization=False,
-                                version_key=0,
+                                wait_for_inclusion=True,
+                                wait_for_finalization=True,
+                                wait_for_revealed_execution=True,
+                                raise_error=True,
                             )
 
                         if success:
