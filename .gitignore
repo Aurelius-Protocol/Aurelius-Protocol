@@ -30,6 +30,8 @@ ENV/
 # Environment variables
 .env
 .env.local
+.env.testnet
+.env.finney
 
 # IDE
 .vscode/
