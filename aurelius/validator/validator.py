@@ -655,12 +655,31 @@ class Validator:
                     f"and no category >= {Config.SINGLE_CATEGORY_THRESHOLD}"
                 )
 
-            # Step 5b: Get miner stats for feedback
+            # Step 5a: Record submission immediately (for feedback stats)
+            # Novelty will be calculated in background, so pass None here
+            self.scoring_system.record_submission(
+                hotkey=miner_hotkey or "unknown",
+                danger_score=danger_score,
+                accepted=accepted,
+                block=self._get_current_block(),
+                novelty_score=None,  # Calculated async in background
+            )
+
+            # Step 5b: Get miner stats for feedback (now includes current submission)
             miner_score = self.scoring_system.get_miner_score(miner_hotkey or "unknown")
             if miner_score:
                 synapse.miner_novelty_avg = miner_score.average_novelty_score
-                synapse.miner_hit_rate = miner_score.acceptance_rate
+                # Convert acceptance_rate from 0-100 to 0-1 for proper percentage display
+                synapse.miner_hit_rate = miner_score.acceptance_rate / 100.0
                 synapse.miner_submission_count = miner_score.total_submissions
+                bt.logging.info(
+                    f"📊 Miner stats for {(miner_hotkey or 'unknown')[:8]}...: "
+                    f"submissions={miner_score.total_submissions}, "
+                    f"hit_rate={miner_score.acceptance_rate:.1f}%, "
+                    f"avg_novelty={miner_score.average_novelty_score:.3f}"
+                )
+            else:
+                bt.logging.warning(f"No miner score found for {(miner_hotkey or 'unknown')[:8]}...")
 
             # Calculate total processing duration
             total_duration = (time.time() - start_time) * 1000
@@ -809,14 +828,12 @@ class Validator:
                 prompt_embedding=prompt_embedding,
             )
 
-            # Update scoring system with novelty
-            self.scoring_system.record_submission(
-                hotkey=miner_hotkey or "unknown",
-                danger_score=danger_score,
-                accepted=accepted,
-                block=self._get_current_block(),
-                novelty_score=novelty_score,
-            )
+            # Update novelty score (submission already recorded in main thread)
+            if novelty_score is not None:
+                self.scoring_system.update_novelty(
+                    hotkey=miner_hotkey or "unknown",
+                    novelty_score=novelty_score,
+                )
 
             bt.logging.debug("Background logging completed")
 

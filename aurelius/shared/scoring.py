@@ -181,6 +181,45 @@ class ScoringSystem:
 
         return score
 
+    def update_novelty(self, hotkey: str, novelty_score: float) -> None:
+        """
+        Update novelty stats for an existing miner score.
+
+        This is called from the background thread after the submission
+        has already been recorded (to provide immediate feedback to miners).
+
+        Args:
+            hotkey: Miner's hotkey
+            novelty_score: Novelty score from central API (0-1, 1=completely novel)
+        """
+        if hotkey not in self.miner_scores:
+            bt.logging.warning(f"Cannot update novelty: no score record for {hotkey[:8]}...")
+            return
+
+        score = self.miner_scores[hotkey]
+
+        # Update novelty statistics
+        score.novelty_submissions += 1
+        score.total_novelty_score += novelty_score
+        score.average_novelty_score = score.total_novelty_score / score.novelty_submissions
+
+        # Update the most recent history entry with the novelty score
+        history = self.score_history.get(hotkey, [])
+        if history:
+            # Find the most recent entry without a novelty score and update it
+            for entry in reversed(history):
+                if entry.get("novelty_score") is None:
+                    entry["novelty_score"] = novelty_score
+                    break
+
+        bt.logging.debug(
+            f"Updated novelty for {hotkey[:8]}...: "
+            f"novelty={novelty_score:.3f}, avg={score.average_novelty_score:.3f}"
+        )
+
+        # Persist after update
+        self._save()
+
     def get_miner_score(self, hotkey: str) -> MinerScore | None:
         """
         Get the score record for a specific miner.

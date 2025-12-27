@@ -22,7 +22,7 @@ import bittensor as bt
 import requests
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
-from opentelemetry.sdk._logs import LogData
+from opentelemetry.sdk._logs import ReadableLogRecord
 from opentelemetry.sdk._logs.export import LogExporter, LogExportResult
 from opentelemetry.trace import SpanKind, StatusCode
 
@@ -456,7 +456,7 @@ class AureliusLogExporter(LogExporter):
         self.local_backup_path = local_backup_path
 
         # Internal state
-        self._queue: Queue[LogData] = Queue()
+        self._queue: Queue[ReadableLogRecord] = Queue()
         self._worker_thread: threading.Thread | None = None
         self._running = False
         self._lock = threading.Lock()
@@ -481,7 +481,7 @@ class AureliusLogExporter(LogExporter):
 
     def _worker_loop(self) -> None:
         """Background worker that batches and sends logs."""
-        batch: list[LogData] = []
+        batch: list[ReadableLogRecord] = []
         last_flush = time.time()
 
         while self._running:
@@ -510,10 +510,8 @@ class AureliusLogExporter(LogExporter):
         if batch:
             self._send_batch(batch)
 
-    def _log_to_dict(self, log_data: LogData) -> dict[str, Any]:
+    def _log_to_dict(self, log_record: ReadableLogRecord) -> dict[str, Any]:
         """Convert an OpenTelemetry log record to our API format."""
-        log_record = log_data.log_record
-
         # Convert attributes
         attributes = {}
         if log_record.attributes:
@@ -522,12 +520,12 @@ class AureliusLogExporter(LogExporter):
                     value = list(value)
                 attributes[key] = value
 
-        # Resource attributes
+        # Resource attributes (instrumentation scope may not be directly available in newer SDK)
         resource_attrs = {}
-        if log_data.instrumentation_scope:
-            resource_attrs["instrumentation.scope.name"] = log_data.instrumentation_scope.name
-            if log_data.instrumentation_scope.version:
-                resource_attrs["instrumentation.scope.version"] = log_data.instrumentation_scope.version
+        if hasattr(log_record, 'instrumentation_scope') and log_record.instrumentation_scope:
+            resource_attrs["instrumentation.scope.name"] = log_record.instrumentation_scope.name
+            if log_record.instrumentation_scope.version:
+                resource_attrs["instrumentation.scope.version"] = log_record.instrumentation_scope.version
 
         # Get trace context if available
         trace_id = None
@@ -553,7 +551,7 @@ class AureliusLogExporter(LogExporter):
             "resource_attributes": resource_attrs,
         }
 
-    def _send_batch(self, logs: list[LogData]) -> bool:
+    def _send_batch(self, logs: list[ReadableLogRecord]) -> bool:
         """Send a batch of logs to the API."""
         if not logs:
             return True
@@ -618,7 +616,7 @@ class AureliusLogExporter(LogExporter):
         except Exception as e:
             bt.logging.error(f"Failed to save log backup: {e}")
 
-    def export(self, batch: Sequence[LogData]) -> LogExportResult:
+    def export(self, batch: Sequence[ReadableLogRecord]) -> LogExportResult:
         """Export logs (called by OpenTelemetry SDK)."""
         dropped = 0
         for log in batch:
