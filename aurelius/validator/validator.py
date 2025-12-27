@@ -655,6 +655,13 @@ class Validator:
                     f"and no category >= {Config.SINGLE_CATEGORY_THRESHOLD}"
                 )
 
+            # Step 5b: Get miner stats for feedback
+            miner_score = self.scoring_system.get_miner_score(miner_hotkey or "unknown")
+            if miner_score:
+                synapse.miner_novelty_avg = miner_score.average_novelty_score
+                synapse.miner_hit_rate = miner_score.acceptance_rate
+                synapse.miner_submission_count = miner_score.total_submissions
+
             # Calculate total processing duration
             total_duration = (time.time() - start_time) * 1000
             timing_metrics["total_processing_duration"] = round(total_duration, 2)

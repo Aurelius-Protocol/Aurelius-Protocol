@@ -30,6 +30,9 @@ class PromptSynapse(bt.Synapse):
         category_scores: Breakdown of moderation scores by category (filled by validator)
         accepted: Whether the submission met the danger threshold (filled by validator)
         rejection_reason: Reason for rejection if not accepted (filled by validator)
+        miner_novelty_avg: Miner's average novelty score across all submissions (filled by validator)
+        miner_hit_rate: Miner's acceptance rate (filled by validator)
+        miner_submission_count: Total number of submissions from this miner (filled by validator)
     """
 
     # Input from miner
@@ -140,6 +143,25 @@ class PromptSynapse(bt.Synapse):
         None,
         title="Rejection Reason",
         description="Reason for rejection (rate limit, low score, error, etc.)",
+    )
+
+    # Miner statistics (filled by validator)
+    miner_novelty_avg: float | None = Field(
+        None,
+        title="Miner Novelty Average",
+        description="Miner's average novelty score across all submissions (0-1)",
+    )
+
+    miner_hit_rate: float | None = Field(
+        None,
+        title="Miner Hit Rate",
+        description="Miner's acceptance rate (accepted/total submissions)",
+    )
+
+    miner_submission_count: int | None = Field(
+        None,
+        title="Miner Submission Count",
+        description="Total number of submissions from this miner",
     )
 
     # Distribution statistics (from multiple runs across validators)
