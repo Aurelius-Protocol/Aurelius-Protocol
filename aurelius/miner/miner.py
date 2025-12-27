@@ -330,6 +330,15 @@ def send_prompt(
                     if score > 0.01:
                         print(f"  {category:25s}: {score:.4f}")
 
+        # Display miner statistics if available
+        if result_synapse.miner_submission_count is not None:
+            print("\n--- Your Statistics ---")
+            print(f"Submissions:   {result_synapse.miner_submission_count}")
+            if result_synapse.miner_hit_rate is not None:
+                print(f"Hit Rate:      {result_synapse.miner_hit_rate:.1%}")
+            if result_synapse.miner_novelty_avg is not None:
+                print(f"Avg Novelty:   {result_synapse.miner_novelty_avg:.3f}")
+
         print("=" * 60 + "\n")
         return result_synapse.response
     else:
