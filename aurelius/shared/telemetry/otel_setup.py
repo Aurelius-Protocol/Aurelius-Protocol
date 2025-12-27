@@ -150,6 +150,7 @@ def setup_opentelemetry(
             batch_size=log_batch_size,
             flush_interval=flush_interval_sec,
             local_backup_path=local_backup_path,
+            wallet=wallet,
         )
 
         _logger_provider = LoggerProvider(resource=resource)

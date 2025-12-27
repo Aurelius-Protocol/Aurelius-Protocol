@@ -24,7 +24,7 @@ from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
-from aurelius.shared.telemetry.otel_setup import setup_opentelemetry, get_tracer
+from aurelius.shared.telemetry.otel_setup import setup_opentelemetry, get_tracer, register_with_telemetry_api
 
 
 def check_port_available(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
@@ -300,6 +300,8 @@ class Validator:
                     trace_batch_size=Config.TELEMETRY_BATCH_SIZE,
                     flush_interval_ms=Config.TELEMETRY_FLUSH_INTERVAL_MS,
                     local_backup_path=Config.TELEMETRY_LOCAL_BACKUP_PATH,
+                    wallet=self.wallet,
+                    heartbeat_interval_s=Config.TELEMETRY_HEARTBEAT_INTERVAL_S,
                 )
                 self._tracer = get_tracer("aurelius.validator")
                 bt.logging.info("OpenTelemetry tracing initialized")
@@ -1734,6 +1736,19 @@ class Validator:
                     self.uid = metagraph.hotkeys.index(validator_hotkey)
                     bt.logging.success(f"✅ Validator UID: {self.uid}")
                     bt.logging.info(f"   Hotkey: {validator_hotkey}")
+
+                    # Register with telemetry API now that we have the UID
+                    if Config.TELEMETRY_ENABLED and self.wallet:
+                        try:
+                            register_with_telemetry_api(
+                                wallet=self.wallet,
+                                validator_uid=self.uid,
+                                netuid=Config.BT_NETUID,
+                                network=Config.BT_NETWORK,
+                                heartbeat_interval_s=Config.TELEMETRY_HEARTBEAT_INTERVAL_S,
+                            )
+                        except Exception as e:
+                            bt.logging.warning(f"Failed to register with telemetry API: {e}")
                     if hasattr(metagraph, 'S'):
                         stake = metagraph.S[self.uid]
                         bt.logging.info(f"   Stake: {stake} TAO")

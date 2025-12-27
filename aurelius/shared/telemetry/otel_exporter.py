@@ -261,10 +261,22 @@ class AureliusSpanExporter(SpanExporter):
             "batch_id": str(uuid.uuid4()),
         }
 
+        # Build headers with authentication if wallet is available
         headers = {
             "Content-Type": "application/json",
             "X-Protocol-Version": PROTOCOL_VERSION,
         }
+
+        # Add signature authentication (required by API)
+        if self.wallet and self.validator_hotkey:
+            timestamp = int(time.time())
+            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}"
+            signature = self.wallet.hotkey.sign(message.encode()).hex()
+            headers.update({
+                "X-Validator-Hotkey": self.validator_hotkey,
+                "X-Validator-Signature": signature,
+                "X-Signature-Timestamp": str(timestamp),
+            })
 
         for attempt in range(self.max_retries):
             try:
@@ -442,6 +454,7 @@ class AureliusLogExporter(LogExporter):
         max_retries: int = 3,
         timeout: int = 10,
         local_backup_path: str | None = None,
+        wallet: "bt.wallet | None" = None,
     ):
         """Initialize the Aurelius log exporter."""
         self.endpoint = endpoint or "https://collector.aureliusaligned.ai/api/telemetry/logs"
@@ -454,6 +467,7 @@ class AureliusLogExporter(LogExporter):
         self.max_retries = max_retries
         self.timeout = timeout
         self.local_backup_path = local_backup_path
+        self.wallet = wallet
 
         # Internal state
         self._queue: Queue[ReadableLogRecord] = Queue()
@@ -565,10 +579,22 @@ class AureliusLogExporter(LogExporter):
             "batch_id": str(uuid.uuid4()),
         }
 
+        # Build headers with authentication if wallet is available
         headers = {
             "Content-Type": "application/json",
             "X-Protocol-Version": PROTOCOL_VERSION,
         }
+
+        # Add signature authentication (required by API)
+        if self.wallet and self.validator_hotkey:
+            timestamp = int(time.time())
+            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}"
+            signature = self.wallet.hotkey.sign(message.encode()).hex()
+            headers.update({
+                "X-Validator-Hotkey": self.validator_hotkey,
+                "X-Validator-Signature": signature,
+                "X-Signature-Timestamp": str(timestamp),
+            })
 
         for attempt in range(self.max_retries):
             try:
