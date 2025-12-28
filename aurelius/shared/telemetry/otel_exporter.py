@@ -525,42 +525,77 @@ class AureliusLogExporter(LogExporter):
             self._send_batch(batch)
 
     def _log_to_dict(self, log_record: ReadableLogRecord) -> dict[str, Any]:
-        """Convert an OpenTelemetry log record to our API format."""
+        """Convert an OpenTelemetry log record to our API format.
+
+        LoggingHandler produces ReadableLogRecord where actual data is in
+        the inner 'log_record' attribute. We check both locations.
+        """
+        # LoggingHandler wraps the actual log in an inner 'log_record' attribute
+        inner = getattr(log_record, 'log_record', None)
+
+        def get_attr(name, default=None):
+            """Get attribute from inner log_record first, then outer."""
+            if inner is not None:
+                val = getattr(inner, name, None)
+                if val is not None:
+                    return val
+            return getattr(log_record, name, default)
+
         # Convert attributes
         attributes = {}
-        if log_record.attributes:
-            for key, value in log_record.attributes.items():
-                if isinstance(value, tuple):
-                    value = list(value)
-                attributes[key] = value
+        log_attrs = get_attr('attributes', None)
+        if log_attrs:
+            try:
+                for key, value in log_attrs.items():
+                    if isinstance(value, tuple):
+                        value = list(value)
+                    attributes[key] = value
+            except (TypeError, AttributeError):
+                pass
 
-        # Resource attributes (instrumentation scope may not be directly available in newer SDK)
+        # Resource attributes
         resource_attrs = {}
-        if hasattr(log_record, 'instrumentation_scope') and log_record.instrumentation_scope:
-            resource_attrs["instrumentation.scope.name"] = log_record.instrumentation_scope.name
-            if log_record.instrumentation_scope.version:
-                resource_attrs["instrumentation.scope.version"] = log_record.instrumentation_scope.version
+        instrumentation_scope = getattr(log_record, 'instrumentation_scope', None)
+        if instrumentation_scope:
+            scope_name = getattr(instrumentation_scope, 'name', None)
+            if scope_name:
+                resource_attrs["instrumentation.scope.name"] = scope_name
+            scope_version = getattr(instrumentation_scope, 'version', None)
+            if scope_version:
+                resource_attrs["instrumentation.scope.version"] = scope_version
 
-        # Get trace context if available
+        # Get trace context
         trace_id = None
         span_id = None
-        if log_record.trace_id:
-            trace_id = format(log_record.trace_id, '032x')
-        if log_record.span_id:
-            span_id = format(log_record.span_id, '016x')
+        raw_trace_id = get_attr('trace_id', None)
+        raw_span_id = get_attr('span_id', None)
+        if raw_trace_id and raw_trace_id != 0:
+            trace_id = format(raw_trace_id, '032x')
+        if raw_span_id and raw_span_id != 0:
+            span_id = format(raw_span_id, '016x')
 
         # Get severity
         severity_number = 9  # Default to INFO
-        if log_record.severity_number:
-            severity_number = log_record.severity_number.value
+        raw_severity = get_attr('severity_number', None)
+        if raw_severity is not None:
+            severity_number = getattr(raw_severity, 'value', raw_severity)
+
+        # Get timestamp and body
+        timestamp = get_attr('timestamp', None) or int(time.time() * 1e9)
+        body = get_attr('body', None)
+        body_str = str(body) if body else ""
+
+        # API requires non-empty body (min 1 char) - return None to signal skip
+        if not body_str or not body_str.strip():
+            return None
 
         return {
-            "timestamp_unix_nano": log_record.timestamp or int(time.time() * 1e9),
+            "timestamp_unix_nano": timestamp,
             "trace_id": trace_id,
             "span_id": span_id,
             "severity_number": severity_number,
             "severity_text": self.SEVERITY_MAP.get(severity_number, "INFO"),
-            "body": str(log_record.body) if log_record.body else "",
+            "body": body_str,
             "attributes": attributes,
             "resource_attributes": resource_attrs,
         }
@@ -570,8 +605,15 @@ class AureliusLogExporter(LogExporter):
         if not logs:
             return True
 
+        # Convert logs and filter out None values (logs with empty bodies are skipped)
+        converted_logs = [self._log_to_dict(log) for log in logs]
+        valid_logs = [log for log in converted_logs if log is not None]
+
+        if not valid_logs:
+            return True  # Nothing to send after filtering
+
         payload = {
-            "logs": [self._log_to_dict(log) for log in logs],
+            "logs": valid_logs,
             "validator_hotkey": self.validator_hotkey,
             "validator_uid": self.validator_uid,
             "netuid": self.netuid,
@@ -608,10 +650,10 @@ class AureliusLogExporter(LogExporter):
                 if response.status_code in (200, 201):
                     with self._lock:
                         self.logs_exported += len(logs)
-                    bt.logging.debug(f"Exported {len(logs)} logs (total: {self.logs_exported})")
+                    bt.logging.debug(f"Exported {len(valid_logs)} logs (total: {self.logs_exported})")
                     return True
                 else:
-                    bt.logging.warning(f"Log export failed: HTTP {response.status_code}")
+                    bt.logging.warning(f"Log export failed: HTTP {response.status_code} - {response.text[:200]}")
 
             except requests.RequestException as e:
                 bt.logging.warning(f"Log export attempt {attempt + 1} failed: {e}")

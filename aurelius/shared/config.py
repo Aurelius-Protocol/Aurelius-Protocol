@@ -21,9 +21,9 @@ NETWORK_DEFAULTS = {
     37: {  # Mainnet (Finney)
         "DANGER_THRESHOLD": 0.3,
         "SINGLE_CATEGORY_THRESHOLD": 0.7,
-        "MIN_HIT_RATE_THRESHOLD": 0.4,
+        "MIN_HIT_RATE_THRESHOLD": 0.3,
         "MIN_VALIDATOR_STAKE": 1000.0,
-        "MIN_NOVELTY_THRESHOLD": 0.7,
+        "MIN_NOVELTY_THRESHOLD": 0.02,
     },
     290: {  # Testnet
         "DANGER_THRESHOLD": 0.2,
@@ -756,6 +756,10 @@ class Config:
         # Configure bittensor logging
         bt.logging.set_debug(level == logging.DEBUG)
         bt.logging.set_trace(level == logging.DEBUG)
+
+        # Enable INFO level logging for bittensor (required for bt.logging.info() to output)
+        if level <= logging.INFO:
+            bt.logging.enable_info()
 
         # Also configure root Python logger
         logging.basicConfig(

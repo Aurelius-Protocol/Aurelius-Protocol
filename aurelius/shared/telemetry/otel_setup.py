@@ -165,6 +165,13 @@ def setup_opentelemetry(
 
         set_logger_provider(_logger_provider)
         result["logger"] = _logger_provider.get_logger(service_name, service_version)
+
+        # Bridge Python logging to OpenTelemetry so bt.logging calls are exported
+        # Only export WARNING and ERROR level logs to reduce noise
+        import logging
+        handler = LoggingHandler(level=logging.WARNING, logger_provider=_logger_provider)
+        logging.getLogger().addHandler(handler)
+
         bt.logging.info(f"OpenTelemetry logging enabled for {service_name}")
 
     # Register shutdown handler
