@@ -24,12 +24,22 @@ NETWORK_DEFAULTS = {
         "MIN_HIT_RATE_THRESHOLD": 0.3,
         "MIN_VALIDATOR_STAKE": 1000.0,
         "MIN_NOVELTY_THRESHOLD": 0.02,
+        "CENTRAL_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/collections",
+        "NOVELTY_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/novelty",
+        "TELEMETRY_TRACES_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/traces",
+        "TELEMETRY_LOGS_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/logs",
+        "TELEMETRY_REGISTRY_ENDPOINT": "https://collector.aureliusaligned.ai/api/validator-registry",
     },
     290: {  # Testnet
         "DANGER_THRESHOLD": 0.2,
         "MIN_HIT_RATE_THRESHOLD": 0.3,
         "MIN_VALIDATOR_STAKE": 100.0,
         "MIN_NOVELTY_THRESHOLD": 0.3,
+        "CENTRAL_API_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/collections",
+        "NOVELTY_API_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/novelty",
+        "TELEMETRY_TRACES_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/telemetry/traces",
+        "TELEMETRY_LOGS_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/telemetry/logs",
+        "TELEMETRY_REGISTRY_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/validator-registry",
     },
 }
 
