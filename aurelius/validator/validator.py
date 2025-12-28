@@ -12,7 +12,10 @@ from typing import Tuple
 import bittensor as bt
 from openai import OpenAI
 
-from aurelius.shared.config import Config
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode, SpanKind
+
+from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.consensus import ConsensusCoordinator
 from aurelius.shared.dataset_logger import DatasetLogger
 from aurelius.shared.moderation import create_moderation_provider
@@ -21,6 +24,7 @@ from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
+from aurelius.shared.telemetry.otel_setup import setup_opentelemetry, get_tracer, register_with_telemetry_api
 
 
 def check_port_available(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
@@ -111,10 +115,26 @@ class Validator:
         # Setup logging based on LOG_LEVEL configuration
         Config.setup_logging()
 
+        # Apply network-aware defaults based on BT_NETUID
+        # This sets thresholds appropriate for mainnet (37) or testnet (290)
+        Config.apply_network_defaults()
+
+        # Detect wallet if not explicitly configured
+        # This allows turnkey operation when only one wallet exists
+        try:
+            Config.detect_and_set_wallet(role="validator")
+        except ConfigurationError as e:
+            bt.logging.error(str(e))
+            sys.exit(1)
+
         bt.logging.info(f"Initializing validator with wallet: {Config.VALIDATOR_WALLET_NAME}")
 
-        # Validate configuration
-        Config.validate()
+        # Validate configuration (will hard-fail on missing/invalid API keys)
+        try:
+            Config.validate()
+        except ConfigurationError as e:
+            bt.logging.error(str(e))
+            sys.exit(1)
 
         # Check for production configuration warnings
         production_warnings = Config.validate_production()
@@ -124,6 +144,16 @@ class Validator:
             for warning in production_warnings:
                 bt.logging.warning(f"  - {warning}")
             bt.logging.warning("=" * 80)
+
+        # A6: Warn if using default endpoints (MITM prevention)
+        Config.warn_default_endpoints()
+
+        # A20: Validate HTTPS endpoints in production
+        try:
+            Config.validate_endpoints()
+        except ConfigurationError as e:
+            bt.logging.error(str(e))
+            sys.exit(1)
 
         # Default timeout for chat API calls (seconds) to prevent indefinite blocking
         chat_api_timeout = 60.0
@@ -246,6 +276,41 @@ class Validator:
         else:
             bt.logging.info("Consensus verification disabled")
 
+        # Initialize OpenTelemetry for distributed tracing
+        self._tracer = None
+        if Config.TELEMETRY_ENABLED:
+            try:
+                validator_hotkey = None
+                validator_uid = None
+                if self.wallet and hasattr(self.wallet.hotkey, 'ss58_address'):
+                    validator_hotkey = self.wallet.hotkey.ss58_address
+                if hasattr(self, 'uid'):
+                    validator_uid = self.uid
+
+                setup_opentelemetry(
+                    service_name="aurelius-validator",
+                    validator_hotkey=validator_hotkey,
+                    validator_uid=validator_uid,
+                    netuid=Config.BT_NETUID,
+                    network=Config.BT_NETWORK,
+                    traces_endpoint=Config.TELEMETRY_TRACES_ENDPOINT,
+                    logs_endpoint=Config.TELEMETRY_LOGS_ENDPOINT,
+                    enable_traces=Config.TELEMETRY_TRACES_ENABLED,
+                    enable_logs=Config.TELEMETRY_LOGS_ENABLED,
+                    trace_batch_size=Config.TELEMETRY_BATCH_SIZE,
+                    flush_interval_ms=Config.TELEMETRY_FLUSH_INTERVAL_MS,
+                    local_backup_path=Config.TELEMETRY_LOCAL_BACKUP_PATH,
+                    wallet=self.wallet,
+                    heartbeat_interval_s=Config.TELEMETRY_HEARTBEAT_INTERVAL_S,
+                )
+                self._tracer = get_tracer("aurelius.validator")
+                bt.logging.info("OpenTelemetry tracing initialized")
+            except Exception as e:
+                bt.logging.warning(f"Failed to initialize OpenTelemetry: {e}")
+                self._tracer = None
+        else:
+            bt.logging.info("OpenTelemetry tracing disabled")
+
         bt.logging.info("=" * 80)
         bt.logging.info("🚀 VALIDATOR INITIALIZATION COMPLETE")
         bt.logging.info("=" * 80)
@@ -352,14 +417,56 @@ class Validator:
 
         prompt = synapse.prompt
 
+        # Get miner hotkey for tracking
+        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, "dendrite") and synapse.dendrite else None
+
+        # Create OpenTelemetry span for the entire forward operation
+        span_context = None
+        if self._tracer:
+            span_context = self._tracer.start_as_current_span(
+                "validator.forward",
+                kind=SpanKind.SERVER,
+                attributes={
+                    "miner.hotkey": miner_hotkey[:16] if miner_hotkey else "unknown",
+                    "prompt.length": len(prompt),
+                    "synapse.name": synapse.name,
+                }
+            )
+            span_context.__enter__()
+
+        try:
+            result = self._forward_internal(synapse, miner_hotkey, prompt, start_time)
+            if span_context:
+                current_span = trace.get_current_span()
+                current_span.set_status(Status(StatusCode.OK))
+                current_span.set_attribute("response.accepted", result.accepted)
+                current_span.set_attribute("response.danger_score", result.danger_score or 0.0)
+            return result
+        except Exception as e:
+            if span_context:
+                current_span = trace.get_current_span()
+                current_span.set_status(Status(StatusCode.ERROR, str(e)))
+                current_span.record_exception(e)
+            raise
+        finally:
+            if span_context:
+                span_context.__exit__(None, None, None)
+
+    def _forward_internal(
+        self,
+        synapse: PromptSynapse,
+        miner_hotkey: str | None,
+        prompt: str,
+        start_time: float
+    ) -> PromptSynapse:
+        """Internal forward logic (separated for tracing)."""
+        import time
+
         bt.logging.info("=" * 80)
         bt.logging.info("🚀 FORWARD METHOD CALLED - REQUEST REACHED HANDLER!")
         bt.logging.info(f"   Synapse name: {synapse.name}")
         bt.logging.info(f"   Prompt: {Config.truncate_sensitive_data(prompt)}")
         bt.logging.info("=" * 80)
-
-        # Get miner hotkey for tracking
-        miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, "dendrite") and synapse.dendrite else None
 
         # Input validation (security)
         # Check 1: Prompt length
@@ -459,8 +566,23 @@ class Validator:
             if actual_pres_penalty is not None:
                 api_params["presence_penalty"] = actual_pres_penalty
 
-            response = self.chat_client.chat.completions.create(**api_params)
-            api_duration = (time.time() - api_start_time) * 1000  # Convert to milliseconds
+            # Wrap chat API call with tracing span
+            if self._tracer:
+                with self._tracer.start_as_current_span(
+                    "chat_api.call",
+                    kind=SpanKind.CLIENT,
+                    attributes={
+                        "model": actual_model,
+                        "vendor": actual_vendor,
+                        "max_tokens": Config.OPENAI_MAX_TOKENS,
+                    }
+                ) as api_span:
+                    response = self.chat_client.chat.completions.create(**api_params)
+                    api_duration = (time.time() - api_start_time) * 1000
+                    api_span.set_attribute("duration_ms", round(api_duration, 2))
+            else:
+                response = self.chat_client.chat.completions.create(**api_params)
+                api_duration = (time.time() - api_start_time) * 1000
             timing_metrics["api_call_duration"] = round(api_duration, 2)
 
             # Extract the response text
@@ -481,8 +603,20 @@ class Validator:
 
             # Step 3: Moderate the OpenAI response (NOT the prompt)
             moderation_start_time = time.time()
-            moderation_result = self.moderation_provider.moderate(completion_text)
-            moderation_duration = (time.time() - moderation_start_time) * 1000
+            if self._tracer:
+                with self._tracer.start_as_current_span(
+                    "moderation.analyze",
+                    kind=SpanKind.CLIENT,
+                    attributes={"provider": Config.MODERATION_PROVIDER}
+                ) as mod_span:
+                    moderation_result = self.moderation_provider.moderate(completion_text)
+                    moderation_duration = (time.time() - moderation_start_time) * 1000
+                    mod_span.set_attribute("duration_ms", round(moderation_duration, 2))
+                    mod_span.set_attribute("danger_score", moderation_result.combined_score)
+                    mod_span.set_attribute("high_category_triggered", moderation_result.high_category_triggered)
+            else:
+                moderation_result = self.moderation_provider.moderate(completion_text)
+                moderation_duration = (time.time() - moderation_start_time) * 1000
             timing_metrics["moderation_duration"] = round(moderation_duration, 2)
 
             # Step 4: Calculate danger score
@@ -522,6 +656,32 @@ class Validator:
                     f"✗ Prompt REJECTED - Aggregate score {danger_score:.3f} < {Config.DANGER_THRESHOLD} "
                     f"and no category >= {Config.SINGLE_CATEGORY_THRESHOLD}"
                 )
+
+            # Step 5a: Record submission immediately (for feedback stats)
+            # Novelty will be calculated in background, so pass None here
+            self.scoring_system.record_submission(
+                hotkey=miner_hotkey or "unknown",
+                danger_score=danger_score,
+                accepted=accepted,
+                block=self._get_current_block(),
+                novelty_score=None,  # Calculated async in background
+            )
+
+            # Step 5b: Get miner stats for feedback (now includes current submission)
+            miner_score = self.scoring_system.get_miner_score(miner_hotkey or "unknown")
+            if miner_score:
+                synapse.miner_novelty_avg = miner_score.average_novelty_score
+                # Convert acceptance_rate from 0-100 to 0-1 for proper percentage display
+                synapse.miner_hit_rate = miner_score.acceptance_rate / 100.0
+                synapse.miner_submission_count = miner_score.total_submissions
+                bt.logging.info(
+                    f"📊 Miner stats for {(miner_hotkey or 'unknown')[:8]}...: "
+                    f"submissions={miner_score.total_submissions}, "
+                    f"hit_rate={miner_score.acceptance_rate:.1f}%, "
+                    f"avg_novelty={miner_score.average_novelty_score:.3f}"
+                )
+            else:
+                bt.logging.warning(f"No miner score found for {(miner_hotkey or 'unknown')[:8]}...")
 
             # Calculate total processing duration
             total_duration = (time.time() - start_time) * 1000
@@ -670,14 +830,12 @@ class Validator:
                 prompt_embedding=prompt_embedding,
             )
 
-            # Update scoring system with novelty
-            self.scoring_system.record_submission(
-                hotkey=miner_hotkey or "unknown",
-                danger_score=danger_score,
-                accepted=accepted,
-                block=self._get_current_block(),
-                novelty_score=novelty_score,
-            )
+            # Update novelty score (submission already recorded in main thread)
+            if novelty_score is not None:
+                self.scoring_system.update_novelty(
+                    hotkey=miner_hotkey or "unknown",
+                    novelty_score=novelty_score,
+                )
 
             bt.logging.debug("Background logging completed")
 
@@ -732,7 +890,7 @@ class Validator:
             )
 
             # Step 2: Run the prompt multiple times for our vote
-            scores = []
+            run_results = []
             for i in range(runs_per_validator):
                 try:
                     response = self.chat_client.chat.completions.create(
@@ -744,30 +902,42 @@ class Validator:
 
                     # Moderate this run
                     moderation_result = self.moderation_provider.moderate(completion)
-                    scores.append(moderation_result.combined_score)
+                    run_results.append({
+                        "combined_score": moderation_result.combined_score,
+                        "high_category_triggered": moderation_result.high_category_triggered,
+                        "high_category_name": moderation_result.high_category_name,
+                        "high_category_score": moderation_result.high_category_score,
+                    })
 
                     bt.logging.info(
-                        f"Consensus run {i + 1}/{runs_per_validator}: score={moderation_result.combined_score:.4f}"
+                        f"Consensus run {i + 1}/{runs_per_validator}: score={moderation_result.combined_score:.4f}, "
+                        f"high_cat={moderation_result.high_category_triggered}"
                     )
 
                 except Exception as e:
                     bt.logging.error(f"Error in consensus run {i + 1}: {e}")
                     continue
 
-            if not scores:
+            if not run_results:
                 bt.logging.error("No successful consensus runs, aborting verification")
                 return
 
-            # Step 3: Determine our vote (majority of runs must exceed threshold)
-            dangerous_runs = sum(1 for s in scores if s >= Config.DANGER_THRESHOLD)
-            required_for_dangerous = len(scores) // 2 + 1  # Majority
+            # Step 3: Determine our vote (majority of runs must be dangerous)
+            # A run is dangerous if combined_score >= threshold OR any single category is very high
+            dangerous_runs = sum(
+                1 for run in run_results
+                if run["combined_score"] >= Config.DANGER_THRESHOLD or run["high_category_triggered"]
+            )
+            required_for_dangerous = len(run_results) // 2 + 1  # Majority
             our_vote = dangerous_runs >= required_for_dangerous
 
             bt.logging.info(
-                f"Our consensus vote: {our_vote} ({dangerous_runs}/{len(scores)} runs dangerous, "
+                f"Our consensus vote: {our_vote} ({dangerous_runs}/{len(run_results)} runs dangerous, "
                 f"needed {required_for_dangerous} for majority)"
             )
 
+            # Extract scores for backward compatibility
+            scores = [run["combined_score"] for run in run_results]
             primary_result = {
                 "vote": our_vote,
                 "scores": scores,
@@ -1017,7 +1187,7 @@ class Validator:
         try:
             prompt = synapse.prompt
             runs_required = synapse.runs_required
-            scores = []
+            run_results = []
 
             bt.logging.info(f"Running {runs_required} verification runs (adaptive distribution)")
 
@@ -1033,17 +1203,23 @@ class Validator:
 
                     # Moderate the response
                     moderation_result = self.moderation_provider.moderate(completion)
-                    scores.append(moderation_result.combined_score)
+                    run_results.append({
+                        "combined_score": moderation_result.combined_score,
+                        "high_category_triggered": moderation_result.high_category_triggered,
+                        "high_category_name": moderation_result.high_category_name,
+                        "high_category_score": moderation_result.high_category_score,
+                    })
 
                     bt.logging.info(
-                        f"Verification run {i + 1}/{runs_required}: score={moderation_result.combined_score:.4f}"
+                        f"Verification run {i + 1}/{runs_required}: score={moderation_result.combined_score:.4f}, "
+                        f"high_cat={moderation_result.high_category_triggered}"
                     )
 
                 except Exception as e:
                     bt.logging.error(f"Error in verification run {i + 1}: {e}")
                     continue
 
-            if not scores:
+            if not run_results:
                 # Failed to run any verification
                 bt.logging.error("No successful verification runs")
                 synapse.verification_result = {
@@ -1055,16 +1231,22 @@ class Validator:
                 }
                 return synapse
 
-            # Vote: dangerous if majority of runs exceed threshold
-            dangerous_runs = sum(1 for s in scores if s >= Config.DANGER_THRESHOLD)
-            required_for_dangerous = len(scores) // 2 + 1  # Majority (> 50%)
+            # Vote: dangerous if majority of runs are dangerous
+            # A run is dangerous if combined_score >= threshold OR any single category is very high
+            dangerous_runs = sum(
+                1 for run in run_results
+                if run["combined_score"] >= Config.DANGER_THRESHOLD or run["high_category_triggered"]
+            )
+            required_for_dangerous = len(run_results) // 2 + 1  # Majority (> 50%)
             vote = dangerous_runs >= required_for_dangerous
 
             bt.logging.info(
-                f"Our verification vote: {vote} ({dangerous_runs}/{len(scores)} runs dangerous, "
+                f"Our verification vote: {vote} ({dangerous_runs}/{len(run_results)} runs dangerous, "
                 f"needed {required_for_dangerous} for majority)"
             )
 
+            # Extract scores for backward compatibility
+            scores = [run["combined_score"] for run in run_results]
             synapse.verification_result = {
                 "runs": scores,
                 "vote": vote,
@@ -1445,14 +1627,22 @@ class Validator:
                     try:
                         # Set weights with thread safety
                         with self.subtensor_lock:
+                            # Log what we're about to set
+                            non_zero_uids = [uid for uid, w in zip(uids, weights) if w > 0]
+                            non_zero_weights = [w for w in weights if w > 0]
+                            bt.logging.info(f"Setting weights: UIDs={non_zero_uids}, weights={non_zero_weights}")
+                            bt.logging.info(f"Total UIDs: {len(uids)}, sum of weights: {sum(weights):.6f}")
+
+                            # Use default parameters which handle commit-reveal properly
                             success = self.subtensor.set_weights(
                                 netuid=Config.BT_NETUID,
                                 wallet=self.wallet,
                                 uids=uids,
                                 weights=weights,
-                                wait_for_inclusion=False,
-                                wait_for_finalization=False,
-                                version_key=0,
+                                wait_for_inclusion=True,
+                                wait_for_finalization=True,
+                                wait_for_revealed_execution=True,
+                                raise_error=True,
                             )
 
                         if success:
@@ -1578,6 +1768,19 @@ class Validator:
                     self.uid = metagraph.hotkeys.index(validator_hotkey)
                     bt.logging.success(f"✅ Validator UID: {self.uid}")
                     bt.logging.info(f"   Hotkey: {validator_hotkey}")
+
+                    # Register with telemetry API now that we have the UID
+                    if Config.TELEMETRY_ENABLED and self.wallet:
+                        try:
+                            register_with_telemetry_api(
+                                wallet=self.wallet,
+                                validator_uid=self.uid,
+                                netuid=Config.BT_NETUID,
+                                network=Config.BT_NETWORK,
+                                heartbeat_interval_s=Config.TELEMETRY_HEARTBEAT_INTERVAL_S,
+                            )
+                        except Exception as e:
+                            bt.logging.warning(f"Failed to register with telemetry API: {e}")
                     if hasattr(metagraph, 'S'):
                         stake = metagraph.S[self.uid]
                         bt.logging.info(f"   Stake: {stake} TAO")

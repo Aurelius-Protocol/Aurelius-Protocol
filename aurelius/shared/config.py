@@ -9,6 +9,31 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+class ConfigurationError(Exception):
+    """Raised when configuration is invalid and cannot proceed."""
+
+    pass
+
+
+# Network-specific default configurations
+# These are applied based on BT_NETUID when apply_network_defaults() is called
+NETWORK_DEFAULTS = {
+    37: {  # Mainnet (Finney)
+        "DANGER_THRESHOLD": 0.3,
+        "SINGLE_CATEGORY_THRESHOLD": 0.7,
+        "MIN_HIT_RATE_THRESHOLD": 0.3,
+        "MIN_VALIDATOR_STAKE": 1000.0,
+        "MIN_NOVELTY_THRESHOLD": 0.02,
+    },
+    290: {  # Testnet
+        "DANGER_THRESHOLD": 0.2,
+        "MIN_HIT_RATE_THRESHOLD": 0.3,
+        "MIN_VALIDATOR_STAKE": 100.0,
+        "MIN_NOVELTY_THRESHOLD": 0.3,
+    },
+}
+
+
 class Config:
     """Subnet configuration loaded from environment variables."""
 
@@ -92,6 +117,27 @@ class Config:
     ENABLE_LOCAL_BACKUP: bool = os.getenv("ENABLE_LOCAL_BACKUP", "true").lower() == "true"
     DATASET_LOGGER_SHUTDOWN_TIMEOUT: int = int(os.getenv("DATASET_LOGGER_SHUTDOWN_TIMEOUT", "30"))  # seconds
 
+    # OpenTelemetry Configuration
+    TELEMETRY_ENABLED: bool = os.getenv("TELEMETRY_ENABLED", "true").lower() == "true"
+    TELEMETRY_TRACES_ENABLED: bool = os.getenv("TELEMETRY_TRACES_ENABLED", "true").lower() == "true"
+    TELEMETRY_LOGS_ENABLED: bool = os.getenv("TELEMETRY_LOGS_ENABLED", "true").lower() == "true"
+    TELEMETRY_TRACES_ENDPOINT: str = os.getenv(
+        "TELEMETRY_TRACES_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/telemetry/traces"
+    )
+    TELEMETRY_LOGS_ENDPOINT: str = os.getenv(
+        "TELEMETRY_LOGS_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/telemetry/logs"
+    )
+    TELEMETRY_BATCH_SIZE: int = int(os.getenv("TELEMETRY_BATCH_SIZE", "100"))
+    TELEMETRY_FLUSH_INTERVAL_MS: int = int(os.getenv("TELEMETRY_FLUSH_INTERVAL_MS", "5000"))
+    TELEMETRY_LOCAL_BACKUP_PATH: str | None = os.getenv("TELEMETRY_LOCAL_BACKUP_PATH", "./telemetry_backup")
+    TELEMETRY_REGISTRY_ENDPOINT: str = os.getenv(
+        "TELEMETRY_REGISTRY_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/validator-registry"
+    )
+    TELEMETRY_HEARTBEAT_INTERVAL_S: int = int(os.getenv("TELEMETRY_HEARTBEAT_INTERVAL_S", "300"))  # 5 minutes
+
     # Scoring Configuration
     WEIGHT_UPDATE_INTERVAL: int = int(os.getenv("WEIGHT_UPDATE_INTERVAL", "100"))
     MIN_SAMPLES_FOR_WEIGHTS: int = int(os.getenv("MIN_SAMPLES_FOR_WEIGHTS", "5"))
@@ -153,11 +199,25 @@ class Config:
     MINER_WALLET_NAME: str = os.getenv("MINER_WALLET_NAME", "miner")
     MINER_HOTKEY: str = os.getenv("MINER_HOTKEY", "default")
 
+    # Miner Connection Configuration
+    MINER_TIMEOUT: int = int(os.getenv("MINER_TIMEOUT", "30"))  # Query timeout in seconds
+    MINER_MAX_RETRIES: int = int(os.getenv("MINER_MAX_RETRIES", "3"))  # Max retry attempts
+    MINER_RETRY_DELAY: float = float(os.getenv("MINER_RETRY_DELAY", "1.0"))  # Initial retry delay
+    MINER_RETRY_MAX_DELAY: float = float(os.getenv("MINER_RETRY_MAX_DELAY", "30.0"))  # Max retry delay
+    MINER_PREFLIGHT_CHECK: bool = os.getenv("MINER_PREFLIGHT_CHECK", "true").lower() == "true"
+    MINER_PREFLIGHT_TIMEOUT: float = float(os.getenv("MINER_PREFLIGHT_TIMEOUT", "5.0"))
+    MINER_COLORED_OUTPUT: bool = os.getenv("MINER_COLORED_OUTPUT", "true").lower() == "true"
+
     # Chain endpoint (for local development)
     SUBTENSOR_ENDPOINT: str | None = os.getenv("SUBTENSOR_ENDPOINT")
 
     # Local Mode - Skip blockchain registration (for testing without stake)
     LOCAL_MODE: bool = os.getenv("LOCAL_MODE", "false").lower() == "true"
+
+    # Advanced Mode - Allow custom overrides of network defaults
+    # When False (default): Network defaults are ALWAYS used, custom values ignored with warning
+    # When True: Custom env values override network defaults (for advanced users)
+    ADVANCED_MODE: bool = os.getenv("ADVANCED_MODE", "false").lower() == "true"
 
     # Network Configuration
     AUTO_DETECT_EXTERNAL_IP: bool = os.getenv("AUTO_DETECT_EXTERNAL_IP", "false").lower() == "true"
@@ -185,22 +245,65 @@ class Config:
 
     @classmethod
     def validate(cls) -> None:
-        """Validate that required configuration is present."""
-        # Validate chat provider configuration
-        if cls.CHAT_PROVIDER not in ["chutes", "openai"]:
-            raise ValueError(f"CHAT_PROVIDER must be 'chutes' or 'openai', got '{cls.CHAT_PROVIDER}'")
+        """
+        Validate that required configuration is present.
 
-        if cls.CHAT_PROVIDER == "chutes":
-            if not cls.CHUTES_API_KEY:
-                raise ValueError("CHUTES_API_KEY is required when CHAT_PROVIDER=chutes. Please set it in your .env file.")
-        else:
-            # Using OpenAI for chat - validate OpenAI key format
-            if not cls.OPENAI_API_KEY.startswith("sk-"):
-                raise ValueError("OPENAI_API_KEY appears invalid (should start with 'sk-')")
+        Raises:
+            ConfigurationError: For critical issues (missing/invalid API keys)
+            ValueError: For invalid configuration values
+        """
+        errors = []
+
+        # ================================================================
+        # CRITICAL: API Key Validation (hard failures)
+        # ================================================================
 
         # OpenAI API key is always required for moderation
         if not cls.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY is required for moderation. Please set it in your .env file.")
+            errors.append(
+                "OPENAI_API_KEY is required for content moderation.\n"
+                "  Get your API key from: https://platform.openai.com/api-keys\n"
+                "  Set with: export OPENAI_API_KEY='sk-...'"
+            )
+        elif cls.OPENAI_API_KEY.lower().startswith("your-") or "placeholder" in cls.OPENAI_API_KEY.lower():
+            errors.append(
+                "OPENAI_API_KEY appears to be a placeholder value.\n"
+                "  Replace with your actual API key from: https://platform.openai.com/api-keys"
+            )
+        elif not cls.OPENAI_API_KEY.startswith("sk-"):
+            errors.append(
+                "OPENAI_API_KEY appears invalid (should start with 'sk-').\n"
+                "  Get a valid API key from: https://platform.openai.com/api-keys"
+            )
+
+        # Chutes API key validation
+        if cls.CHAT_PROVIDER == "chutes":
+            if not cls.CHUTES_API_KEY:
+                errors.append(
+                    "CHUTES_API_KEY is required when CHAT_PROVIDER=chutes.\n"
+                    "  Get your API key from: https://chutes.ai\n"
+                    "  Set with: export CHUTES_API_KEY='...'"
+                )
+            elif cls.CHUTES_API_KEY.lower().startswith("your-") or "placeholder" in cls.CHUTES_API_KEY.lower():
+                errors.append(
+                    "CHUTES_API_KEY appears to be a placeholder value.\n"
+                    "  Replace with your actual API key from: https://chutes.ai"
+                )
+
+        # Chat provider validation
+        if cls.CHAT_PROVIDER not in ["chutes", "openai"]:
+            errors.append(f"CHAT_PROVIDER must be 'chutes' or 'openai', got '{cls.CHAT_PROVIDER}'")
+
+        # If there are critical errors, fail immediately with all of them
+        if errors:
+            error_msg = "\n\n".join([f"ERROR {i + 1}: {e}" for i, e in enumerate(errors)])
+            raise ConfigurationError(
+                f"\n{'=' * 60}\n"
+                f"CONFIGURATION ERRORS - Cannot start\n"
+                f"{'=' * 60}\n\n"
+                f"{error_msg}\n\n"
+                f"{'=' * 60}\n"
+            )
 
         # Check .env file permissions if it exists
         import os
@@ -473,6 +576,167 @@ class Config:
         return warnings
 
     @classmethod
+    def apply_network_defaults(cls) -> None:
+        """
+        Apply network-aware defaults based on BT_NETUID.
+
+        Behavior:
+        - ADVANCED_MODE=false (default): Network defaults are ALWAYS used.
+          If user sets a value in env, warn that it's being ignored.
+        - ADVANCED_MODE=true: User's explicit env vars override network defaults.
+
+        Network defaults:
+        - Netuid 37 (mainnet): Stricter thresholds for production
+        - Netuid 290 (testnet): Relaxed thresholds for testing
+        """
+        import bittensor as bt
+
+        netuid = cls.BT_NETUID
+        defaults = NETWORK_DEFAULTS.get(netuid, {})
+
+        if not defaults:
+            bt.logging.debug(f"No network defaults defined for netuid {netuid}")
+            return
+
+        network_name = "mainnet" if netuid == 37 else "testnet" if netuid == 290 else f"subnet {netuid}"
+
+        if cls.ADVANCED_MODE:
+            # Advanced mode: respect user's explicit env vars
+            bt.logging.warning("=" * 60)
+            bt.logging.warning("ADVANCED_MODE enabled - custom configuration will be used")
+            bt.logging.warning("Ensure your settings are appropriate for the network")
+            bt.logging.warning("=" * 60)
+
+            applied = []
+            for key, default_value in defaults.items():
+                if os.getenv(key) is None:
+                    setattr(cls, key, default_value)
+                    applied.append(f"{key}={default_value}")
+                else:
+                    bt.logging.info(f"Using custom value: {key}={os.getenv(key)}")
+
+            if applied:
+                bt.logging.info(f"Applied {network_name} defaults (not overridden): {', '.join(applied)}")
+        else:
+            # Standard mode: ALWAYS use network defaults, warn about ignored values
+            ignored = []
+            for key, default_value in defaults.items():
+                env_value = os.getenv(key)
+                if env_value is not None:
+                    # User set a value but ADVANCED_MODE is off - warn and ignore
+                    ignored.append(f"{key}={env_value} (using {default_value} instead)")
+                setattr(cls, key, default_value)
+
+            bt.logging.info(f"Applied {network_name} defaults for netuid {netuid}:")
+            for key, value in defaults.items():
+                bt.logging.info(f"  {key}={value}")
+
+            if ignored:
+                bt.logging.warning("=" * 60)
+                bt.logging.warning("CONFIGURATION VALUES IGNORED (ADVANCED_MODE not enabled)")
+                bt.logging.warning("=" * 60)
+                for item in ignored:
+                    bt.logging.warning(f"  {item}")
+                bt.logging.warning("")
+                bt.logging.warning("To use custom values, set ADVANCED_MODE=true")
+                bt.logging.warning("=" * 60)
+
+    @classmethod
+    def validate_endpoints(cls) -> None:
+        """
+        A20: Validate that all API endpoints use HTTPS in production.
+
+        This prevents MITM attacks by ensuring secure transport.
+        Should be called during startup.
+        """
+        import bittensor as bt
+
+        if cls.LOCAL_MODE:
+            # Allow HTTP in local mode
+            return
+
+        endpoints = {
+            "CENTRAL_API_ENDPOINT": cls.CENTRAL_API_ENDPOINT,
+            "TELEMETRY_TRACES_ENDPOINT": cls.TELEMETRY_TRACES_ENDPOINT,
+            "TELEMETRY_LOGS_ENDPOINT": cls.TELEMETRY_LOGS_ENDPOINT,
+            "TELEMETRY_REGISTRY_ENDPOINT": cls.TELEMETRY_REGISTRY_ENDPOINT,
+            "NOVELTY_API_ENDPOINT": cls.NOVELTY_API_ENDPOINT,
+        }
+
+        insecure = []
+        for name, url in endpoints.items():
+            if url and not url.startswith("https://"):
+                insecure.append(f"{name}={url}")
+
+        if insecure:
+            bt.logging.error("=" * 70)
+            bt.logging.error("SECURITY ERROR: Insecure HTTP endpoints detected!")
+            bt.logging.error("=" * 70)
+            bt.logging.error("")
+            bt.logging.error("The following endpoints must use HTTPS in production:")
+            for endpoint in insecure:
+                bt.logging.error(f"  - {endpoint}")
+            bt.logging.error("")
+            bt.logging.error("Set LOCAL_MODE=true if testing locally, or fix the URLs.")
+            bt.logging.error("=" * 70)
+            raise ConfigurationError("Insecure HTTP endpoints are not allowed in production")
+
+    @classmethod
+    def detect_and_set_wallet(cls, role: str = "validator") -> None:
+        """
+        Detect wallet automatically if not explicitly configured.
+
+        Auto-detection logic:
+        - If wallet env vars are explicitly set, use those values
+        - If exactly one wallet with one hotkey exists, auto-select it
+        - If multiple wallets/hotkeys exist, raise error with list
+        - If no wallets exist, raise error with instructions
+
+        Args:
+            role: "validator" or "miner" - determines which config vars to set
+
+        Raises:
+            ConfigurationError: If no wallet can be determined
+        """
+        import bittensor as bt
+
+        from aurelius.shared.wallet_detector import detect_wallet
+
+        wallet_var = f"{role.upper()}_WALLET_NAME"
+        hotkey_var = f"{role.upper()}_HOTKEY"
+
+        # Check if explicitly configured via environment
+        explicit_wallet = os.getenv(wallet_var)
+        explicit_hotkey = os.getenv(hotkey_var)
+
+        if explicit_wallet and explicit_hotkey:
+            bt.logging.info(f"Using configured wallet: {explicit_wallet}/{explicit_hotkey}")
+            return
+
+        # Attempt auto-detection
+        bt.logging.info("No wallet explicitly configured, attempting auto-detection...")
+        result = detect_wallet(role=role)
+
+        if result.error:
+            raise ConfigurationError(
+                f"\n{'=' * 60}\n"
+                f"WALLET CONFIGURATION ERROR\n"
+                f"{'=' * 60}\n\n"
+                f"{result.error}\n\n"
+                f"{'=' * 60}\n"
+            )
+
+        # Auto-detection succeeded
+        bt.logging.success(f"Auto-detected wallet: {result.wallet_name}/{result.hotkey}")
+
+        if role == "validator":
+            cls.VALIDATOR_WALLET_NAME = result.wallet_name
+            cls.VALIDATOR_HOTKEY = result.hotkey
+        else:
+            cls.MINER_WALLET_NAME = result.wallet_name
+            cls.MINER_HOTKEY = result.hotkey
+
+    @classmethod
     def setup_logging(cls) -> None:
         """Configure logging based on LOG_LEVEL setting."""
         import logging
@@ -492,6 +756,10 @@ class Config:
         # Configure bittensor logging
         bt.logging.set_debug(level == logging.DEBUG)
         bt.logging.set_trace(level == logging.DEBUG)
+
+        # Enable INFO level logging for bittensor (required for bt.logging.info() to output)
+        if level <= logging.INFO:
+            bt.logging.enable_info()
 
         # Also configure root Python logger
         logging.basicConfig(
@@ -516,3 +784,52 @@ class Config:
             return text
 
         return text[: cls.MAX_LOG_LENGTH] + "... [TRUNCATED]"
+
+    @classmethod
+    def warn_default_endpoints(cls) -> None:
+        """
+        A6: Warn if using default/hardcoded production endpoints without explicit configuration.
+
+        This helps prevent MITM attacks by ensuring operators explicitly configure endpoints.
+        Should be called during validator/miner startup.
+        """
+        import bittensor as bt
+
+        # Mapping of env var names to their default values
+        default_endpoints = {
+            "CENTRAL_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/collections",
+            "TELEMETRY_TRACES_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/traces",
+            "TELEMETRY_LOGS_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/logs",
+            "TELEMETRY_REGISTRY_ENDPOINT": "https://collector.aureliusaligned.ai/api/validator-registry",
+            "NOVELTY_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/novelty",
+        }
+
+        using_defaults = []
+
+        for env_var, default_value in default_endpoints.items():
+            # Check if env var is explicitly set
+            explicit_value = os.getenv(env_var)
+            current_value = getattr(cls, env_var, None)
+
+            # If no explicit env var and using the default value
+            if explicit_value is None and current_value == default_value:
+                using_defaults.append(env_var)
+
+        if using_defaults:
+            bt.logging.warning("=" * 70)
+            bt.logging.warning("SECURITY NOTICE: Using default production endpoints")
+            bt.logging.warning("=" * 70)
+            bt.logging.warning("")
+            bt.logging.warning("The following endpoints are using hardcoded defaults:")
+            for env_var in using_defaults:
+                bt.logging.warning(f"  - {env_var}")
+            bt.logging.warning("")
+            bt.logging.warning("While these defaults point to official Aurelius infrastructure,")
+            bt.logging.warning("explicitly setting them in your .env file ensures you control")
+            bt.logging.warning("which servers receive your data and prevents MITM attacks.")
+            bt.logging.warning("")
+            bt.logging.warning("To suppress this warning, explicitly set these in your .env:")
+            for env_var in using_defaults:
+                default_val = default_endpoints[env_var]
+                bt.logging.warning(f"  {env_var}={default_val}")
+            bt.logging.warning("=" * 70)

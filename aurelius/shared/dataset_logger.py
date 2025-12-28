@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,9 @@ from queue import Queue
 
 import bittensor as bt
 import requests
+from opentelemetry.trace import SpanKind
+
+from aurelius.shared.telemetry.otel_setup import get_tracer
 
 
 @dataclass
@@ -120,6 +124,10 @@ class DatasetLogger:
         self.submissions_successful = 0
         self.submissions_failed = 0
 
+        # Telemetry tracer - import Config here to avoid circular import
+        from aurelius.shared.config import Config
+        self._tracer = get_tracer("aurelius.dataset") if Config.TELEMETRY_ENABLED else None
+
         # Start background worker if we have a central API
         if self.central_api_endpoint:
             bt.logging.info(f"Dataset logger: Central API enabled at {self.central_api_endpoint}")
@@ -174,6 +182,34 @@ class DatasetLogger:
         if not self.central_api_endpoint:
             return False
 
+        start_time = time.time()
+
+        # Wrap with tracing span if enabled
+        if self._tracer:
+            with self._tracer.start_as_current_span(
+                "dataset.api_submit",
+                kind=SpanKind.CLIENT,
+                attributes={
+                    "dataset.endpoint": self.central_api_endpoint,
+                    "dataset.accepted": entry.accepted,
+                    "dataset.danger_score": entry.danger_score,
+                    "dataset.consensus_verified": entry.consensus_verified,
+                },
+            ) as span:
+                success, status_code, retry_count = self._do_submit_to_api(entry, max_retries)
+                duration_ms = (time.time() - start_time) * 1000
+                span.set_attribute("duration_ms", round(duration_ms, 2))
+                span.set_attribute("dataset.success", success)
+                span.set_attribute("dataset.retry_count", retry_count)
+                if status_code:
+                    span.set_attribute("http.status_code", status_code)
+                return success
+        else:
+            success, _, _ = self._do_submit_to_api(entry, max_retries)
+            return success
+
+    def _do_submit_to_api(self, entry: DatasetEntry, max_retries: int) -> tuple[bool, int | None, int]:
+        """Internal method to perform the API submission with retries."""
         headers = {
             "Content-Type": "application/json",
         }
@@ -182,6 +218,7 @@ class DatasetLogger:
             headers["Authorization"] = f"Bearer {self.central_api_key}"
 
         data = asdict(entry)
+        last_status_code = None
 
         for attempt in range(max_retries):
             try:
@@ -191,11 +228,12 @@ class DatasetLogger:
                     headers=headers,
                     timeout=10,
                 )
+                last_status_code = response.status_code
 
                 if response.status_code in [200, 201]:
                     self.submissions_successful += 1
                     bt.logging.success(f"Dataset entry submitted to central API (total: {self.submissions_successful})")
-                    return True
+                    return True, last_status_code, attempt
                 else:
                     bt.logging.warning(f"Central API returned status {response.status_code}: {response.text}")
 
@@ -203,13 +241,11 @@ class DatasetLogger:
                 bt.logging.warning(f"Failed to submit to central API (attempt {attempt + 1}/{max_retries}): {e}")
 
                 if attempt < max_retries - 1:
-                    import time
-
                     time.sleep(2**attempt)  # Exponential backoff
 
         self.submissions_failed += 1
         bt.logging.error(f"Failed to submit to central API after all retries (total failures: {self.submissions_failed})")
-        return False
+        return False, last_status_code, max_retries - 1
 
     def _save_local(self, entry: DatasetEntry) -> bool:
         """
