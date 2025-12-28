@@ -244,7 +244,7 @@ class Config:
 
     # Miner Burn Configuration
     # Burns a percentage of miner emissions by allocating weight to a registered burn UID
-    MINER_BURN_ENABLED: bool = os.getenv("MINER_BURN_ENABLED", "false").lower() == "true"
+    MINER_BURN_ENABLED: bool = os.getenv("MINER_BURN_ENABLED", "true").lower() == "true"
     MINER_BURN_PERCENTAGE: float = float(os.getenv("MINER_BURN_PERCENTAGE", "0.9"))  # 90% default
     BURN_UID: int = int(os.getenv("BURN_UID", "200"))
 
