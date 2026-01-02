@@ -218,6 +218,11 @@ class Config:
     MINER_PREFLIGHT_TIMEOUT: float = float(os.getenv("MINER_PREFLIGHT_TIMEOUT", "5.0"))
     MINER_COLORED_OUTPUT: bool = os.getenv("MINER_COLORED_OUTPUT", "true").lower() == "true"
 
+    # Multi-Validator Miner Configuration
+    MINER_MULTI_VALIDATOR: bool = os.getenv("MINER_MULTI_VALIDATOR", "true").lower() == "true"
+    MINER_MAX_VALIDATORS: int = int(os.getenv("MINER_MAX_VALIDATORS", "10"))
+    MINER_MIN_VALIDATOR_STAKE: float = float(os.getenv("MINER_MIN_VALIDATOR_STAKE", "0"))
+
     # Chain endpoint (for local development)
     SUBTENSOR_ENDPOINT: str | None = os.getenv("SUBTENSOR_ENDPOINT")
 

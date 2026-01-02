@@ -17,6 +17,56 @@ from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.protocol import PromptSynapse
 
 
+def discover_validators(
+    metagraph,
+    min_stake: float = 0.0,
+    max_count: int | None = None,
+) -> list[int]:
+    """
+    Discover eligible validators from metagraph, sorted by stake (highest first).
+
+    Args:
+        metagraph: Bittensor metagraph object
+        min_stake: Minimum stake required (default: 0.0)
+        max_count: Maximum number of validators to return (default: None = all)
+
+    Returns:
+        List of validator UIDs sorted by stake (highest first) that:
+        - Have stake >= min_stake
+        - Are currently serving (axon.is_serving)
+    """
+    # Collect eligible validators with their stakes
+    eligible: list[tuple[int, float]] = []
+    for uid in range(len(metagraph.hotkeys)):
+        # Get stake - handle different metagraph implementations
+        stake = metagraph.S[uid]
+        if hasattr(stake, "item"):
+            stake = stake.item()  # Handle numpy/torch tensors
+        stake = float(stake)
+
+        if stake < min_stake:
+            continue
+
+        # Check if validator is serving
+        axon = metagraph.axons[uid]
+        if not axon.is_serving:
+            continue
+
+        eligible.append((uid, stake))
+
+    # Sort by stake descending (highest first)
+    eligible.sort(key=lambda x: x[1], reverse=True)
+
+    # Extract UIDs only
+    sorted_uids = [uid for uid, _ in eligible]
+
+    # Limit count if specified
+    if max_count and len(sorted_uids) > max_count:
+        return sorted_uids[:max_count]
+
+    return sorted_uids
+
+
 def send_prompt(
     prompt: str,
     validator_uid: int = 0,
@@ -364,12 +414,325 @@ def send_prompt(
         return ""
 
 
+def send_prompt_multi(
+    prompt: str,
+    validator_uids: list[int] | None = None,
+    max_validators: int | None = None,
+    min_stake: float | None = None,
+    vendor: str | None = None,
+    model_requested: str | None = None,
+    temperature: float | None = None,
+    top_p: float | None = None,
+    frequency_penalty: float | None = None,
+    presence_penalty: float | None = None,
+    min_chars: int | None = None,
+    max_chars: int | None = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
+    use_colors: bool | None = None,
+) -> dict[int, PromptSynapse]:
+    """
+    Send a prompt to multiple validators in parallel.
+
+    Args:
+        prompt: The prompt text to send
+        validator_uids: Specific validator UIDs to query (None = auto-discover)
+        max_validators: Max validators to query when auto-discovering
+        min_stake: Minimum validator stake requirement for auto-discovery
+        vendor: AI vendor to use (e.g., 'openai', 'anthropic')
+        model_requested: Specific model to use
+        temperature: Sampling temperature (0.0-2.0)
+        top_p: Nucleus sampling parameter (0.0-1.0)
+        frequency_penalty: Frequency penalty (-2.0 to 2.0)
+        presence_penalty: Presence penalty (-2.0 to 2.0)
+        min_chars: Minimum response length in characters
+        max_chars: Maximum response length in characters
+        timeout: Query timeout in seconds
+        max_retries: Maximum retry attempts for the query (default: from config)
+        use_colors: Use colored output for diagnostics
+
+    Returns:
+        Dict mapping validator UID to response synapse.
+        Only successful responses are included.
+    """
+    # Setup logging
+    Config.setup_logging()
+    Config.apply_network_defaults()
+
+    # Get effective configuration
+    effective_timeout = timeout if timeout is not None else Config.MINER_TIMEOUT
+    effective_retries = max_retries if max_retries is not None else Config.MINER_MAX_RETRIES
+    effective_max = max_validators if max_validators is not None else Config.MINER_MAX_VALIDATORS
+    effective_stake = min_stake if min_stake is not None else Config.MINER_MIN_VALIDATOR_STAKE
+    effective_colors = use_colors if use_colors is not None else Config.MINER_COLORED_OUTPUT
+
+    formatter = DiagnosticsFormatter(use_colors=effective_colors)
+    retry_handler = RetryHandler(
+        RetryConfig(
+            max_attempts=effective_retries,
+            initial_delay_seconds=Config.MINER_RETRY_DELAY,
+            max_delay_seconds=Config.MINER_RETRY_MAX_DELAY,
+        )
+    )
+
+    context = {
+        "netuid": Config.BT_NETUID,
+        "network": Config.BT_NETWORK,
+        "timeout": effective_timeout,
+    }
+
+    # Detect wallet if not explicitly configured
+    try:
+        Config.detect_and_set_wallet(role="miner")
+    except ConfigurationError as e:
+        error = create_error(
+            ErrorCategory.INVALID_WALLET,
+            {**context, "wallet": Config.MINER_WALLET_NAME, "hotkey": Config.MINER_HOTKEY},
+            e,
+        )
+        print(formatter.format_error(error, context))
+        return {}
+
+    bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
+
+    # Initialize wallet
+    try:
+        wallet = bt.Wallet(name=Config.MINER_WALLET_NAME, hotkey=Config.MINER_HOTKEY)
+    except Exception as e:
+        error = create_error(
+            ErrorCategory.INVALID_WALLET,
+            {**context, "wallet": Config.MINER_WALLET_NAME, "hotkey": Config.MINER_HOTKEY},
+            e,
+        )
+        print(formatter.format_error(error, context))
+        return {}
+
+    # Initialize dendrite
+    try:
+        dendrite = bt.Dendrite(wallet=wallet)
+    except Exception as e:
+        error = classify_error(e, context)
+        print(formatter.format_error(error, context))
+        return {}
+
+    # Get metagraph and discover validators
+    try:
+        subtensor_config = Config.get_subtensor_config()
+        subtensor = bt.Subtensor(**subtensor_config)
+        metagraph = subtensor.metagraph(netuid=Config.BT_NETUID)
+    except Exception as e:
+        error = classify_error(e, context)
+        print(formatter.format_error(error, context))
+        return {}
+
+    # Determine which validators to query
+    if validator_uids is not None:
+        # Use specified UIDs
+        target_uids = [uid for uid in validator_uids if 0 <= uid < len(metagraph.axons)]
+        if not target_uids:
+            bt.logging.error("No valid validator UIDs provided")
+            return {}
+    else:
+        # Auto-discover validators
+        target_uids = discover_validators(
+            metagraph=metagraph,
+            min_stake=effective_stake,
+            max_count=effective_max,
+        )
+
+    if not target_uids:
+        bt.logging.error("No eligible validators found")
+        print("No eligible validators found. Check network connectivity and stake thresholds.")
+        return {}
+
+    bt.logging.info(f"Querying {len(target_uids)} validator(s): {target_uids}")
+
+    # Get axons for target validators
+    target_axons = [metagraph.axons[uid] for uid in target_uids]
+
+    # Create synapse
+    synapse = PromptSynapse(
+        prompt=prompt,
+        vendor=vendor,
+        model_requested=model_requested,
+        temperature=temperature,
+        top_p=top_p,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+        min_chars=min_chars,
+        max_chars=max_chars,
+    )
+
+    # Define the query operation for retry
+    def do_query():
+        return dendrite.query(
+            axons=target_axons,
+            synapse=synapse,
+            timeout=effective_timeout,
+            deserialize=False,
+        )
+
+    # Query all validators in parallel with retry
+    result = retry_handler.execute_with_retry(
+        operation=do_query,
+        context=context,
+        on_retry=lambda attempt, error, delay: bt.logging.warning(
+            f"Query failed (attempt {attempt}/{effective_retries}), retrying in {delay:.1f}s: {error}"
+        ),
+    )
+
+    if not result.success:
+        error = classify_error(result.last_error, context) if result.last_error else None
+        if error:
+            print(formatter.format_error(error, context))
+        return {}
+
+    responses = result.result
+
+    # Process responses - keep only successful ones
+    results: dict[int, PromptSynapse] = {}
+
+    # Handle case where responses might not be a list
+    if not isinstance(responses, list):
+        responses = [responses]
+
+    for uid, response in zip(target_uids, responses):
+        if response is None:
+            continue
+
+        # Handle different response types
+        if isinstance(response, PromptSynapse):
+            result_synapse = response
+        elif isinstance(response, str):
+            result_synapse = PromptSynapse(prompt=prompt)
+            result_synapse.response = response
+        else:
+            continue
+
+        # Check for valid response
+        if result_synapse.response and not result_synapse.response.startswith("Error:"):
+            # Skip if rate limited or has rejection reason with error
+            if result_synapse.rejection_reason:
+                rejection = result_synapse.rejection_reason.lower()
+                if "rate limit" in rejection or "error" in rejection:
+                    bt.logging.debug(f"Validator {uid} rejected: {result_synapse.rejection_reason}")
+                    continue
+
+            results[uid] = result_synapse
+
+    bt.logging.info(f"Received {len(results)} successful response(s) from {len(target_uids)} validator(s)")
+    return results
+
+
+def display_multi_results(
+    responses: dict[int, PromptSynapse],
+    use_colors: bool = True,
+) -> None:
+    """
+    Display results from multiple validators.
+
+    Args:
+        responses: Dict mapping validator UID to response synapse
+        use_colors: Use colored output
+    """
+    # ANSI color codes
+    GREEN = "\033[92m" if use_colors else ""
+    RED = "\033[91m" if use_colors else ""
+    YELLOW = "\033[93m" if use_colors else ""
+    CYAN = "\033[96m" if use_colors else ""
+    BOLD = "\033[1m" if use_colors else ""
+    RESET = "\033[0m" if use_colors else ""
+
+    if not responses:
+        print(f"\n{YELLOW}No responses received from validators.{RESET}")
+        return
+
+    print("\n" + "=" * 60)
+    print(f"{BOLD}RESPONSES FROM {len(responses)} VALIDATOR(S){RESET}")
+    print("=" * 60)
+
+    for uid, synapse in responses.items():
+        print(f"\n{CYAN}--- Validator UID {uid} ---{RESET}")
+
+        if synapse.response:
+            # Truncate long responses for display
+            response_display = synapse.response
+            if len(response_display) > 500:
+                response_display = response_display[:500] + "... [truncated]"
+            print(f"Response: {response_display}")
+
+        print(f"Model:    {synapse.model_used or 'unknown'}")
+
+        if synapse.danger_score is not None:
+            if synapse.accepted:
+                accepted_str = f"{GREEN}YES{RESET}"
+            else:
+                accepted_str = f"{RED}NO{RESET}"
+            print(f"Danger:   {synapse.danger_score:.4f} (Accepted: {accepted_str})")
+
+        if synapse.miner_submission_count is not None:
+            print(f"Stats:    {synapse.miner_submission_count} submissions", end="")
+            if synapse.miner_hit_rate is not None:
+                print(f", {synapse.miner_hit_rate:.1%} hit rate", end="")
+            print()
+
+    print("\n" + "=" * 60)
+
+    # Summary statistics
+    if len(responses) > 1:
+        danger_scores = [s.danger_score for s in responses.values() if s.danger_score is not None]
+        if danger_scores:
+            avg_danger = sum(danger_scores) / len(danger_scores)
+            print(f"Average Danger Score: {avg_danger:.4f}")
+            print(f"Min: {min(danger_scores):.4f}, Max: {max(danger_scores):.4f}")
+        print("=" * 60 + "\n")
+
+
 def main():
     """Main entry point for the miner."""
-    parser = argparse.ArgumentParser(description="Bittensor Miner - Submit prompts to validators")
+    parser = argparse.ArgumentParser(
+        description="Bittensor Miner - Submit prompts to validators",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Multi-validator mode (default): query all eligible validators
+  python miner.py --prompt "test prompt"
+
+  # Limit to 5 validators
+  python miner.py --prompt "test prompt" --max-validators 5
+
+  # Single validator mode (backwards compatible)
+  python miner.py --prompt "test prompt" --validator-uid 3
+
+  # Force single validator mode with default UID 1
+  python miner.py --prompt "test prompt" --single
+""",
+    )
     parser.add_argument("--prompt", type=str, required=True, help="The prompt to send to the validator")
+
+    # Validator selection arguments
     parser.add_argument(
-        "--validator-uid", type=int, default=1, help="The UID of the validator to query (default: 1)"
+        "--validator-uid",
+        type=int,
+        default=None,
+        help="Query single validator by UID (disables multi-validator mode)",
+    )
+    parser.add_argument(
+        "--single",
+        action="store_true",
+        help="Force single-validator mode (uses UID 1 if --validator-uid not set)",
+    )
+    parser.add_argument(
+        "--max-validators",
+        type=int,
+        default=None,
+        help=f"Max validators to query in multi-validator mode (default: {Config.MINER_MAX_VALIDATORS})",
+    )
+    parser.add_argument(
+        "--min-stake",
+        type=float,
+        default=None,
+        help=f"Minimum validator stake requirement (default: {Config.MINER_MIN_VALIDATOR_STAKE})",
     )
     parser.add_argument("--netuid", type=int, default=None, help=f"Override the netuid (default: {Config.BT_NETUID})")
 
@@ -399,7 +762,7 @@ def main():
     parser.add_argument(
         "--no-preflight",
         action="store_true",
-        help="Skip pre-flight health check",
+        help="Skip pre-flight health check (only applies to single-validator mode)",
     )
     parser.add_argument(
         "--no-color",
@@ -413,23 +776,54 @@ def main():
     if args.netuid is not None:
         Config.BT_NETUID = args.netuid
 
-    # Send the prompt with model specifications
-    send_prompt(
-        prompt=args.prompt,
-        validator_uid=args.validator_uid,
-        vendor=args.vendor,
-        model_requested=args.model,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        frequency_penalty=args.frequency_penalty,
-        presence_penalty=args.presence_penalty,
-        min_chars=args.min_chars,
-        max_chars=args.max_chars,
-        timeout=args.timeout,
-        max_retries=args.retries,
-        skip_preflight=args.no_preflight,
-        use_colors=not args.no_color,
+    use_colors = not args.no_color
+
+    # Determine mode: single validator or multi-validator
+    # Use single mode if: --validator-uid specified, --single flag, or MINER_MULTI_VALIDATOR=false
+    use_single_mode = (
+        args.validator_uid is not None
+        or args.single
+        or not Config.MINER_MULTI_VALIDATOR
     )
+
+    if use_single_mode:
+        # Single validator mode (backwards compatible)
+        uid = args.validator_uid if args.validator_uid is not None else 1
+        send_prompt(
+            prompt=args.prompt,
+            validator_uid=uid,
+            vendor=args.vendor,
+            model_requested=args.model,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            frequency_penalty=args.frequency_penalty,
+            presence_penalty=args.presence_penalty,
+            min_chars=args.min_chars,
+            max_chars=args.max_chars,
+            timeout=args.timeout,
+            max_retries=args.retries,
+            skip_preflight=args.no_preflight,
+            use_colors=use_colors,
+        )
+    else:
+        # Multi-validator mode (default when MINER_MULTI_VALIDATOR=true)
+        responses = send_prompt_multi(
+            prompt=args.prompt,
+            max_validators=args.max_validators,
+            min_stake=args.min_stake,
+            vendor=args.vendor,
+            model_requested=args.model,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            frequency_penalty=args.frequency_penalty,
+            presence_penalty=args.presence_penalty,
+            min_chars=args.min_chars,
+            max_chars=args.max_chars,
+            max_retries=args.retries,
+            timeout=args.timeout,
+            use_colors=use_colors,
+        )
+        display_multi_results(responses, use_colors=use_colors)
 
 
 if __name__ == "__main__":
