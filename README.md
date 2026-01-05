@@ -62,15 +62,20 @@ btcli subnet register --netuid 37 --wallet.name miner --subtensor.network finney
 ### Running
 
 ```bash
-# Basic usage
+# Multi-validator mode (default) - queries top validators by stake
+python miner.py --prompt "Your prompt here"
+
+# Limit number of validators
+python miner.py --prompt "Your prompt here" --max-validators 5
+
+# Query a single specific validator
 python miner.py --prompt "Your prompt here" --validator-uid 1
 
-# With options
+# With model options
 python miner.py \
   --prompt "Explain quantum computing" \
   --model deepseek-ai/DeepSeek-V3 \
-  --temperature 0.7 \
-  --validator-uid 1
+  --temperature 0.7
 ```
 
 ### Miner Options
@@ -78,9 +83,48 @@ python miner.py \
 | Argument | Description | Default |
 |----------|-------------|---------|
 | `--prompt` | Text prompt to send (required) | - |
-| `--validator-uid` | Validator UID to query | 1 |
+| `--validator-uid` | Query specific validator UID (single mode) | - |
+| `--max-validators` | Max validators to query in multi mode | 10 |
+| `--min-stake` | Minimum stake for validator selection | 1000.0 |
+| `--no-preflight` | Skip pre-flight health checks | false |
 | `--model` | Model (deepseek-ai/DeepSeek-V3, gpt-4o, etc.) | deepseek-ai/DeepSeek-V3 |
 | `--temperature` | Sampling temperature (0.0-2.0) | 0.7 |
+
+### Multi-Validator Mode
+
+By default, the miner queries multiple validators in parallel for faster results and redundancy.
+
+**How it works:**
+1. **Validator Discovery**: Finds validators on the subnet, sorted by stake
+2. **Pre-flight Health Checks**: Tests TCP connectivity before querying (can skip with `--no-preflight`)
+3. **Parallel Queries**: Sends prompts to all healthy validators simultaneously
+4. **Per-validator Results**: Shows success/failure status for each validator
+
+**Example output:**
+```
+Querying 5 validators: [29, 23, 45, 89, 101]...
+
+Pre-flight health check:
+  ✓ UID 29 reachable
+  ✓ UID 23 reachable
+  ✗ UID 45 unreachable
+  ✓ UID 89 reachable
+  ✓ UID 101 reachable
+Health check: 4/5 validators reachable
+
+Querying 4 validators...
+[████████████████████] 4/4 complete
+
+Results: 3/4 validators responded successfully
+
+Failed validators:
+  UID 89: No response (timeout)
+
+Successful responses:
+  UID 29: danger_score=0.45, model=deepseek-ai/DeepSeek-V3
+  UID 23: danger_score=0.52, model=deepseek-ai/DeepSeek-V3
+  UID 101: danger_score=0.48, model=deepseek-ai/DeepSeek-V3
+```
 
 ### How Miners Are Scored
 
