@@ -2,6 +2,8 @@
 
 import argparse
 import sys
+import time
+from dataclasses import dataclass
 
 import bittensor as bt
 
@@ -15,6 +17,85 @@ from aurelius.miner.health import ValidatorHealthChecker
 from aurelius.miner.retry import RetryConfig, RetryHandler
 from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.protocol import PromptSynapse
+
+
+@dataclass
+class ValidatorQueryResult:
+    """Result from a single validator query."""
+
+    uid: int
+    success: bool
+    synapse: PromptSynapse | None = None
+    error_message: str | None = None
+    latency_ms: float = 0.0
+
+
+class QueryProgress:
+    """Displays progress during multi-validator queries."""
+
+    def __init__(self, validator_uids: list[int], use_colors: bool = True):
+        """
+        Initialize progress tracker.
+
+        Args:
+            validator_uids: List of validator UIDs being queried
+            use_colors: Whether to use ANSI color codes
+        """
+        self.validator_uids = validator_uids
+        self.total = len(validator_uids)
+        self.use_colors = use_colors
+        self.results: dict[int, ValidatorQueryResult] = {}
+        self.start_time = time.time()
+
+        # ANSI color codes
+        self.GREEN = "\033[92m" if use_colors else ""
+        self.RED = "\033[91m" if use_colors else ""
+        self.YELLOW = "\033[93m" if use_colors else ""
+        self.CYAN = "\033[96m" if use_colors else ""
+        self.BOLD = "\033[1m" if use_colors else ""
+        self.RESET = "\033[0m" if use_colors else ""
+
+    def show_start(self) -> None:
+        """Display initial query message."""
+        print(f"\n{self.CYAN}Querying {self.total} validator(s): {self.validator_uids}{self.RESET}")
+
+    def record_result(self, result: ValidatorQueryResult) -> None:
+        """Record a validator result."""
+        self.results[result.uid] = result
+
+    def show_health_check_progress(self, uid: int, healthy: bool, latency_ms: float | None = None) -> None:
+        """Display health check result for a validator."""
+        if healthy:
+            latency_str = f" ({latency_ms:.0f}ms)" if latency_ms else ""
+            print(f"  {self.GREEN}✓{self.RESET} UID {uid} reachable{latency_str}")
+        else:
+            print(f"  {self.RED}✗{self.RESET} UID {uid} unreachable")
+
+    def show_query_complete(self) -> None:
+        """Display summary after all queries complete."""
+        elapsed = time.time() - self.start_time
+        successful = sum(1 for r in self.results.values() if r.success)
+        failed = len(self.results) - successful
+
+        # Progress bar
+        bar_width = 20
+        filled = int(bar_width * successful / max(self.total, 1))
+        bar = "█" * filled + "░" * (bar_width - filled)
+
+        print(f"\n{self.BOLD}Query complete{self.RESET} [{bar}] {successful}/{self.total} ({elapsed:.1f}s)")
+
+        # Show per-validator status
+        for uid in self.validator_uids:
+            if uid in self.results:
+                result = self.results[uid]
+                if result.success:
+                    latency_str = f" ({result.latency_ms:.0f}ms)" if result.latency_ms > 0 else ""
+                    print(f"  {self.GREEN}✓{self.RESET} UID {uid} responded{latency_str}")
+                else:
+                    error_str = f": {result.error_message}" if result.error_message else ""
+                    print(f"  {self.RED}✗{self.RESET} UID {uid} failed{error_str}")
+            else:
+                print(f"  {self.YELLOW}?{self.RESET} UID {uid} not queried")
 
 
 def discover_validators(
@@ -429,8 +510,9 @@ def send_prompt_multi(
     max_chars: int | None = None,
     timeout: int | None = None,
     max_retries: int | None = None,
+    skip_preflight: bool = False,
     use_colors: bool | None = None,
-) -> dict[int, PromptSynapse]:
+) -> dict[int, ValidatorQueryResult]:
     """
     Send a prompt to multiple validators in parallel.
 
@@ -449,11 +531,12 @@ def send_prompt_multi(
         max_chars: Maximum response length in characters
         timeout: Query timeout in seconds
         max_retries: Maximum retry attempts for the query (default: from config)
+        skip_preflight: Skip pre-flight health checks
         use_colors: Use colored output for diagnostics
 
     Returns:
-        Dict mapping validator UID to response synapse.
-        Only successful responses are included.
+        Dict mapping validator UID to ValidatorQueryResult.
+        Includes both successful and failed results with error details.
     """
     # Setup logging
     Config.setup_logging()
@@ -545,6 +628,44 @@ def send_prompt_multi(
         print("No eligible validators found. Check network connectivity and stake thresholds.")
         return {}
 
+    # Initialize progress tracker
+    progress = QueryProgress(target_uids, use_colors=effective_colors)
+    progress.show_start()
+
+    # Pre-flight health checks (optional)
+    do_preflight = not skip_preflight and Config.MINER_PREFLIGHT_CHECK
+    if do_preflight:
+        print("Running pre-flight health checks...")
+        health_checker = ValidatorHealthChecker(timeout=Config.MINER_PREFLIGHT_TIMEOUT)
+        healthy_uids = []
+        unhealthy_results: dict[int, ValidatorQueryResult] = {}
+
+        for uid in target_uids:
+            axon = metagraph.axons[uid]
+            health_result = health_checker.check_validator_reachable(axon.ip, axon.port)
+            progress.show_health_check_progress(uid, health_result.is_healthy, health_result.latency_ms)
+
+            if health_result.is_healthy:
+                healthy_uids.append(uid)
+            else:
+                # Record failed health check as a result
+                error_msg = str(health_result.error.message) if health_result.error else "Health check failed"
+                unhealthy_results[uid] = ValidatorQueryResult(
+                    uid=uid,
+                    success=False,
+                    error_message=f"Unreachable: {error_msg}",
+                )
+
+        if not healthy_uids:
+            print("No validators passed health check. Aborting query.")
+            return unhealthy_results
+
+        # Update target_uids to only include healthy validators
+        target_uids = healthy_uids
+        print(f"{len(healthy_uids)} validator(s) passed health check")
+    else:
+        unhealthy_results = {}
+
     bt.logging.info(f"Querying {len(target_uids)} validator(s): {target_uids}")
 
     # Get axons for target validators
@@ -573,6 +694,8 @@ def send_prompt_multi(
         )
 
     # Query all validators in parallel with retry
+    print("Sending queries...")
+    query_start_time = time.time()
     result = retry_handler.execute_with_retry(
         operation=do_query,
         context=context,
@@ -581,16 +704,20 @@ def send_prompt_multi(
         ),
     )
 
+    query_end_time = time.time()
+    query_duration_ms = (query_end_time - query_start_time) * 1000
+
     if not result.success:
         error = classify_error(result.last_error, context) if result.last_error else None
         if error:
             print(formatter.format_error(error, context))
-        return {}
+        # Return unhealthy results from health check even if query failed
+        return unhealthy_results
 
     responses = result.result
 
-    # Process responses - keep only successful ones
-    results: dict[int, PromptSynapse] = {}
+    # Process responses - track both successful and failed
+    results: dict[int, ValidatorQueryResult] = {}
 
     # Handle case where responses might not be a list
     if not isinstance(responses, list):
@@ -598,6 +725,13 @@ def send_prompt_multi(
 
     for uid, response in zip(target_uids, responses):
         if response is None:
+            query_result = ValidatorQueryResult(
+                uid=uid,
+                success=False,
+                error_message="No response (timeout or error)",
+            )
+            results[uid] = query_result
+            progress.record_result(query_result)
             continue
 
         # Handle different response types
@@ -607,32 +741,74 @@ def send_prompt_multi(
             result_synapse = PromptSynapse(prompt=prompt)
             result_synapse.response = response
         else:
+            query_result = ValidatorQueryResult(
+                uid=uid,
+                success=False,
+                error_message=f"Unexpected response type: {type(response).__name__}",
+            )
+            results[uid] = query_result
+            progress.record_result(query_result)
             continue
 
         # Check for valid response
         if result_synapse.response and not result_synapse.response.startswith("Error:"):
-            # Skip if rate limited or has rejection reason with error
+            # Check for rejection reasons
             if result_synapse.rejection_reason:
                 rejection = result_synapse.rejection_reason.lower()
                 if "rate limit" in rejection or "error" in rejection:
                     bt.logging.debug(f"Validator {uid} rejected: {result_synapse.rejection_reason}")
+                    query_result = ValidatorQueryResult(
+                        uid=uid,
+                        success=False,
+                        synapse=result_synapse,
+                        error_message=result_synapse.rejection_reason,
+                    )
+                    results[uid] = query_result
+                    progress.record_result(query_result)
                     continue
 
-            results[uid] = result_synapse
+            # Success
+            query_result = ValidatorQueryResult(
+                uid=uid,
+                success=True,
+                synapse=result_synapse,
+                latency_ms=query_duration_ms / len(target_uids),  # Approximate per-validator
+            )
+            results[uid] = query_result
+            progress.record_result(query_result)
+        else:
+            error_msg = "No response content"
+            if result_synapse.response and result_synapse.response.startswith("Error:"):
+                error_msg = result_synapse.response
+            query_result = ValidatorQueryResult(
+                uid=uid,
+                success=False,
+                synapse=result_synapse,
+                error_message=error_msg,
+            )
+            results[uid] = query_result
+            progress.record_result(query_result)
 
-    bt.logging.info(f"Received {len(results)} successful response(s) from {len(target_uids)} validator(s)")
-    return results
+    # Merge with unhealthy results from health check
+    all_results = {**unhealthy_results, **results}
+
+    # Show progress summary
+    progress.show_query_complete()
+
+    successful_count = sum(1 for r in all_results.values() if r.success)
+    bt.logging.info(f"Received {successful_count} successful response(s) from {len(all_results)} validator(s)")
+    return all_results
 
 
 def display_multi_results(
-    responses: dict[int, PromptSynapse],
+    results: dict[int, ValidatorQueryResult],
     use_colors: bool = True,
 ) -> None:
     """
     Display results from multiple validators.
 
     Args:
-        responses: Dict mapping validator UID to response synapse
+        results: Dict mapping validator UID to ValidatorQueryResult
         use_colors: Use colored output
     """
     # ANSI color codes
@@ -643,44 +819,66 @@ def display_multi_results(
     BOLD = "\033[1m" if use_colors else ""
     RESET = "\033[0m" if use_colors else ""
 
-    if not responses:
-        print(f"\n{YELLOW}No responses received from validators.{RESET}")
+    if not results:
+        print(f"\n{YELLOW}No results from validators.{RESET}")
         return
 
+    # Separate successful and failed results
+    successful = {uid: r for uid, r in results.items() if r.success}
+    failed = {uid: r for uid, r in results.items() if not r.success}
+
+    # Summary header
     print("\n" + "=" * 60)
-    print(f"{BOLD}RESPONSES FROM {len(responses)} VALIDATOR(S){RESET}")
+    print(f"{BOLD}RESULTS: {len(successful)}/{len(results)} VALIDATOR(S) RESPONDED{RESET}")
     print("=" * 60)
 
-    for uid, synapse in responses.items():
-        print(f"\n{CYAN}--- Validator UID {uid} ---{RESET}")
+    # Show failed validators first (brief)
+    if failed:
+        print(f"\n{RED}Failed validators:{RESET}")
+        for uid, result in failed.items():
+            print(f"  UID {uid}: {result.error_message or 'Unknown error'}")
 
-        if synapse.response:
-            # Truncate long responses for display
-            response_display = synapse.response
-            if len(response_display) > 500:
-                response_display = response_display[:500] + "... [truncated]"
-            print(f"Response: {response_display}")
+    # Show successful responses
+    if successful:
+        print(f"\n{GREEN}Successful responses:{RESET}")
+        for uid, result in successful.items():
+            synapse = result.synapse
+            if not synapse:
+                continue
 
-        print(f"Model:    {synapse.model_used or 'unknown'}")
+            print(f"\n{CYAN}--- Validator UID {uid} ---{RESET}")
 
-        if synapse.danger_score is not None:
-            if synapse.accepted:
-                accepted_str = f"{GREEN}YES{RESET}"
-            else:
-                accepted_str = f"{RED}NO{RESET}"
-            print(f"Danger:   {synapse.danger_score:.4f} (Accepted: {accepted_str})")
+            if synapse.response:
+                # Truncate long responses for display
+                response_display = synapse.response
+                if len(response_display) > 500:
+                    response_display = response_display[:500] + "... [truncated]"
+                print(f"Response: {response_display}")
 
-        if synapse.miner_submission_count is not None:
-            print(f"Stats:    {synapse.miner_submission_count} submissions", end="")
-            if synapse.miner_hit_rate is not None:
-                print(f", {synapse.miner_hit_rate:.1%} hit rate", end="")
-            print()
+            print(f"Model:    {synapse.model_used or 'unknown'}")
+
+            if synapse.danger_score is not None:
+                if synapse.accepted:
+                    accepted_str = f"{GREEN}YES{RESET}"
+                else:
+                    accepted_str = f"{RED}NO{RESET}"
+                print(f"Danger:   {synapse.danger_score:.4f} (Accepted: {accepted_str})")
+
+            if synapse.miner_submission_count is not None:
+                print(f"Stats:    {synapse.miner_submission_count} submissions", end="")
+                if synapse.miner_hit_rate is not None:
+                    print(f", {synapse.miner_hit_rate:.1%} hit rate", end="")
+                print()
 
     print("\n" + "=" * 60)
 
-    # Summary statistics
-    if len(responses) > 1:
-        danger_scores = [s.danger_score for s in responses.values() if s.danger_score is not None]
+    # Summary statistics (only from successful responses)
+    if len(successful) > 1:
+        danger_scores = [
+            r.synapse.danger_score
+            for r in successful.values()
+            if r.synapse and r.synapse.danger_score is not None
+        ]
         if danger_scores:
             avg_danger = sum(danger_scores) / len(danger_scores)
             print(f"Average Danger Score: {avg_danger:.4f}")
@@ -762,7 +960,7 @@ Examples:
     parser.add_argument(
         "--no-preflight",
         action="store_true",
-        help="Skip pre-flight health check (only applies to single-validator mode)",
+        help="Skip pre-flight health checks",
     )
     parser.add_argument(
         "--no-color",
@@ -807,7 +1005,7 @@ Examples:
         )
     else:
         # Multi-validator mode (default when MINER_MULTI_VALIDATOR=true)
-        responses = send_prompt_multi(
+        results = send_prompt_multi(
             prompt=args.prompt,
             max_validators=args.max_validators,
             min_stake=args.min_stake,
@@ -821,9 +1019,10 @@ Examples:
             max_chars=args.max_chars,
             max_retries=args.retries,
             timeout=args.timeout,
+            skip_preflight=args.no_preflight,
             use_colors=use_colors,
         )
-        display_multi_results(responses, use_colors=use_colors)
+        display_multi_results(results, use_colors=use_colors)
 
 
 if __name__ == "__main__":

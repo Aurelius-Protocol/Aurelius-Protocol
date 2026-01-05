@@ -9,6 +9,7 @@ from aurelius.miner.errors import (
     create_error,
 )
 from aurelius.miner.health import HealthCheckResult, ValidatorHealthChecker
+from aurelius.miner.miner import QueryProgress, ValidatorQueryResult
 from aurelius.miner.retry import RetryConfig, RetryHandler, RetryResult
 
 
@@ -50,6 +51,9 @@ __all__ = [
     "discover_validators",
     "display_multi_results",
     "main",
+    # Result types
+    "ValidatorQueryResult",
+    "QueryProgress",
     # Error handling
     "ErrorCategory",
     "ErrorSeverity",
