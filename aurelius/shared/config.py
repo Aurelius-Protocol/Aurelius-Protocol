@@ -253,6 +253,8 @@ class Config:
     ADVANCED_MODE: bool = os.getenv("ADVANCED_MODE", "false").lower() == "true"
 
     # Network Configuration
+    # BT_AXON_EXTERNAL_IP: Bittensor standard env var for axon external IP (highest priority)
+    BT_AXON_EXTERNAL_IP: str | None = os.getenv("BT_AXON_EXTERNAL_IP")
     AUTO_DETECT_EXTERNAL_IP: bool = os.getenv("AUTO_DETECT_EXTERNAL_IP", "false").lower() == "true"
     VALIDATOR_HOST: str = os.getenv("VALIDATOR_HOST", "127.0.0.1")
 
@@ -520,20 +522,29 @@ class Config:
     @classmethod
     def get_validator_host(cls) -> str:
         """
-        Get validator host IP, using auto-detection if enabled.
+        Get validator host IP for axon external_ip parameter.
+
+        Priority order:
+        1. BT_AXON_EXTERNAL_IP (Bittensor standard env var)
+        2. AUTO_DETECT_EXTERNAL_IP=true (auto-detect via API)
+        3. VALIDATOR_HOST (manual fallback)
 
         Returns:
             str: Validator host IP address
         """
+        # Check Bittensor standard env var first
+        if cls.BT_AXON_EXTERNAL_IP:
+            return cls.BT_AXON_EXTERNAL_IP
+
+        # Then auto-detect if enabled
         if cls.AUTO_DETECT_EXTERNAL_IP:
             detected_ip = cls.detect_external_ip()
             if detected_ip:
                 return detected_ip
-            else:
-                # Fallback to configured VALIDATOR_HOST if detection fails
-                return cls.VALIDATOR_HOST
-        else:
-            return cls.VALIDATOR_HOST
+            # Fallback to configured VALIDATOR_HOST if detection fails
+
+        # Fallback to manual config
+        return cls.VALIDATOR_HOST
 
     @classmethod
     def validate_production(cls) -> list[str]:
@@ -590,13 +601,18 @@ class Config:
             )
 
         # Network configuration warnings
-        if cls.AUTO_DETECT_EXTERNAL_IP and cls.VALIDATOR_HOST == "127.0.0.1":
-            # This is actually okay - auto-detect will override
+        # No warning needed if BT_AXON_EXTERNAL_IP is set (Bittensor standard) or AUTO_DETECT is enabled
+        if cls.BT_AXON_EXTERNAL_IP:
+            # User explicitly set Bittensor standard env var - good
             pass
-        elif not cls.AUTO_DETECT_EXTERNAL_IP and cls.VALIDATOR_HOST in ["127.0.0.1", "localhost"]:
+        elif cls.AUTO_DETECT_EXTERNAL_IP:
+            # Auto-detect enabled - will determine IP at runtime
+            pass
+        elif cls.VALIDATOR_HOST in ["127.0.0.1", "localhost"]:
             warnings.append(
-                "WARNING: VALIDATOR_HOST is localhost but AUTO_DETECT_EXTERNAL_IP=false - "
-                "validators may not be reachable for consensus"
+                "WARNING: VALIDATOR_HOST is localhost, AUTO_DETECT_EXTERNAL_IP=false, and "
+                "BT_AXON_EXTERNAL_IP not set - validators may not be reachable for consensus. "
+                "Set BT_AXON_EXTERNAL_IP or enable AUTO_DETECT_EXTERNAL_IP=true"
             )
 
         # Validation mode warnings
