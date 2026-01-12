@@ -25,17 +25,246 @@ cp .env.example .env
 python validator.py
 ```
 
-That's it. Wallet detection, network defaults, and telemetry are automatic.
+Wallet is auto-detected if you have exactly one wallet with one hotkey. If you have multiple wallets, add to `.env`:
+
+```bash
+VALIDATOR_WALLET_NAME=your-wallet-name
+VALIDATOR_HOTKEY=your-hotkey-name
+```
 
 ---
 
 ## Table of Contents
 
-1. [Mining](#mining)
-2. [Validation](#validation)
+1. [Validator Guide](#validator-guide)
+2. [Mining](#mining)
 3. [Configuration](#configuration)
-4. [Deployment](#deployment)
-5. [Troubleshooting](#troubleshooting)
+4. [Troubleshooting](#troubleshooting)
+5. [Security](#security)
+
+---
+
+## Validator Guide
+
+### Prerequisites
+
+#### System Requirements
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| Python | 3.10+ | 3.12 |
+| CPU | 2 cores | 4 cores |
+| RAM | 4 GB | 8 GB |
+| Storage | 20 GB | 50 GB |
+| Network | 100 Mbps | 1 Gbps |
+
+#### Required Environment Variables
+
+Only 3 variables are required. Everything else is auto-configured.
+
+```bash
+CHUTES_API_KEY=your-key      # Get from https://chutes.ai
+OPENAI_API_KEY=sk-your-key   # Get from https://platform.openai.com/api-keys (must start with sk-)
+BT_NETWORK=finney            # or 'test' for testnet
+```
+
+#### Bittensor Wallet
+
+You need a registered validator with stake on the subnet.
+
+```bash
+# Create wallet (if needed)
+btcli wallet new_coldkey --wallet.name validator
+btcli wallet new_hotkey --wallet.name validator --wallet.hotkey default
+
+# Register on subnet (mainnet)
+btcli subnet register --netuid 37 --wallet.name validator --subtensor.network finney
+
+# Or register on testnet
+btcli subnet register --netuid 290 --wallet.name validator --subtensor.network test
+```
+
+**Stake requirements:**
+- Mainnet (subnet 37): 1000 TAO minimum
+- Testnet (subnet 290): 100 TAO minimum
+
+**Wallet location:** `~/.bittensor/wallets/`
+
+**Wallet configuration in .env:**
+
+The validator auto-detects your wallet if you have exactly one wallet with one hotkey. If auto-detection fails (multiple wallets, non-standard names, or custom paths), configure manually:
+
+```bash
+# Add to .env if wallet is not auto-detected
+VALIDATOR_WALLET_NAME=validator    # Name of your wallet directory
+VALIDATOR_HOTKEY=default           # Name of your hotkey
+```
+
+To check your wallet names:
+```bash
+ls ~/.bittensor/wallets/                        # List wallet names
+ls ~/.bittensor/wallets/your-wallet/hotkeys/    # List hotkey names
+```
+
+---
+
+### Network & Firewall
+
+#### Inbound Ports (REQUIRED)
+
+Your validator must be reachable by miners on port 8091.
+
+| Port | Protocol | Source | Purpose |
+|------|----------|--------|---------|
+| 8091 | TCP | 0.0.0.0/0 (Internet) | Bittensor Axon - miners send prompts here |
+
+#### Outbound Connections (REQUIRED)
+
+Your validator must reach these external services over HTTPS (port 443).
+
+| Destination | Purpose |
+|-------------|---------|
+| api.openai.com | OpenAI Moderation API |
+| llm.chutes.ai | Chutes LLM API |
+| collector.aureliusaligned.ai | Aurelius Central API (mainnet) |
+| *.opentensor.ai | Bittensor subtensor RPC |
+| api.ipify.org, ifconfig.me | External IP detection |
+
+#### Firewall Setup (Linux)
+
+```bash
+# UFW (Ubuntu/Debian)
+sudo ufw allow 8091/tcp comment "Aurelius Validator"
+sudo ufw enable
+
+# iptables
+sudo iptables -A INPUT -p tcp --dport 8091 -j ACCEPT
+```
+
+---
+
+### Running the Validator
+
+#### Native
+
+```bash
+python validator.py
+```
+
+#### Docker Compose (Recommended)
+
+```bash
+# Start
+docker compose up -d
+
+# View logs
+docker compose logs -f
+
+# Restart
+docker compose restart
+
+# Update
+docker compose pull && docker compose up -d
+
+# Stop
+docker compose down
+```
+
+**Docker requirements:** Docker 20.10+ and Docker Compose v2.0+
+
+#### Docker (Manual)
+
+```bash
+docker run -d \
+  --name aurelius-validator \
+  --restart unless-stopped \
+  -p 8091:8091 \
+  --env-file .env \
+  -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro \
+  -v aurelius-data:/var/lib/aurelius \
+  ghcr.io/aurelius-protocol/aurelius-validator:latest
+```
+
+#### Systemd Service
+
+```bash
+# Create service file
+sudo tee /etc/systemd/system/aurelius-validator.service << EOF
+[Unit]
+Description=Aurelius Validator
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+WorkingDirectory=$(pwd)
+EnvironmentFile=$(pwd)/.env
+ExecStart=$(which python) validator.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable aurelius-validator
+sudo systemctl start aurelius-validator
+
+# View logs
+journalctl -u aurelius-validator -f
+```
+
+---
+
+### What Validators Do
+
+1. **Receive prompts** from miners via Bittensor axon (port 8091)
+2. **Generate responses** using configured LLM (Chutes/DeepSeek by default)
+3. **Moderate content** using OpenAI moderation API
+4. **Check novelty** against previous submissions
+5. **Score miners** based on danger, novelty, and hit rate
+6. **Set weights** on-chain for miner rewards
+
+---
+
+### Monitoring & Logs
+
+```bash
+# Docker
+docker compose logs -f
+docker compose logs --tail=100
+
+# Systemd
+journalctl -u aurelius-validator -f
+journalctl -u aurelius-validator --since "1 hour ago"
+```
+
+**Startup validation:** The validator checks on startup that:
+- OpenAI API key is valid (starts with `sk-`)
+- Chutes API key is present
+- Wallet is detected/configured
+- Port 8091 is available
+
+---
+
+### Data Persistence
+
+The validator stores data in these locations:
+
+| Path | Purpose |
+|------|---------|
+| `/var/lib/aurelius/datasets/` | Dataset logs (JSONL) |
+| `./miner_scores.json` | Miner scoring data |
+| `./validator_trust.json` | Validator trust tracking |
+
+**Docker volumes:**
+```yaml
+volumes:
+  - aurelius-data:/var/lib/aurelius
+  - ~/.bittensor/wallets:/root/.bittensor/wallets:ro
+```
 
 ---
 
@@ -139,184 +368,19 @@ Top 3 miners per window receive rewards, split by contribution.
 
 ---
 
-## Validation
-
-### Prerequisites
-- Python 3.10+
-- OpenAI API key (required for moderation)
-- Chutes API key (for chat completions)
-- Registered validator with stake
-
-### Minimal Setup (Turnkey)
-
-```bash
-# 1. Copy minimal config
-cp .env.example .env
-
-# 2. Edit .env with only these values:
-CHUTES_API_KEY=your-chutes-key
-OPENAI_API_KEY=sk-your-openai-key
-BT_NETWORK=finney  # or 'test' for testnet
-```
-
-Everything else is auto-detected:
-- Wallet (if you have exactly one)
-- Network defaults (thresholds, stake requirements)
-- External IP (with `AUTO_DETECT_EXTERNAL_IP=true`)
-- Telemetry (enabled by default)
-
-### Running
-
-**Native:**
-```bash
-python validator.py
-```
-
-**Docker Compose (recommended):**
-```bash
-docker compose up -d
-docker compose logs -f  # View logs
-```
-
-**Docker (manual):**
-```bash
-docker run -d \
-  --name aurelius-validator \
-  --restart unless-stopped \
-  -p 8091:8091 \
-  --env-file .env \
-  -v ~/.bittensor/wallets:/root/.bittensor/wallets:ro \
-  ghcr.io/aurelius-protocol/aurelius-validator:latest
-```
-
-### What Validators Do
-
-1. **Receive prompts** from miners via Bittensor axon
-2. **Generate responses** using configured LLM (Chutes/DeepSeek by default)
-3. **Moderate content** using OpenAI moderation API
-4. **Check novelty** against previous submissions
-5. **Score miners** based on danger, novelty, and hit rate
-6. **Set weights** on-chain for miner rewards
-
----
-
 ## Configuration
 
-### Required Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `CHUTES_API_KEY` | Chutes.ai API key for chat completions |
-| `OPENAI_API_KEY` | OpenAI API key for moderation (must start with `sk-`) |
-| `BT_NETWORK` | Network: `finney` (mainnet) or `test` (testnet) |
-
-### Optional Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VALIDATOR_WALLET_NAME` | Auto-detect | Wallet name |
-| `VALIDATOR_HOTKEY` | Auto-detect | Hotkey name |
-| `AUTO_DETECT_EXTERNAL_IP` | `true` | Auto-detect external IP for axon |
-| `VALIDATOR_PORT` | `8091` | Axon port |
-| `TELEMETRY_ENABLED` | `true` | Send telemetry to Aurelius collector |
-| `ADVANCED_MODE` | `false` | Use custom thresholds instead of network defaults |
-
-### Network Defaults
-
-These are applied automatically based on `BT_NETWORK`. Do not override unless using `ADVANCED_MODE=true`.
-
-| Setting | Testnet (290) | Mainnet (37) |
-|---------|---------------|--------------|
-| `DANGER_THRESHOLD` | 0.2 | 0.3 |
-| `SINGLE_CATEGORY_THRESHOLD` | 0.8 | 0.7 |
-| `MIN_HIT_RATE_THRESHOLD` | 0.3 | 0.3 |
-| `MIN_NOVELTY_THRESHOLD` | 0.3 | 0.02 |
-| `MIN_VALIDATOR_STAKE` | 100 TAO | 1000 TAO |
-
-### Advanced Mode
-
-By default (`ADVANCED_MODE=false`), network-specific defaults override any values in your `.env`. This ensures all validators use consistent parameters.
-
-To use custom thresholds:
-```bash
-ADVANCED_MODE=true
-DANGER_THRESHOLD=0.4  # Now this will be used
-```
-
----
-
-## Deployment
-
-### Server Requirements
-
-| Resource | Minimum | Recommended |
-|----------|---------|-------------|
-| CPU | 2 cores | 4 cores |
-| RAM | 4 GB | 8 GB |
-| Storage | 20 GB | 50 GB |
-| Network | 100 Mbps | 1 Gbps |
-
-### Firewall
+Only 3 environment variables are required:
 
 ```bash
-# Required ports
-sudo ufw allow 22/tcp    # SSH
-sudo ufw allow 8091/tcp  # Bittensor axon
-sudo ufw enable
+CHUTES_API_KEY=your-key      # Chutes.ai API key
+OPENAI_API_KEY=sk-your-key   # OpenAI API key (must start with sk-)
+BT_NETWORK=finney            # Network: finney (mainnet) or test (testnet)
 ```
 
-### Docker Compose (Recommended)
+Everything else is auto-configured based on the network.
 
-```bash
-# Start
-docker compose up -d
-
-# View logs
-docker compose logs -f
-
-# Restart
-docker compose restart
-
-# Update
-docker compose pull && docker compose up -d
-
-# Stop
-docker compose down
-```
-
-### Native with Systemd
-
-```bash
-# Install
-pip install -e .
-
-# Create service file
-sudo tee /etc/systemd/system/aurelius-validator.service << EOF
-[Unit]
-Description=Aurelius Validator
-After=network.target
-
-[Service]
-Type=simple
-User=$USER
-WorkingDirectory=$(pwd)
-EnvironmentFile=$(pwd)/.env
-ExecStart=$(which python) validator.py
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable aurelius-validator
-sudo systemctl start aurelius-validator
-
-# View logs
-journalctl -u aurelius-validator -f
-```
+For advanced configuration options, see `aurelius/shared/config.py`.
 
 ---
 
@@ -329,7 +393,7 @@ journalctl -u aurelius-validator -f
 | "No wallet found" | Set `VALIDATOR_WALLET_NAME` and `VALIDATOR_HOTKEY` in .env |
 | "Invalid API key" | Check OPENAI_API_KEY starts with `sk-` |
 | Weight setting fails | Ensure validator is registered and has sufficient stake |
-| Miners can't connect | Check firewall allows port 8091, set `AUTO_DETECT_EXTERNAL_IP=true` |
+| Miners can't connect | Check firewall allows port 8091 inbound |
 | "Custom error: 12" | Normal - axon already registered, harmless |
 
 ### Miner Issues
@@ -339,18 +403,6 @@ journalctl -u aurelius-validator -f
 | "Could not find validator" | Check `BT_NETUID` and `BT_NETWORK` match |
 | Connection timeout | Validator may be offline, try different UID |
 | "Failed to load wallet" | Check wallet exists in `~/.bittensor/wallets/` |
-
-### Logs
-
-```bash
-# Docker
-docker compose logs -f
-docker compose logs --tail=100
-
-# Native/Systemd
-journalctl -u aurelius-validator -f
-journalctl -u aurelius-validator --since "1 hour ago"
-```
 
 ---
 
