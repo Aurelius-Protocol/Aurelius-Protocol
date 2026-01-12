@@ -293,6 +293,24 @@ class AureliusSpanExporter(SpanExporter):
                         self.batches_sent += 1
                     bt.logging.debug(f"Exported {len(spans)} spans (total: {self.spans_exported})")
                     return True
+                elif response.status_code == 207:
+                    # Partial success - some items may have failed validation
+                    # Don't retry since data that could be stored was stored
+                    try:
+                        result = response.json()
+                        stored = result.get('spans_stored', 0)
+                        failed = result.get('spans_failed', 0)
+                        with self._lock:
+                            self.spans_exported += stored
+                            self.spans_failed += failed
+                            self.batches_sent += 1
+                        if failed > 0:
+                            bt.logging.debug(f"Partial span export: {stored} stored, {failed} failed")
+                    except Exception:
+                        with self._lock:
+                            self.spans_exported += len(spans)
+                            self.batches_sent += 1
+                    return True
                 else:
                     bt.logging.warning(f"Span export failed: HTTP {response.status_code}")
 
@@ -651,6 +669,22 @@ class AureliusLogExporter(LogExporter):
                     with self._lock:
                         self.logs_exported += len(logs)
                     bt.logging.debug(f"Exported {len(valid_logs)} logs (total: {self.logs_exported})")
+                    return True
+                elif response.status_code == 207:
+                    # Partial success - some items may have failed validation
+                    # Don't retry since data that could be stored was stored
+                    try:
+                        result = response.json()
+                        stored = result.get('logs_stored', 0)
+                        failed = result.get('logs_failed', 0)
+                        with self._lock:
+                            self.logs_exported += stored
+                            self.logs_failed += failed
+                        if failed > 0:
+                            bt.logging.debug(f"Partial log export: {stored} stored, {failed} failed")
+                    except Exception:
+                        with self._lock:
+                            self.logs_exported += len(logs)
                     return True
                 else:
                     bt.logging.warning(f"Log export failed: HTTP {response.status_code} - {response.text[:200]}")
