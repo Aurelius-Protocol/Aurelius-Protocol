@@ -29,6 +29,9 @@ NETWORK_DEFAULTS = {
         "TELEMETRY_TRACES_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/traces",
         "TELEMETRY_LOGS_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/logs",
         "TELEMETRY_REGISTRY_ENDPOINT": "https://collector.aureliusaligned.ai/api/validator-registry",
+        "MINER_BURN_ENABLED": True,
+        "MINER_BURN_PERCENTAGE": 0.9,
+        "BURN_UID": 200,
     },
     290: {  # Testnet
         "DANGER_THRESHOLD": 0.2,
@@ -40,7 +43,17 @@ NETWORK_DEFAULTS = {
         "TELEMETRY_TRACES_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/telemetry/traces",
         "TELEMETRY_LOGS_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/telemetry/logs",
         "TELEMETRY_REGISTRY_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/validator-registry",
+        "MINER_BURN_ENABLED": True,
+        "MINER_BURN_PERCENTAGE": 0.9,
+        "BURN_UID": 200,
     },
+}
+
+# Mapping from BT_NETWORK name to BT_NETUID
+NETWORK_NAME_TO_NETUID = {
+    "finney": 37,
+    "test": 290,
+    "local": 1,
 }
 
 
@@ -198,7 +211,12 @@ class Config:
 
     # Bittensor Network Configuration
     BT_NETWORK: str = os.getenv("BT_NETWORK", "local")
-    BT_NETUID: int = int(os.getenv("BT_NETUID", "1"))
+    # Auto-detect BT_NETUID from BT_NETWORK if not explicitly set
+    _bt_netuid_env = os.getenv("BT_NETUID")
+    BT_NETUID: int = (
+        int(_bt_netuid_env) if _bt_netuid_env
+        else NETWORK_NAME_TO_NETUID.get(os.getenv("BT_NETWORK", "local"), 1)
+    )
 
     # Validator Configuration
     BT_PORT_VALIDATOR: int = int(os.getenv("BT_PORT_VALIDATOR", "8091"))
@@ -249,7 +267,7 @@ class Config:
 
     # Miner Burn Configuration
     # Burns a percentage of miner emissions by allocating weight to a registered burn UID
-    MINER_BURN_ENABLED: bool = os.getenv("MINER_BURN_ENABLED", "false").lower() == "true"
+    MINER_BURN_ENABLED: bool = os.getenv("MINER_BURN_ENABLED", "true").lower() == "true"
     MINER_BURN_PERCENTAGE: float = float(os.getenv("MINER_BURN_PERCENTAGE", "0.9"))  # 90% default
     BURN_UID: int = int(os.getenv("BURN_UID", "200"))
 
@@ -733,12 +751,19 @@ class Config:
         result = detect_wallet(role=role)
 
         if result.error:
+            # Create a very prominent error banner
+            banner = "!" * 70
             raise ConfigurationError(
-                f"\n{'=' * 60}\n"
-                f"WALLET CONFIGURATION ERROR\n"
-                f"{'=' * 60}\n\n"
+                f"\n\n{banner}\n"
+                f"{banner}\n"
+                f"!!                                                                  !!\n"
+                f"!!                    WALLET CONFIGURATION ERROR                    !!\n"
+                f"!!                                                                  !!\n"
+                f"{banner}\n"
+                f"{banner}\n\n"
                 f"{result.error}\n\n"
-                f"{'=' * 60}\n"
+                f"{banner}\n"
+                f"{banner}\n"
             )
 
         # Auto-detection succeeded
