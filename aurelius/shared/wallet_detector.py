@@ -40,7 +40,7 @@ def get_wallets_path() -> Path:
     return Path.home() / ".bittensor" / "wallets"
 
 
-def list_wallets(wallets_path: Path) -> list[DetectedWallet]:
+def list_wallets(wallets_path: Path) -> tuple[list[DetectedWallet], str | None]:
     """
     List all wallets and their hotkeys from the wallets directory.
 
@@ -53,32 +53,53 @@ def list_wallets(wallets_path: Path) -> list[DetectedWallet]:
         wallets_path: Path to the wallets directory
 
     Returns:
-        List of detected wallets with their hotkeys
+        Tuple of (list of detected wallets, permission_error message or None)
     """
     wallets = []
+    permission_error = None
 
     if not wallets_path.exists():
-        return wallets
+        return wallets, None
 
-    for wallet_dir in wallets_path.iterdir():
+    try:
+        wallet_dirs = list(wallets_path.iterdir())
+    except PermissionError:
+        return [], f"Permission denied reading wallet directory: {wallets_path}"
+
+    for wallet_dir in wallet_dirs:
         if not wallet_dir.is_dir():
             continue
 
         # Check for coldkey (required for valid wallet)
         coldkey_path = wallet_dir / "coldkey"
-        if not coldkey_path.exists():
+        try:
+            if not coldkey_path.exists():
+                continue
+            # Try to read the coldkey to verify permissions
+            coldkey_path.stat()
+        except PermissionError:
+            permission_error = f"Permission denied reading coldkey: {coldkey_path}"
             continue
 
         # Find hotkeys
         hotkeys_dir = wallet_dir / "hotkeys"
         hotkeys = []
         if hotkeys_dir.exists():
-            for hotkey_file in hotkeys_dir.iterdir():
-                # Skip .txt files (public key metadata)
-                if hotkey_file.suffix == ".txt":
-                    continue
-                if hotkey_file.is_file():
-                    hotkeys.append(hotkey_file.name)
+            try:
+                for hotkey_file in hotkeys_dir.iterdir():
+                    # Skip .txt files (public key metadata)
+                    if hotkey_file.suffix == ".txt":
+                        continue
+                    if hotkey_file.is_file():
+                        # Verify we can read the hotkey
+                        try:
+                            hotkey_file.stat()
+                            hotkeys.append(hotkey_file.name)
+                        except PermissionError:
+                            permission_error = f"Permission denied reading hotkey: {hotkey_file}"
+            except PermissionError:
+                permission_error = f"Permission denied reading hotkeys directory: {hotkeys_dir}"
+                continue
 
         # Only include wallets with at least one hotkey
         if hotkeys:
@@ -90,7 +111,7 @@ def list_wallets(wallets_path: Path) -> list[DetectedWallet]:
                 )
             )
 
-    return sorted(wallets, key=lambda w: w.name)
+    return sorted(wallets, key=lambda w: w.name), permission_error
 
 
 def detect_wallet(role: str = "validator") -> WalletDetectionResult:
@@ -101,6 +122,7 @@ def detect_wallet(role: str = "validator") -> WalletDetectionResult:
     - If exactly one wallet with exactly one hotkey exists → auto-select it
     - If multiple wallets or hotkeys exist → return error with list
     - If no wallets exist → return error with instructions
+    - If permission errors occur → return error with fix instructions
 
     Args:
         role: "validator" or "miner" - affects error message wording
@@ -109,7 +131,24 @@ def detect_wallet(role: str = "validator") -> WalletDetectionResult:
         WalletDetectionResult with detection outcome
     """
     wallets_path = get_wallets_path()
-    wallets = list_wallets(wallets_path)
+    wallets, permission_error = list_wallets(wallets_path)
+
+    # Case: Permission error reading wallet files
+    if permission_error and not wallets:
+        return WalletDetectionResult(
+            wallet_name=None,
+            hotkey=None,
+            wallets=[],
+            error=(
+                f"PERMISSION ERROR: Cannot read wallet files\n\n"
+                f"{permission_error}\n\n"
+                f"Fix permissions with:\n"
+                f"  chmod -R 700 {wallets_path}\n"
+                f"  chown -R $(whoami) {wallets_path}\n\n"
+                f"If running in Docker, ensure wallet volume is mounted with correct permissions:\n"
+                f"  -v ~/.bittensor/wallets:/home/aurelius/.bittensor/wallets:ro"
+            ),
+        )
 
     # Case: No wallets found
     if not wallets:
