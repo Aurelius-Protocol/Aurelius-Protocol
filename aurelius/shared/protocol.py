@@ -33,6 +33,12 @@ class PromptSynapse(bt.Synapse):
         miner_novelty_avg: Miner's average novelty score across all submissions (filled by validator)
         miner_hit_rate: Miner's acceptance rate (filled by validator)
         miner_submission_count: Total number of submissions from this miner (filled by validator)
+        reward_top_miners_count: Number of top miners receiving rewards (filled by validator)
+        reward_burn_enabled: Whether burn mechanism is active (filled by validator)
+        reward_burn_percentage: Percentage of emissions burned (filled by validator)
+        reward_min_hit_rate: Minimum acceptance rate for rewards (filled by validator)
+        reward_min_novelty: Minimum novelty score for rewards (filled by validator)
+        reward_danger_threshold: Minimum danger score for acceptance (filled by validator)
     """
 
     # Input from miner
@@ -162,6 +168,43 @@ class PromptSynapse(bt.Synapse):
         None,
         title="Miner Submission Count",
         description="Total number of submissions from this miner",
+    )
+
+    # Reward mechanism info (filled by validator)
+    reward_top_miners_count: int | None = Field(
+        None,
+        title="Top Rewarded Miners",
+        description="Number of top miners receiving rewards each window",
+    )
+
+    reward_burn_enabled: bool | None = Field(
+        None,
+        title="Burn Enabled",
+        description="Whether the miner burn mechanism is active",
+    )
+
+    reward_burn_percentage: float | None = Field(
+        None,
+        title="Burn Percentage",
+        description="Percentage of emissions burned (0-1)",
+    )
+
+    reward_min_hit_rate: float | None = Field(
+        None,
+        title="Min Hit Rate",
+        description="Minimum acceptance rate required for rewards (0-1)",
+    )
+
+    reward_min_novelty: float | None = Field(
+        None,
+        title="Min Novelty",
+        description="Minimum novelty score required for rewards (0-1)",
+    )
+
+    reward_danger_threshold: float | None = Field(
+        None,
+        title="Danger Threshold",
+        description="Minimum danger score for prompt acceptance",
     )
 
     # Distribution statistics (from multiple runs across validators)

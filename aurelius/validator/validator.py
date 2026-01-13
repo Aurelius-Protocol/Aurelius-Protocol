@@ -683,6 +683,16 @@ class Validator:
             else:
                 bt.logging.warning(f"No miner score found for {(miner_hotkey or 'unknown')[:8]}...")
 
+            # Step 5c: Populate reward mechanism info for miner feedback
+            synapse.reward_top_miners_count = Config.TOP_REWARDED_MINERS
+            synapse.reward_burn_enabled = Config.MINER_BURN_ENABLED
+            synapse.reward_burn_percentage = (
+                Config.MINER_BURN_PERCENTAGE if Config.MINER_BURN_ENABLED else None
+            )
+            synapse.reward_min_hit_rate = Config.MIN_HIT_RATE_THRESHOLD
+            synapse.reward_min_novelty = Config.MIN_NOVELTY_THRESHOLD
+            synapse.reward_danger_threshold = Config.DANGER_THRESHOLD
+
             # Calculate total processing duration
             total_duration = (time.time() - start_time) * 1000
             timing_metrics["total_processing_duration"] = round(total_duration, 2)

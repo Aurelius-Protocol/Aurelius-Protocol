@@ -163,6 +163,7 @@ def send_prompt(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
+    verbose: bool = False,
 ) -> str:
     """
     Send a prompt to a validator and return the response.
@@ -182,6 +183,7 @@ def send_prompt(
         max_retries: Maximum retry attempts (default: from config)
         skip_preflight: Skip pre-flight health check
         use_colors: Use colored output for diagnostics (default: from config)
+        verbose: Enable verbose output (default: False for minimal output)
 
     Returns:
         The response from the validator (OpenAI completion)
@@ -230,10 +232,14 @@ def send_prompt(
             },
             e,
         )
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print(f"[ERROR] Invalid wallet configuration: {e}")
         sys.exit(1)
 
-    bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
+    if verbose:
+        bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
 
     # Initialize wallet
     try:
@@ -248,7 +254,10 @@ def send_prompt(
             },
             e,
         )
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print(f"[ERROR] Wallet initialization failed: {e}")
         return ""
 
     # Initialize dendrite (for sending requests)
@@ -256,14 +265,18 @@ def send_prompt(
         dendrite = bt.Dendrite(wallet=wallet)
     except Exception as e:
         error = classify_error(e, context)
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print(f"[ERROR] Dendrite initialization failed: {e}")
         return ""
 
-    bt.logging.info(f"Prompt: {prompt}")
-    if vendor or model_requested:
-        bt.logging.info(f"Model specs: vendor={vendor}, model={model_requested}")
-    if temperature is not None:
-        bt.logging.info(f"Temperature: {temperature}")
+    if verbose:
+        bt.logging.info(f"Prompt: {prompt}")
+        if vendor or model_requested:
+            bt.logging.info(f"Model specs: vendor={vendor}, model={model_requested}")
+        if temperature is not None:
+            bt.logging.info(f"Temperature: {temperature}")
 
     # Create the synapse with the prompt and model specifications
     synapse = PromptSynapse(
@@ -283,12 +296,13 @@ def send_prompt(
 
     if Config.LOCAL_MODE:
         # Local mode: Connect directly to validator IP:PORT
-        bt.logging.info("=" * 60)
-        bt.logging.info("LOCAL MODE ENABLED")
-        bt.logging.info("=" * 60)
-        bt.logging.info(
-            f"Connecting directly to validator at {Config.VALIDATOR_HOST}:{Config.BT_PORT_VALIDATOR}"
-        )
+        if verbose:
+            bt.logging.info("=" * 60)
+            bt.logging.info("LOCAL MODE ENABLED")
+            bt.logging.info("=" * 60)
+            bt.logging.info(
+                f"Connecting directly to validator at {Config.VALIDATOR_HOST}:{Config.BT_PORT_VALIDATOR}"
+            )
 
         context.update(
             {
@@ -318,7 +332,10 @@ def send_prompt(
             # Validate UID exists
             if validator_uid < 0 or validator_uid >= len(metagraph.axons):
                 error = create_error(ErrorCategory.INVALID_VALIDATOR_UID, context)
-                print(formatter.format_error(error, context))
+                if verbose:
+                    print(formatter.format_error(error, context))
+                else:
+                    print(f"[ERROR] Invalid validator UID: {validator_uid}")
                 return ""
 
             target_axon = metagraph.axons[validator_uid]
@@ -329,15 +346,22 @@ def send_prompt(
                 }
             )
 
-            bt.logging.info(f"Sending prompt to validator UID {validator_uid}")
+            if verbose:
+                bt.logging.info(f"Sending prompt to validator UID {validator_uid}")
 
         except IndexError:
             error = create_error(ErrorCategory.INVALID_VALIDATOR_UID, context)
-            print(formatter.format_error(error, context))
+            if verbose:
+                print(formatter.format_error(error, context))
+            else:
+                print(f"[ERROR] Invalid validator UID: {validator_uid}")
             return ""
         except Exception as e:
             error = classify_error(e, context)
-            print(formatter.format_error(error, context))
+            if verbose:
+                print(formatter.format_error(error, context))
+            else:
+                print(f"[ERROR] Network error: {e}")
             return ""
 
     # Pre-flight health check
@@ -346,16 +370,19 @@ def send_prompt(
             host=context["host"],
             port=context["port"],
         )
-        print(
-            formatter.format_health_check(
-                is_healthy=health_result.is_healthy,
-                latency_ms=health_result.latency_ms,
-                error=health_result.error,
-                context=context,
+        if verbose:
+            print(
+                formatter.format_health_check(
+                    is_healthy=health_result.is_healthy,
+                    latency_ms=health_result.latency_ms,
+                    error=health_result.error,
+                    context=context,
+                )
             )
-        )
 
         if not health_result.is_healthy:
+            if not verbose:
+                print(f"[ERROR] Validator unreachable at {context['host']}:{context['port']}")
             return ""
 
     # Define the query operation for retry
@@ -371,13 +398,19 @@ def send_prompt(
     result = retry_handler.execute_with_retry(
         operation=do_query,
         context=context,
-        on_retry=lambda attempt, error, delay: print(
-            formatter.format_retry_progress(attempt, effective_retries, delay, error, context)
+        on_retry=lambda attempt, error, delay: (
+            print(formatter.format_retry_progress(attempt, effective_retries, delay, error, context))
+            if verbose
+            else None
         ),
     )
 
     if not result.success:
-        print(formatter.format_error(result.last_error, context))
+        if verbose:
+            print(formatter.format_error(result.last_error, context))
+        else:
+            error_msg = result.last_error.message if result.last_error else "Unknown error"
+            print(f"[ERROR] Query failed: {error_msg}")
         return ""
 
     # Process response
@@ -412,14 +445,19 @@ def send_prompt(
         if "rate limit" in rejection:
             error = create_error(ErrorCategory.RATE_LIMITED, context)
             context["reason"] = result_synapse.rejection_reason
-            print(formatter.format_error(error, context))
-            # Still show the rejection reason
-            print(f"Rejection: {result_synapse.rejection_reason}")
+            if verbose:
+                print(formatter.format_error(error, context))
+                print(f"Rejection: {result_synapse.rejection_reason}")
+            else:
+                print(f"[ERROR] Rate limited: {result_synapse.rejection_reason}")
             return ""
         elif "error" in rejection:
             error = create_error(ErrorCategory.API_ERROR, context)
             context["reason"] = result_synapse.rejection_reason
-            print(formatter.format_error(error, context))
+            if verbose:
+                print(formatter.format_error(error, context))
+            else:
+                print(f"[ERROR] {result_synapse.rejection_reason}")
             return ""
 
     # Check for response with Error prefix
@@ -430,47 +468,58 @@ def send_prompt(
         and result_synapse.response.startswith("Error:")
     ):
         error = create_error(ErrorCategory.API_ERROR, context)
-        print(formatter.format_error(error, context))
-        print(f"Validator response: {result_synapse.response}")
+        if verbose:
+            print(formatter.format_error(error, context))
+            print(f"Validator response: {result_synapse.response}")
+        else:
+            print(f"[ERROR] {result_synapse.response}")
         return ""
 
     if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
-        # Display results
-        print("\n" + "=" * 60)
-        print("RESPONSE FROM VALIDATOR")
-        print("=" * 60)
-        print(f"Prompt:   {result_synapse.prompt}")
-        print(f"Response: {result_synapse.response}")
-        print(f"Model:    {result_synapse.model_used or 'unknown'}")
+        if verbose:
+            # Full verbose output
+            print("\n" + "=" * 60)
+            print("RESPONSE FROM VALIDATOR")
+            print("=" * 60)
+            print(f"Prompt:   {result_synapse.prompt}")
+            print(f"Response: {result_synapse.response}")
+            print(f"Model:    {result_synapse.model_used or 'unknown'}")
 
-        # Display moderation results if available
-        if result_synapse.danger_score is not None:
-            print("\n--- Moderation Results ---")
-            print(f"Danger Score:  {result_synapse.danger_score:.4f}")
-            print(f"Accepted:      {'✓ YES' if result_synapse.accepted else '✗ NO'}")
+            # Display moderation results if available
+            if result_synapse.danger_score is not None:
+                print("\n--- Moderation Results ---")
+                print(f"Danger Score:  {result_synapse.danger_score:.4f}")
+                print(f"Accepted:      {'✓ YES' if result_synapse.accepted else '✗ NO'}")
 
-            if result_synapse.rejection_reason:
-                print(f"Rejection:     {result_synapse.rejection_reason}")
+                if result_synapse.rejection_reason:
+                    print(f"Rejection:     {result_synapse.rejection_reason}")
 
-            if result_synapse.category_scores:
-                print("\nTop Category Scores:")
-                sorted_cats = sorted(
-                    result_synapse.category_scores.items(), key=lambda x: x[1], reverse=True
-                )[:5]
-                for category, score in sorted_cats:
-                    if score > 0.01:
-                        print(f"  {category:25s}: {score:.4f}")
+                if result_synapse.category_scores:
+                    print("\nTop Category Scores:")
+                    sorted_cats = sorted(
+                        result_synapse.category_scores.items(), key=lambda x: x[1], reverse=True
+                    )[:5]
+                    for category, score in sorted_cats:
+                        if score > 0.01:
+                            print(f"  {category:25s}: {score:.4f}")
 
-        # Display miner statistics if available
-        if result_synapse.miner_submission_count is not None:
-            print("\n--- Your Statistics ---")
-            print(f"Submissions:   {result_synapse.miner_submission_count}")
-            if result_synapse.miner_hit_rate is not None:
-                print(f"Hit Rate:      {result_synapse.miner_hit_rate:.1%}")
-            if result_synapse.miner_novelty_avg is not None:
-                print(f"Avg Novelty:   {result_synapse.miner_novelty_avg:.3f}")
+            # Display miner statistics if available
+            if result_synapse.miner_submission_count is not None:
+                print("\n--- Your Statistics ---")
+                print(f"Submissions:   {result_synapse.miner_submission_count}")
+                if result_synapse.miner_hit_rate is not None:
+                    print(f"Hit Rate:      {result_synapse.miner_hit_rate:.1%}")
+                if result_synapse.miner_novelty_avg is not None:
+                    print(f"Avg Novelty:   {result_synapse.miner_novelty_avg:.3f}")
 
-        print("=" * 60 + "\n")
+            # Display reward mechanism info
+            _display_reward_info(result_synapse, verbose=True)
+
+            print("=" * 60 + "\n")
+        else:
+            # Minimal non-verbose output
+            _display_minimal_result(result_synapse)
+
         return result_synapse.response
     else:
         # No response received - create appropriate error
@@ -491,8 +540,77 @@ def send_prompt(
             "Verify the validator is running and accepting requests",
             "Increase timeout: --timeout 60",
         ]
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print("[ERROR] No response received from validator")
         return ""
+
+
+def query_validators_batched(
+    dendrite,
+    axons: list,
+    synapse: PromptSynapse,
+    timeout: int,
+    batch_size: int = 3,
+    batch_delay_ms: int = 100,
+    verbose: bool = False,
+) -> list:
+    """
+    Query validators in batches to avoid network congestion.
+
+    When querying many validators simultaneously, network saturation can cause
+    dropped packets and connection resets. This function splits the validators
+    into smaller batches and queries them sequentially with a small delay.
+
+    Args:
+        dendrite: Bittensor dendrite instance
+        axons: List of AxonInfo objects to query
+        synapse: The synapse to send
+        timeout: Query timeout in seconds (per batch)
+        batch_size: Number of validators to query per batch
+        batch_delay_ms: Delay between batches in milliseconds
+        verbose: Enable verbose logging
+
+    Returns:
+        List of responses in the same order as axons
+    """
+    all_responses: list = [None] * len(axons)
+    total_batches = (len(axons) + batch_size - 1) // batch_size
+
+    # Process in batches
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * batch_size
+        batch_end = min(batch_start + batch_size, len(axons))
+        batch_axons = axons[batch_start:batch_end]
+
+        if verbose:
+            bt.logging.info(
+                f"Querying batch {batch_idx + 1}/{total_batches}: "
+                f"validators {batch_start + 1}-{batch_end} of {len(axons)}"
+            )
+
+        # Query this batch
+        batch_responses = dendrite.query(
+            axons=batch_axons,
+            synapse=synapse,
+            timeout=timeout,
+            deserialize=False,
+        )
+
+        # Handle single axon case (returns synapse, not list)
+        if not isinstance(batch_responses, list):
+            batch_responses = [batch_responses]
+
+        # Store responses in correct positions
+        for i, response in enumerate(batch_responses):
+            all_responses[batch_start + i] = response
+
+        # Inter-batch delay (skip after last batch)
+        if batch_end < len(axons) and batch_delay_ms > 0:
+            time.sleep(batch_delay_ms / 1000.0)
+
+    return all_responses
 
 
 def send_prompt_multi(
@@ -512,9 +630,13 @@ def send_prompt_multi(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
+    verbose: bool = False,
+    batch_size: int | None = None,
+    batch_delay_ms: int | None = None,
+    no_batching: bool = False,
 ) -> dict[int, ValidatorQueryResult]:
     """
-    Send a prompt to multiple validators in parallel.
+    Send a prompt to multiple validators in parallel (or batched).
 
     Args:
         prompt: The prompt text to send
@@ -533,6 +655,10 @@ def send_prompt_multi(
         max_retries: Maximum retry attempts for the query (default: from config)
         skip_preflight: Skip pre-flight health checks
         use_colors: Use colored output for diagnostics
+        verbose: Enable verbose output (default: False for minimal output)
+        batch_size: Number of validators to query per batch (default: from config)
+        batch_delay_ms: Delay between batches in milliseconds (default: from config)
+        no_batching: Disable batching and query all validators at once
 
     Returns:
         Dict mapping validator UID to ValidatorQueryResult.
@@ -573,10 +699,14 @@ def send_prompt_multi(
             {**context, "wallet": Config.MINER_WALLET_NAME, "hotkey": Config.MINER_HOTKEY},
             e,
         )
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print(f"[ERROR] Invalid wallet configuration: {e}")
         return {}
 
-    bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
+    if verbose:
+        bt.logging.info(f"Initializing miner with wallet: {Config.MINER_WALLET_NAME}")
 
     # Initialize wallet
     try:
@@ -587,7 +717,10 @@ def send_prompt_multi(
             {**context, "wallet": Config.MINER_WALLET_NAME, "hotkey": Config.MINER_HOTKEY},
             e,
         )
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print(f"[ERROR] Wallet initialization failed: {e}")
         return {}
 
     # Initialize dendrite
@@ -595,7 +728,10 @@ def send_prompt_multi(
         dendrite = bt.Dendrite(wallet=wallet)
     except Exception as e:
         error = classify_error(e, context)
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print(f"[ERROR] Dendrite initialization failed: {e}")
         return {}
 
     # Get metagraph and discover validators
@@ -605,7 +741,10 @@ def send_prompt_multi(
         metagraph = subtensor.metagraph(netuid=Config.BT_NETUID)
     except Exception as e:
         error = classify_error(e, context)
-        print(formatter.format_error(error, context))
+        if verbose:
+            print(formatter.format_error(error, context))
+        else:
+            print(f"[ERROR] Network error: {e}")
         return {}
 
     # Determine which validators to query
@@ -613,7 +752,10 @@ def send_prompt_multi(
         # Use specified UIDs
         target_uids = [uid for uid in validator_uids if 0 <= uid < len(metagraph.axons)]
         if not target_uids:
-            bt.logging.error("No valid validator UIDs provided")
+            if verbose:
+                bt.logging.error("No valid validator UIDs provided")
+            else:
+                print("[ERROR] No valid validator UIDs provided")
             return {}
     else:
         # Auto-discover validators
@@ -624,18 +766,21 @@ def send_prompt_multi(
         )
 
     if not target_uids:
-        bt.logging.error("No eligible validators found")
-        print("No eligible validators found. Check network connectivity and stake thresholds.")
+        if verbose:
+            bt.logging.error("No eligible validators found")
+        print("[ERROR] No eligible validators found")
         return {}
 
-    # Initialize progress tracker
+    # Initialize progress tracker (only used in verbose mode)
     progress = QueryProgress(target_uids, use_colors=effective_colors)
-    progress.show_start()
+    if verbose:
+        progress.show_start()
 
     # Pre-flight health checks (optional)
     do_preflight = not skip_preflight and Config.MINER_PREFLIGHT_CHECK
     if do_preflight:
-        print("Running pre-flight health checks...")
+        if verbose:
+            print("Running pre-flight health checks...")
         health_checker = ValidatorHealthChecker(timeout=Config.MINER_PREFLIGHT_TIMEOUT)
         healthy_uids = []
         unhealthy_results: dict[int, ValidatorQueryResult] = {}
@@ -643,7 +788,8 @@ def send_prompt_multi(
         for uid in target_uids:
             axon = metagraph.axons[uid]
             health_result = health_checker.check_validator_reachable(axon.ip, axon.port)
-            progress.show_health_check_progress(uid, health_result.is_healthy, health_result.latency_ms)
+            if verbose:
+                progress.show_health_check_progress(uid, health_result.is_healthy, health_result.latency_ms)
 
             if health_result.is_healthy:
                 healthy_uids.append(uid)
@@ -657,16 +803,18 @@ def send_prompt_multi(
                 )
 
         if not healthy_uids:
-            print("No validators passed health check. Aborting query.")
+            print("[ERROR] No validators passed health check")
             return unhealthy_results
 
         # Update target_uids to only include healthy validators
         target_uids = healthy_uids
-        print(f"{len(healthy_uids)} validator(s) passed health check")
+        if verbose:
+            print(f"{len(healthy_uids)} validator(s) passed health check")
     else:
         unhealthy_results = {}
 
-    bt.logging.info(f"Querying {len(target_uids)} validator(s): {target_uids}")
+    if verbose:
+        bt.logging.info(f"Querying {len(target_uids)} validator(s): {target_uids}")
 
     # Get axons for target validators
     target_axons = [metagraph.axons[uid] for uid in target_uids]
@@ -684,23 +832,51 @@ def send_prompt_multi(
         max_chars=max_chars,
     )
 
+    # Determine batching configuration
+    effective_batch_size = batch_size if batch_size is not None else Config.MINER_QUERY_BATCH_SIZE
+    effective_batch_delay = batch_delay_ms if batch_delay_ms is not None else Config.MINER_BATCH_DELAY_MS
+    enable_batching = not no_batching and Config.MINER_ENABLE_BATCHING
+
     # Define the query operation for retry
     def do_query():
-        return dendrite.query(
-            axons=target_axons,
-            synapse=synapse,
-            timeout=effective_timeout,
-            deserialize=False,
-        )
+        if enable_batching and len(target_axons) > effective_batch_size:
+            # Use batched queries to avoid network congestion
+            if verbose:
+                bt.logging.info(
+                    f"Using batched queries: {effective_batch_size} validators per batch, "
+                    f"{effective_batch_delay}ms delay"
+                )
+            return query_validators_batched(
+                dendrite=dendrite,
+                axons=target_axons,
+                synapse=synapse,
+                timeout=effective_timeout,
+                batch_size=effective_batch_size,
+                batch_delay_ms=effective_batch_delay,
+                verbose=verbose,
+            )
+        else:
+            # Original behavior: query all at once
+            return dendrite.query(
+                axons=target_axons,
+                synapse=synapse,
+                timeout=effective_timeout,
+                deserialize=False,
+            )
 
-    # Query all validators in parallel with retry
-    print("Sending queries...")
+    # Query validators (batched or parallel) with retry
+    if verbose:
+        print("Sending queries...")
     query_start_time = time.time()
     result = retry_handler.execute_with_retry(
         operation=do_query,
         context=context,
-        on_retry=lambda attempt, error, delay: bt.logging.warning(
-            f"Query failed (attempt {attempt}/{effective_retries}), retrying in {delay:.1f}s: {error}"
+        on_retry=lambda attempt, error, delay: (
+            bt.logging.warning(
+                f"Query failed (attempt {attempt}/{effective_retries}), retrying in {delay:.1f}s: {error}"
+            )
+            if verbose
+            else None
         ),
     )
 
@@ -709,8 +885,11 @@ def send_prompt_multi(
 
     if not result.success:
         error = classify_error(result.last_error, context) if result.last_error else None
-        if error:
+        if verbose and error:
             print(formatter.format_error(error, context))
+        elif not verbose:
+            error_msg = result.last_error.message if result.last_error else "Unknown error"
+            print(f"[ERROR] Query failed: {error_msg}")
         # Return unhealthy results from health check even if query failed
         return unhealthy_results
 
@@ -792,17 +971,19 @@ def send_prompt_multi(
     # Merge with unhealthy results from health check
     all_results = {**unhealthy_results, **results}
 
-    # Show progress summary
-    progress.show_query_complete()
+    # Show progress summary (verbose only)
+    if verbose:
+        progress.show_query_complete()
+        successful_count = sum(1 for r in all_results.values() if r.success)
+        bt.logging.info(f"Received {successful_count} successful response(s) from {len(all_results)} validator(s)")
 
-    successful_count = sum(1 for r in all_results.values() if r.success)
-    bt.logging.info(f"Received {successful_count} successful response(s) from {len(all_results)} validator(s)")
     return all_results
 
 
 def display_multi_results(
     results: dict[int, ValidatorQueryResult],
     use_colors: bool = True,
+    verbose: bool = False,
 ) -> None:
     """
     Display results from multiple validators.
@@ -810,6 +991,7 @@ def display_multi_results(
     Args:
         results: Dict mapping validator UID to ValidatorQueryResult
         use_colors: Use colored output
+        verbose: Enable verbose output (default: False for minimal output)
     """
     # ANSI color codes
     GREEN = "\033[92m" if use_colors else ""
@@ -820,13 +1002,33 @@ def display_multi_results(
     RESET = "\033[0m" if use_colors else ""
 
     if not results:
-        print(f"\n{YELLOW}No results from validators.{RESET}")
+        print("[ERROR] No results from validators")
         return
 
     # Separate successful and failed results
     successful = {uid: r for uid, r in results.items() if r.success}
     failed = {uid: r for uid, r in results.items() if not r.success}
 
+    if not verbose:
+        # Minimal output: just summary of accepted/rejected counts
+        if failed:
+            print(f"Failed: {len(failed)} validator(s)")
+
+        if successful:
+            # Show aggregate result
+            accepted_count = sum(
+                1 for r in successful.values() if r.synapse and r.synapse.accepted
+            )
+            print(f"Results: {accepted_count}/{len(successful)} accepted across {len(successful)} validator(s)")
+
+            # Show reward info from first successful response
+            for r in successful.values():
+                if r.synapse:
+                    _display_reward_info(r.synapse, verbose=False)
+                    break
+        return
+
+    # Verbose output - show all details
     # Summary header
     print("\n" + "=" * 60)
     print(f"{BOLD}RESULTS: {len(successful)}/{len(results)} VALIDATOR(S) RESPONDED{RESET}")
@@ -870,6 +1072,9 @@ def display_multi_results(
                     print(f", {synapse.miner_hit_rate:.1%} hit rate", end="")
                 print()
 
+            # Show reward info for each validator in verbose mode
+            _display_reward_info(synapse, verbose=True)
+
     print("\n" + "=" * 60)
 
     # Summary statistics (only from successful responses)
@@ -884,6 +1089,68 @@ def display_multi_results(
             print(f"Average Danger Score: {avg_danger:.4f}")
             print(f"Min: {min(danger_scores):.4f}, Max: {max(danger_scores):.4f}")
         print("=" * 60 + "\n")
+
+
+def _display_reward_info(synapse: PromptSynapse, verbose: bool = False) -> None:
+    """
+    Display reward mechanism info from validator.
+
+    Args:
+        synapse: The response synapse containing reward info
+        verbose: If True, show detailed breakdown; if False, show one-line summary
+    """
+    # Check if reward info is available
+    if synapse.reward_top_miners_count is None:
+        return
+
+    if verbose:
+        print("\n--- Reward Mechanism ---")
+        print(f"Top Miners:    {synapse.reward_top_miners_count}")
+        if synapse.reward_burn_enabled:
+            burn_pct = (synapse.reward_burn_percentage or 0) * 100
+            print(f"Burn Rate:     {burn_pct:.0f}%")
+        else:
+            print("Burn Rate:     Disabled")
+        if synapse.reward_min_hit_rate is not None:
+            print(f"Min Hit Rate:  {synapse.reward_min_hit_rate:.0%}")
+        if synapse.reward_min_novelty is not None:
+            print(f"Min Novelty:   {synapse.reward_min_novelty:.0%}")
+        if synapse.reward_danger_threshold is not None:
+            print(f"Danger Thresh: {synapse.reward_danger_threshold}")
+    else:
+        # One-line summary
+        parts = [f"Top {synapse.reward_top_miners_count} miners"]
+        if synapse.reward_burn_enabled and synapse.reward_burn_percentage:
+            parts.append(f"{synapse.reward_burn_percentage:.0%} burn")
+        if synapse.reward_min_hit_rate is not None:
+            parts.append(f"Min hit rate: {synapse.reward_min_hit_rate:.0%}")
+        if synapse.reward_min_novelty is not None:
+            parts.append(f"Min novelty: {synapse.reward_min_novelty:.0%}")
+
+        print(f"Rewards: {' | '.join(parts)}")
+
+
+def _display_minimal_result(synapse: PromptSynapse) -> None:
+    """
+    Display minimal result for non-verbose mode.
+
+    Args:
+        synapse: The response synapse
+    """
+    danger = synapse.danger_score or 0.0
+    novelty = synapse.miner_novelty_avg
+
+    if synapse.accepted:
+        novelty_str = f", novelty: {novelty:.2f}" if novelty is not None else ""
+        print(f"Prompt accepted (danger: {danger:.2f}{novelty_str})")
+    else:
+        threshold = synapse.reward_danger_threshold or 0.3
+        if synapse.rejection_reason and "rate limit" in synapse.rejection_reason.lower():
+            print(f"Prompt rejected: {synapse.rejection_reason}")
+        else:
+            print(f"Prompt rejected (danger: {danger:.2f} < threshold {threshold:.2f})")
+
+    _display_reward_info(synapse, verbose=False)
 
 
 def main():
@@ -968,6 +1235,32 @@ Examples:
         help="Disable colored output",
     )
 
+    # Batching configuration (to prevent network congestion with many validators)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help=f"Number of validators to query per batch (default: {Config.MINER_QUERY_BATCH_SIZE})",
+    )
+    parser.add_argument(
+        "--batch-delay",
+        type=int,
+        default=None,
+        help=f"Delay in milliseconds between batches (default: {Config.MINER_BATCH_DELAY_MS})",
+    )
+    parser.add_argument(
+        "--no-batching",
+        action="store_true",
+        help="Disable batching and query all validators at once (original behavior)",
+    )
+
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output (show all details, preflight checks, category scores)",
+    )
+
     args = parser.parse_args()
 
     # Override netuid if provided
@@ -975,6 +1268,7 @@ Examples:
         Config.BT_NETUID = args.netuid
 
     use_colors = not args.no_color
+    verbose = args.verbose
 
     # Determine mode: single validator or multi-validator
     # Use single mode if: --validator-uid specified, --single flag, or MINER_MULTI_VALIDATOR=false
@@ -1002,6 +1296,7 @@ Examples:
             max_retries=args.retries,
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
+            verbose=verbose,
         )
     else:
         # Multi-validator mode (default when MINER_MULTI_VALIDATOR=true)
@@ -1021,8 +1316,12 @@ Examples:
             timeout=args.timeout,
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
+            verbose=verbose,
+            batch_size=args.batch_size,
+            batch_delay_ms=args.batch_delay,
+            no_batching=args.no_batching,
         )
-        display_multi_results(results, use_colors=use_colors)
+        display_multi_results(results, use_colors=use_colors, verbose=verbose)
 
 
 if __name__ == "__main__":

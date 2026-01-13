@@ -241,6 +241,11 @@ class Config:
     MINER_MAX_VALIDATORS: int = int(os.getenv("MINER_MAX_VALIDATORS", "10"))
     MINER_MIN_VALIDATOR_STAKE: float = float(os.getenv("MINER_MIN_VALIDATOR_STAKE", "0"))
 
+    # Batched Query Configuration (prevents network congestion with many validators)
+    MINER_QUERY_BATCH_SIZE: int = int(os.getenv("MINER_QUERY_BATCH_SIZE", "3"))  # Validators per batch
+    MINER_BATCH_DELAY_MS: int = int(os.getenv("MINER_BATCH_DELAY_MS", "100"))  # Delay between batches (ms)
+    MINER_ENABLE_BATCHING: bool = os.getenv("MINER_ENABLE_BATCHING", "true").lower() == "true"
+
     # Chain endpoint (for local development)
     SUBTENSOR_ENDPOINT: str | None = os.getenv("SUBTENSOR_ENDPOINT")
 
@@ -415,6 +420,12 @@ class Config:
         # Validate response length constraints
         if cls.MIN_ALLOWED_CHARS > cls.MAX_ALLOWED_CHARS:
             raise ValueError("MIN_ALLOWED_CHARS cannot be greater than MAX_ALLOWED_CHARS")
+
+        # Validate batching configuration
+        if cls.MINER_QUERY_BATCH_SIZE < 1:
+            raise ValueError(f"MINER_QUERY_BATCH_SIZE must be at least 1, got {cls.MINER_QUERY_BATCH_SIZE}")
+        if cls.MINER_BATCH_DELAY_MS < 0:
+            raise ValueError(f"MINER_BATCH_DELAY_MS cannot be negative, got {cls.MINER_BATCH_DELAY_MS}")
 
     @classmethod
     def load_subnet_hyperparameters(cls, subtensor) -> None:
