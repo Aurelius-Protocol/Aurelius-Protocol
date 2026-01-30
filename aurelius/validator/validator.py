@@ -11,20 +11,20 @@ from typing import Tuple
 
 import bittensor as bt
 from openai import OpenAI
-
 from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode, SpanKind
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
+from aurelius.shared.chat_client import ModelUnavailableError, call_chat_api_with_fallback
 from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.consensus import ConsensusCoordinator
 from aurelius.shared.dataset_logger import DatasetLogger
-from aurelius.shared.moderation import create_moderation_provider
 from aurelius.shared.embedding_client import get_embedding_client
+from aurelius.shared.moderation import create_moderation_provider
 from aurelius.shared.novelty_client import get_novelty_client
 from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
 from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
 from aurelius.shared.scoring import ScoringSystem
-from aurelius.shared.telemetry.otel_setup import setup_opentelemetry, get_tracer, register_with_telemetry_api
+from aurelius.shared.telemetry.otel_setup import get_tracer, register_with_telemetry_api, setup_opentelemetry
 
 
 def check_port_available(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
@@ -577,11 +577,16 @@ class Validator:
                         "max_tokens": Config.OPENAI_MAX_TOKENS,
                     }
                 ) as api_span:
-                    response = self.chat_client.chat.completions.create(**api_params)
+                    response, actual_model = call_chat_api_with_fallback(
+                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                    )
                     api_duration = (time.time() - api_start_time) * 1000
                     api_span.set_attribute("duration_ms", round(api_duration, 2))
+                    api_span.set_attribute("model_used", actual_model)
             else:
-                response = self.chat_client.chat.completions.create(**api_params)
+                response, actual_model = call_chat_api_with_fallback(
+                    self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                )
                 api_duration = (time.time() - api_start_time) * 1000
             timing_metrics["api_call_duration"] = round(api_duration, 2)
 
@@ -738,6 +743,14 @@ class Validator:
             bt.logging.info(f"   Processing time: {timing_metrics.get('total_processing_duration', 0):.0f}ms")
             bt.logging.info("=" * 80)
 
+        except ModelUnavailableError as e:
+            bt.logging.error(f"All models unavailable: {e}")
+            synapse.response = None
+            synapse.model_used = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = "All models temporarily unavailable. Please try again later."
+
         except Exception as e:
             bt.logging.error(f"Error processing request: {e}")
             synapse.response = f"Error: {str(e)}"
@@ -893,10 +906,13 @@ class Validator:
             run_results = []
             for i in range(runs_per_validator):
                 try:
-                    response = self.chat_client.chat.completions.create(
-                        model=self.model,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=Config.OPENAI_MAX_TOKENS,
+                    api_params = {
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": Config.OPENAI_MAX_TOKENS,
+                    }
+                    response, _ = call_chat_api_with_fallback(
+                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
                     )
                     completion = response.choices[0].message.content.strip()
 
@@ -914,6 +930,9 @@ class Validator:
                         f"high_cat={moderation_result.high_category_triggered}"
                     )
 
+                except ModelUnavailableError:
+                    bt.logging.warning(f"All models unavailable for consensus run {i + 1}, skipping")
+                    continue
                 except Exception as e:
                     bt.logging.error(f"Error in consensus run {i + 1}: {e}")
                     continue
@@ -1194,10 +1213,13 @@ class Validator:
             # Run the prompt multiple times (using adaptive runs_required)
             for i in range(runs_required):
                 try:
-                    response = self.chat_client.chat.completions.create(
-                        model=self.model,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=Config.OPENAI_MAX_TOKENS,
+                    api_params = {
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": Config.OPENAI_MAX_TOKENS,
+                    }
+                    response, _ = call_chat_api_with_fallback(
+                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
                     )
                     completion = response.choices[0].message.content.strip()
 
@@ -1215,6 +1237,9 @@ class Validator:
                         f"high_cat={moderation_result.high_category_triggered}"
                     )
 
+                except ModelUnavailableError:
+                    bt.logging.warning(f"All models unavailable for verification run {i + 1}, skipping")
+                    continue
                 except Exception as e:
                     bt.logging.error(f"Error in verification run {i + 1}: {e}")
                     continue
