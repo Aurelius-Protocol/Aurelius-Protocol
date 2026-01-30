@@ -74,14 +74,27 @@ class Config:
     # Allowed vendors and their supported models
     _allowed_models_str = os.getenv(
         "ALLOWED_MODELS",
-        '{"chutes": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "deepseek-ai/DeepSeek-V3-0324"], '
+        '{"chutes": ["deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-R1", "deepseek-ai/DeepSeek-V3-0324", '
+        '"deepseek-ai/DeepSeek-V3.2-TEE", "chutesai/Mistral-Small-3.1-24B-Instruct-2503"], '
         '"openai": ["gpt-4o-mini", "gpt-4o", "o4-mini", "o3-mini", "gpt-4-turbo", "gpt-3.5-turbo"]}',
     )
     ALLOWED_MODELS: dict[str, list[str]] = json.loads(_allowed_models_str)
 
     # Default vendor and model (used when miner doesn't specify)
     DEFAULT_VENDOR: str = os.getenv("DEFAULT_VENDOR", "chutes")
-    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "deepseek-ai/DeepSeek-V3")
+    DEFAULT_MODEL: str = os.getenv("DEFAULT_MODEL", "deepseek-ai/DeepSeek-V3.2-TEE")
+
+    # Fallback models (tried in order when primary model returns 502/503/504)
+    _fallback_models_str = os.getenv(
+        "FALLBACK_MODELS",
+        '["chutesai/Mistral-Small-3.1-24B-Instruct-2503"]'
+    )
+    FALLBACK_MODELS: list[str] = json.loads(_fallback_models_str)
+
+    # Chat API timeout (seconds) - applies to each model attempt in fallback chain
+    CHAT_API_TIMEOUT: float | None = (
+        float(os.getenv("CHAT_API_TIMEOUT")) if os.getenv("CHAT_API_TIMEOUT") else None
+    )
 
     # Model parameter constraints
     MIN_TEMPERATURE: float = float(os.getenv("MIN_TEMPERATURE", "0.0"))
@@ -407,6 +420,18 @@ class Config:
             raise ValueError(
                 f"DEFAULT_MODEL '{cls.DEFAULT_MODEL}' not in ALLOWED_MODELS for vendor '{cls.DEFAULT_VENDOR}'"
             )
+
+        # Validate fallback models are in ALLOWED_MODELS
+        for fallback_model in cls.FALLBACK_MODELS:
+            found = any(
+                fallback_model in models
+                for models in cls.ALLOWED_MODELS.values()
+            )
+            if not found:
+                raise ValueError(
+                    f"FALLBACK_MODELS contains '{fallback_model}' which is not in any vendor's ALLOWED_MODELS list. "
+                    f"Add it to ALLOWED_MODELS or remove it from FALLBACK_MODELS."
+                )
 
         # Validate temperature constraints
         if cls.MIN_TEMPERATURE > cls.MAX_TEMPERATURE:
