@@ -1,7 +1,9 @@
 """Miner implementation - submits prompts to validators."""
 
 import argparse
+import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -14,6 +16,11 @@ from aurelius.miner.errors import (
     create_error,
 )
 from aurelius.miner.health import ValidatorHealthChecker
+from aurelius.miner.registration import (
+    list_registrations,
+    register_for_experiment,
+    withdraw_from_experiment,
+)
 from aurelius.miner.retry import RetryConfig, RetryHandler
 from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.protocol import PromptSynapse
@@ -163,6 +170,7 @@ def send_prompt(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
+    experiment_id: str | None = None,
 ) -> str:
     """
     Send a prompt to a validator and return the response.
@@ -276,7 +284,11 @@ def send_prompt(
         presence_penalty=presence_penalty,
         min_chars=min_chars,
         max_chars=max_chars,
+        experiment_id=experiment_id,
     )
+
+    if experiment_id:
+        bt.logging.info(f"Experiment: {experiment_id}")
 
     # Determine target axon based on mode
     target_axon = None
@@ -512,6 +524,7 @@ def send_prompt_multi(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
+    experiment_id: str | None = None,
 ) -> dict[int, ValidatorQueryResult]:
     """
     Send a prompt to multiple validators in parallel.
@@ -682,7 +695,11 @@ def send_prompt_multi(
         presence_penalty=presence_penalty,
         min_chars=min_chars,
         max_chars=max_chars,
+        experiment_id=experiment_id,
     )
+
+    if experiment_id:
+        bt.logging.info(f"Experiment: {experiment_id}")
 
     # Define the query operation for retry
     def do_query():
@@ -886,6 +903,125 @@ def display_multi_results(
         print("=" * 60 + "\n")
 
 
+def _handle_experiment_commands(args, use_colors: bool) -> None:
+    """Handle experiment registration CLI commands (T063).
+
+    Args:
+        args: Parsed command-line arguments
+        use_colors: Whether to use colored output
+    """
+    # ANSI color codes
+    GREEN = "\033[92m" if use_colors else ""
+    RED = "\033[91m" if use_colors else ""
+    CYAN = "\033[96m" if use_colors else ""
+    BOLD = "\033[1m" if use_colors else ""
+    RESET = "\033[0m" if use_colors else ""
+
+    # Setup logging and config
+    Config.setup_logging()
+    Config.apply_network_defaults()
+
+    # Detect wallet
+    try:
+        Config.detect_and_set_wallet(role="miner")
+    except ConfigurationError as e:
+        print(f"{RED}Error: Could not detect wallet: {e}{RESET}")
+        sys.exit(1)
+
+    # Initialize wallet
+    try:
+        wallet = bt.Wallet(name=Config.MINER_WALLET_NAME, hotkey=Config.MINER_HOTKEY)
+    except Exception as e:
+        print(f"{RED}Error: Could not initialize wallet: {e}{RESET}")
+        sys.exit(1)
+
+    print(f"{CYAN}Using wallet: {Config.MINER_WALLET_NAME}/{Config.MINER_HOTKEY}{RESET}")
+    print(f"{CYAN}Hotkey: {wallet.hotkey.ss58_address}{RESET}\n")
+
+    # Handle registration
+    if args.register_experiment:
+        experiment_id = args.register_experiment
+        print(f"Registering for experiment: {BOLD}{experiment_id}{RESET}...")
+
+        result = register_for_experiment(wallet, experiment_id)
+
+        if result.success:
+            print(f"\n{GREEN}✓ Successfully registered for '{experiment_id}'{RESET}")
+            if result.status:
+                print(f"  Status: {result.status}")
+            if result.registered_at:
+                print(f"  Registered at: {result.registered_at}")
+            if result.message:
+                print(f"  {result.message}")
+        else:
+            print(f"\n{RED}✗ Registration failed{RESET}")
+            if result.error:
+                print(f"  Error: {result.error}")
+
+    # Handle withdrawal
+    elif args.withdraw_experiment:
+        experiment_id = args.withdraw_experiment
+        print(f"Withdrawing from experiment: {BOLD}{experiment_id}{RESET}...")
+
+        result = withdraw_from_experiment(wallet, experiment_id)
+
+        if result.success:
+            print(f"\n{GREEN}✓ Successfully withdrawn from '{experiment_id}'{RESET}")
+            if result.status:
+                print(f"  Status: {result.status}")
+            if result.withdrawn_at:
+                print(f"  Withdrawn at: {result.withdrawn_at}")
+            if result.message:
+                print(f"  {result.message}")
+        else:
+            print(f"\n{RED}✗ Withdrawal failed{RESET}")
+            if result.error:
+                print(f"  Error: {result.error}")
+
+    # Handle list registrations
+    elif args.list_registrations:
+        print(f"Fetching experiment registrations...")
+
+        result = list_registrations(wallet)
+
+        if result.error:
+            print(f"\n{RED}✗ Failed to fetch registrations{RESET}")
+            print(f"  Error: {result.error}")
+        else:
+            registrations = result.registrations
+
+            if not registrations:
+                print(f"\n{CYAN}No experiment registrations found.{RESET}")
+                print("  All miners are automatically registered for the 'prompt' experiment.")
+            else:
+                print(f"\n{BOLD}Experiment Registrations:{RESET}")
+                print("-" * 50)
+
+                for reg in registrations:
+                    exp_id = reg.get("experiment_id", "unknown")
+                    status = reg.get("status", "unknown")
+                    registered_at = reg.get("registered_at", "")
+
+                    # Color status
+                    if status == "active":
+                        status_str = f"{GREEN}{status}{RESET}"
+                    elif status == "withdrawn":
+                        status_str = f"{RED}{status}{RESET}"
+                    else:
+                        status_str = status
+
+                    print(f"  {BOLD}{exp_id}{RESET}")
+                    print(f"    Status: {status_str}")
+                    if registered_at:
+                        print(f"    Registered: {registered_at}")
+                    if reg.get("withdrawn_at"):
+                        print(f"    Withdrawn: {reg.get('withdrawn_at')}")
+                    print()
+
+                print("-" * 50)
+                print(f"Total: {len(registrations)} registration(s)")
+
+
 def main():
     """Main entry point for the miner."""
     parser = argparse.ArgumentParser(
@@ -904,9 +1040,24 @@ Examples:
 
   # Force single validator mode with default UID 1
   python miner.py --prompt "test prompt" --single
+
+Experiment Registration:
+  # Register for an experiment
+  python miner.py --register-experiment jailbreak-v1
+
+  # Withdraw from an experiment
+  python miner.py --withdraw-experiment jailbreak-v1
+
+  # List all your experiment registrations
+  python miner.py --list-registrations
 """,
     )
-    parser.add_argument("--prompt", type=str, required=True, help="The prompt to send to the validator")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        required=False,
+        help="The prompt to send to the validator (required unless using experiment commands)",
+    )
 
     # Validator selection arguments
     parser.add_argument(
@@ -933,6 +1084,7 @@ Examples:
         help=f"Minimum validator stake requirement (default: {Config.MINER_MIN_VALIDATOR_STAKE})",
     )
     parser.add_argument("--netuid", type=int, default=None, help=f"Override the netuid (default: {Config.BT_NETUID})")
+    parser.add_argument("--experiment", type=str, default=None, help="Target experiment ID (e.g., 'moral-reasoning')")
 
     # Model specification arguments
     parser.add_argument("--vendor", type=str, default=None, help="AI vendor to use (e.g., 'openai', 'anthropic')")
@@ -968,6 +1120,26 @@ Examples:
         help="Disable colored output",
     )
 
+    # Experiment registration arguments (T063)
+    experiment_group = parser.add_argument_group("experiment registration")
+    experiment_group.add_argument(
+        "--register-experiment",
+        type=str,
+        metavar="EXPERIMENT_ID",
+        help="Register for an experiment (e.g., 'jailbreak-v1')",
+    )
+    experiment_group.add_argument(
+        "--withdraw-experiment",
+        type=str,
+        metavar="EXPERIMENT_ID",
+        help="Withdraw from an experiment",
+    )
+    experiment_group.add_argument(
+        "--list-registrations",
+        action="store_true",
+        help="List all experiment registrations for this miner",
+    )
+
     args = parser.parse_args()
 
     # Override netuid if provided
@@ -975,6 +1147,25 @@ Examples:
         Config.BT_NETUID = args.netuid
 
     use_colors = not args.no_color
+
+    # Setup graceful shutdown
+    shutdown_event = threading.Event()
+
+    def signal_handler(signum, frame):
+        bt.logging.info(f"Received signal {signum}, shutting down...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Handle experiment registration commands (T063)
+    if args.register_experiment or args.withdraw_experiment or args.list_registrations:
+        _handle_experiment_commands(args, use_colors)
+        return
+
+    # Validate prompt is provided for sending prompts
+    if not args.prompt:
+        parser.error("--prompt is required when sending prompts to validators")
 
     # Determine mode: single validator or multi-validator
     # Use single mode if: --validator-uid specified, --single flag, or MINER_MULTI_VALIDATOR=false
@@ -1002,6 +1193,7 @@ Examples:
             max_retries=args.retries,
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
+            experiment_id=args.experiment,
         )
     else:
         # Multi-validator mode (default when MINER_MULTI_VALIDATOR=true)
@@ -1021,6 +1213,7 @@ Examples:
             timeout=args.timeout,
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
+            experiment_id=args.experiment,
         )
         display_multi_results(results, use_colors=use_colors)
 

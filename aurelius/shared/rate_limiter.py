@@ -1,5 +1,7 @@
 """Rate limiting for validator request management."""
 
+import json
+import os
 import time
 from dataclasses import dataclass
 from threading import Lock
@@ -260,6 +262,44 @@ class PerMinerRateLimiter:
                 count = len(self.miner_requests[hotkey])
                 bt.logging.info(f"📥 Request recorded for miner {hotkey[:16]}... ({count}/{self.config.max_requests})")
 
+    def save_state(self, filepath: str) -> None:
+        """Persist rate limiter state to disk."""
+        with self.lock:
+            current_time = time.time()
+            window_seconds = self.config.window_hours * 3600
+            cutoff = current_time - window_seconds
+            state: dict = {}
+            for hotkey, requests in self.miner_requests.items():
+                recent = [r.timestamp for r in requests if r.timestamp > cutoff]
+                if recent:
+                    state[hotkey] = recent
+            try:
+                tmp_path = filepath + ".tmp"
+                with open(tmp_path, 'w') as f:
+                    json.dump({"saved_at": current_time, "requests": state}, f)
+                os.replace(tmp_path, filepath)
+            except Exception as e:
+                bt.logging.warning(f"Failed to save rate limiter state: {e}")
+
+    def load_state(self, filepath: str) -> None:
+        """Restore rate limiter state from disk."""
+        try:
+            with open(filepath, 'r') as f:
+                data = json.load(f)
+            current_time = time.time()
+            window_seconds = self.config.window_hours * 3600
+            cutoff = current_time - window_seconds
+            with self.lock:
+                for hotkey, timestamps in data.get("requests", {}).items():
+                    recent = [RequestRecord(timestamp=t, hotkey=hotkey) for t in timestamps if t > cutoff]
+                    if recent:
+                        self.miner_requests[hotkey] = recent
+            bt.logging.info(f"Rate limiter: restored state ({len(self.miner_requests)} miners)")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            bt.logging.warning(f"Failed to load rate limiter state: {e}")
+
     def get_active_miners_count(self) -> int:
         """
         Get the number of miners with requests in the current window.
@@ -307,4 +347,185 @@ class PerMinerRateLimiter:
                 "total_requests_in_window": total_requests,
                 "max_requests_per_miner": self.config.max_requests,
                 "window_hours": self.config.window_hours,
+            }
+
+
+@dataclass
+class ExperimentRateLimitConfig:
+    """Configuration for per-experiment rate limiting (T072).
+
+    Attributes:
+        max_requests: Maximum requests allowed per miner in the window
+        window_seconds: Time window in seconds
+    """
+
+    max_requests: int
+    window_seconds: float
+
+
+class PerExperimentRateLimiter:
+    """Rate limiter with per (hotkey, experiment_id) tracking (T072).
+
+    This extends PerMinerRateLimiter with an experiment_id dimension,
+    allowing different experiments to have independent rate limits
+    for each miner.
+
+    Features:
+    - Isolation between experiments (hitting limit on exp-A doesn't affect exp-B)
+    - Per-miner limits within each experiment
+    - Configurable limits per experiment
+    - Default limits for unconfigured experiments
+    """
+
+    # Default limit if experiment not configured
+    DEFAULT_MAX_REQUESTS = 1000
+    DEFAULT_WINDOW_SECONDS = 3600  # 1 hour
+
+    def __init__(self):
+        """Initialize per-experiment rate limiter."""
+        # {experiment_id: {hotkey: [timestamp, ...]}}
+        self._windows: dict[str, dict[str, list[float]]] = {}
+        # {experiment_id: ExperimentRateLimitConfig}
+        self._limits: dict[str, ExperimentRateLimitConfig] = {}
+        self._lock = Lock()
+
+        bt.logging.debug("Per-experiment rate limiter initialized")
+
+    def set_experiment_limit(
+        self,
+        experiment_id: str,
+        max_requests: int,
+        window_seconds: float,
+    ) -> None:
+        """Set rate limit configuration for an experiment.
+
+        Args:
+            experiment_id: The experiment ID
+            max_requests: Maximum requests per miner in window
+            window_seconds: Time window in seconds
+        """
+        with self._lock:
+            self._limits[experiment_id] = ExperimentRateLimitConfig(
+                max_requests=max_requests,
+                window_seconds=window_seconds,
+            )
+            bt.logging.debug(
+                f"Set rate limit for '{experiment_id}': "
+                f"{max_requests} requests per {window_seconds}s"
+            )
+
+    def _get_limit(self, experiment_id: str) -> ExperimentRateLimitConfig:
+        """Get rate limit config for an experiment (uses default if not set)."""
+        return self._limits.get(
+            experiment_id,
+            ExperimentRateLimitConfig(
+                max_requests=self.DEFAULT_MAX_REQUESTS,
+                window_seconds=self.DEFAULT_WINDOW_SECONDS,
+            ),
+        )
+
+    def _clean_old_requests(
+        self,
+        experiment_id: str,
+        hotkey: str,
+        current_time: float,
+        window_seconds: float,
+    ) -> None:
+        """Remove expired timestamps for a (hotkey, experiment) pair."""
+        if experiment_id not in self._windows:
+            return
+        if hotkey not in self._windows[experiment_id]:
+            return
+
+        cutoff = current_time - window_seconds
+        self._windows[experiment_id][hotkey] = [
+            t for t in self._windows[experiment_id][hotkey] if t > cutoff
+        ]
+
+    def check(self, hotkey: str, experiment_id: str) -> bool:
+        """Check if a request is allowed and record it if so.
+
+        This is a convenience method that combines check and record.
+
+        Args:
+            hotkey: The miner's hotkey
+            experiment_id: The experiment ID
+
+        Returns:
+            True if request is allowed, False if rate limited
+        """
+        current_time = time.time()
+        limit = self._get_limit(experiment_id)
+
+        with self._lock:
+            # Initialize structures
+            if experiment_id not in self._windows:
+                self._windows[experiment_id] = {}
+            if hotkey not in self._windows[experiment_id]:
+                self._windows[experiment_id][hotkey] = []
+
+            # Clean old requests
+            self._clean_old_requests(
+                experiment_id, hotkey, current_time, limit.window_seconds
+            )
+
+            # Check limit
+            timestamps = self._windows[experiment_id][hotkey]
+            if len(timestamps) >= limit.max_requests:
+                bt.logging.debug(
+                    f"Rate limited: {hotkey[:16]}... on '{experiment_id}' "
+                    f"({len(timestamps)}/{limit.max_requests})"
+                )
+                return False
+
+            # Record this request
+            timestamps.append(current_time)
+            return True
+
+    def get_experiment_stats(self, experiment_id: str) -> dict:
+        """Get statistics for a specific experiment.
+
+        Args:
+            experiment_id: The experiment ID
+
+        Returns:
+            Dictionary with tracked_miners and total_requests
+        """
+        with self._lock:
+            if experiment_id not in self._windows:
+                return {"tracked_miners": 0, "total_requests": 0}
+
+            exp_data = self._windows[experiment_id]
+            current_time = time.time()
+            limit = self._get_limit(experiment_id)
+
+            # Count active miners and requests
+            active_miners = 0
+            total_requests = 0
+
+            for hotkey, timestamps in exp_data.items():
+                # Filter to current window
+                cutoff = current_time - limit.window_seconds
+                recent = [t for t in timestamps if t > cutoff]
+                if recent:
+                    active_miners += 1
+                    total_requests += len(recent)
+
+            return {
+                "tracked_miners": active_miners,
+                "total_requests": total_requests,
+                "max_requests": limit.max_requests,
+                "window_seconds": limit.window_seconds,
+            }
+
+    def get_all_stats(self) -> dict:
+        """Get statistics for all experiments.
+
+        Returns:
+            Dictionary mapping experiment_id to stats
+        """
+        with self._lock:
+            return {
+                exp_id: self.get_experiment_stats(exp_id)
+                for exp_id in self._windows
             }

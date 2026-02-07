@@ -2,6 +2,7 @@
 
 import json
 import os
+import threading
 import time
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -93,6 +94,7 @@ class ScoringSystem:
         self.window_blocks = window_blocks
         self.history_retention_blocks = history_retention_blocks
 
+        self._lock = threading.Lock()
         self.miner_scores: dict[str, MinerScore] = {}
         self.score_history: dict[str, list] = defaultdict(list)  # For tracking over time
 
@@ -124,6 +126,18 @@ class ScoringSystem:
         Returns:
             Updated MinerScore for this miner
         """
+        with self._lock:
+            return self._record_submission_unlocked(hotkey, danger_score, accepted, block, novelty_score)
+
+    def _record_submission_unlocked(
+        self,
+        hotkey: str,
+        danger_score: float,
+        accepted: bool,
+        block: int | None = None,
+        novelty_score: float | None = None,
+    ) -> MinerScore:
+        """Internal unlocked implementation of record_submission."""
         # Initialize if first submission from this miner
         if hotkey not in self.miner_scores:
             self.miner_scores[hotkey] = MinerScore(hotkey=hotkey)
@@ -156,6 +170,11 @@ class ScoringSystem:
                 "novelty_score": novelty_score,
             }
         )
+
+        # Enforce per-miner cap to prevent unbounded memory growth
+        max_per_miner = Config.MAX_SUBMISSIONS_PER_WINDOW * 2
+        if len(self.score_history[hotkey]) > max_per_miner:
+            self.score_history[hotkey] = self.score_history[hotkey][-max_per_miner:]
 
         # Prune old submissions if block height is available
         if block is not None:
@@ -192,6 +211,11 @@ class ScoringSystem:
             hotkey: Miner's hotkey
             novelty_score: Novelty score from central API (0-1, 1=completely novel)
         """
+        with self._lock:
+            self._update_novelty_unlocked(hotkey, novelty_score)
+
+    def _update_novelty_unlocked(self, hotkey: str, novelty_score: float) -> None:
+        """Internal unlocked implementation of update_novelty."""
         if hotkey not in self.miner_scores:
             bt.logging.warning(f"Cannot update novelty: no score record for {hotkey[:8]}...")
             return
@@ -239,7 +263,8 @@ class ScoringSystem:
         Returns:
             Dictionary mapping hotkeys to MinerScores
         """
-        return self.miner_scores.copy()
+        with self._lock:
+            return self.miner_scores.copy()
 
     def calculate_weights(
         self,
@@ -358,15 +383,17 @@ class ScoringSystem:
         Args:
             hotkey: Miner's hotkey
         """
-        if hotkey in self.miner_scores:
-            del self.miner_scores[hotkey]
-            bt.logging.info(f"Reset scores for miner {hotkey[:8]}...")
+        with self._lock:
+            if hotkey in self.miner_scores:
+                del self.miner_scores[hotkey]
+                bt.logging.info(f"Reset scores for miner {hotkey[:8]}...")
 
     def reset_all_scores(self) -> None:
         """Reset all miner scores."""
-        self.miner_scores.clear()
-        self.score_history.clear()
-        bt.logging.info("Reset all miner scores")
+        with self._lock:
+            self.miner_scores.clear()
+            self.score_history.clear()
+            bt.logging.info("Reset all miner scores")
 
     def calculate_weights_windowed(
         self,
@@ -394,6 +421,19 @@ class ScoringSystem:
         Returns:
             List of weights (same order as uids), normalized to sum to 1
         """
+        with self._lock:
+            return self._calculate_weights_windowed_unlocked(
+                uids, hotkeys, current_block, min_submissions
+            )
+
+    def _calculate_weights_windowed_unlocked(
+        self,
+        uids: list,
+        hotkeys: list,
+        current_block: int,
+        min_submissions: int = 1,
+    ) -> list:
+        """Internal unlocked implementation of calculate_weights_windowed."""
         if len(uids) != len(hotkeys):
             bt.logging.error("UIDs and hotkeys lists must have same length")
             return [0.0] * len(uids)
@@ -472,8 +512,12 @@ class ScoringSystem:
                     weights.append(0.0)
                     continue
             else:
-                # No novelty scores available, assume fully novel (no penalty)
-                avg_novelty = 1.0
+                # No novelty scores available — fail closed (consistent with moderation fail-closed)
+                # Miners are not penalized permanently; scores update when novelty API returns
+                avg_novelty = 0.0
+                bt.logging.warning(
+                    f"Miner {hotkey[:8]}... has no novelty scores — defaulting to 0.0 (fail-closed)"
+                )
 
             # Calculate final weight using the formula:
             # score = danger_sum × severity_avg × novelty_avg^NOVELTY_WEIGHT
@@ -620,7 +664,7 @@ class ScoringSystem:
             bt.logging.debug(f"Pruned {pruned_count} old submissions (before block {cutoff_block})")
 
     def _save(self) -> None:
-        """Save scores and history to disk."""
+        """Save scores and history to disk using atomic write."""
         try:
             data = {
                 "scores": {hotkey: asdict(score) for hotkey, score in self.miner_scores.items()},
@@ -632,8 +676,10 @@ class ScoringSystem:
                 },
             }
             Path(self.persistence_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(self.persistence_path, "w") as f:
+            tmp_path = self.persistence_path + ".tmp"
+            with open(tmp_path, "w") as f:
                 json.dump(data, f, indent=2)
+            os.replace(tmp_path, self.persistence_path)
         except Exception as e:
             bt.logging.error(f"Error saving scoring data: {e}")
 

@@ -38,9 +38,10 @@ VALIDATOR_HOTKEY=your-hotkey-name
 
 1. [Validator Guide](#validator-guide)
 2. [Mining](#mining)
-3. [Configuration](#configuration)
-4. [Troubleshooting](#troubleshooting)
-5. [Security](#security)
+3. [Multi-Experiment Framework](#multi-experiment-framework)
+4. [Configuration](#configuration)
+5. [Troubleshooting](#troubleshooting)
+6. [Security](#security)
 
 ---
 
@@ -365,6 +366,55 @@ Miners are scored based on:
 Weight formula: `danger_sum × severity_avg × novelty_multiplier`
 
 Top 3 miners per window receive rewards, split by contribution.
+
+---
+
+## Multi-Experiment Framework
+
+The subnet supports multiple concurrent experiments with independent scoring and reward allocation.
+
+### For Miners
+
+**Default behavior (no changes needed):** Submissions go to the "prompt" experiment.
+
+**Targeting a specific experiment:**
+```python
+synapse = PromptSynapse(
+    prompt="Your prompt",
+    experiment_id="jailbreak-v1"  # Target experiment
+)
+```
+
+**Experiment registration:**
+```bash
+# Register for an experiment (required for non-default experiments)
+python miner.py --register-experiment jailbreak-v1
+
+# List your registrations
+python miner.py --list-registrations
+
+# Withdraw from an experiment
+python miner.py --withdraw-experiment jailbreak-v1
+```
+
+### For Validators
+
+Experiments sync automatically from the central API every 5 minutes. No configuration needed.
+
+**Optional environment variables:**
+```bash
+EXPERIMENT_SYNC_INTERVAL=300              # Sync interval in seconds
+EXPERIMENT_CACHE_PATH=./experiments_cache.json  # Cache file path
+```
+
+### Reward Allocation
+
+Rewards are distributed across experiments based on configured allocation percentages:
+- Default: 85% to "prompt" experiment
+- Additional experiments share remaining allocation
+- Unused allocation redistributes proportionally
+
+See `specs/001-experiment-framework/quickstart.md` for detailed documentation.
 
 ---
 

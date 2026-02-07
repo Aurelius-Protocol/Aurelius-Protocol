@@ -1,6 +1,7 @@
 """Pre-flight health checks for validator connectivity."""
 
 import socket
+import threading
 import time
 from dataclasses import dataclass
 
@@ -219,3 +220,203 @@ class ValidatorHealthChecker:
             10051: "Network is unreachable",
         }
         return error_messages.get(errno, f"Socket error {errno}")
+
+
+@dataclass
+class ValidatorStatus:
+    """Status of a validator in the cache."""
+
+    uid: int
+    unhealthy_until: float  # Unix timestamp when validator can be retried
+    failure_count: int = 1
+    last_error: str | None = None
+
+
+class ValidatorStatusCache:
+    """
+    Cache validator health status to avoid repeated failed connections.
+
+    When a validator connection fails, it's marked as unhealthy for a cooldown
+    period. Subsequent requests check this cache first to skip known-bad validators.
+
+    Uses exponential backoff for repeated failures:
+    - 1st failure: 60s cooldown
+    - 2nd failure: 120s cooldown
+    - 3rd+ failure: 300s cooldown (max)
+    """
+
+    # Cooldown durations for exponential backoff (seconds)
+    COOLDOWN_BASE = 60.0
+    COOLDOWN_MULTIPLIER = 2.0
+    COOLDOWN_MAX = 300.0  # 5 minutes max
+
+    def __init__(self):
+        """Initialize the validator status cache."""
+        self._unhealthy: dict[int, ValidatorStatus] = {}
+        self._lock = threading.RLock()
+
+    def mark_unhealthy(
+        self,
+        uid: int,
+        error: str | None = None,
+    ) -> float:
+        """
+        Mark a validator as unhealthy.
+
+        Uses exponential backoff for repeated failures.
+
+        Args:
+            uid: Validator UID
+            error: Optional error message for logging
+
+        Returns:
+            The cooldown duration in seconds
+        """
+        with self._lock:
+            now = time.time()
+
+            # Get existing status if any
+            existing = self._unhealthy.get(uid)
+
+            if existing:
+                # Increment failure count for exponential backoff
+                failure_count = existing.failure_count + 1
+            else:
+                failure_count = 1
+
+            # Calculate cooldown with exponential backoff
+            cooldown = min(
+                self.COOLDOWN_BASE * (self.COOLDOWN_MULTIPLIER ** (failure_count - 1)),
+                self.COOLDOWN_MAX,
+            )
+
+            self._unhealthy[uid] = ValidatorStatus(
+                uid=uid,
+                unhealthy_until=now + cooldown,
+                failure_count=failure_count,
+                last_error=error,
+            )
+
+            return cooldown
+
+    def mark_healthy(self, uid: int) -> None:
+        """
+        Mark a validator as healthy, removing it from the unhealthy cache.
+
+        Args:
+            uid: Validator UID
+        """
+        with self._lock:
+            if uid in self._unhealthy:
+                del self._unhealthy[uid]
+
+    def is_available(self, uid: int) -> bool:
+        """
+        Check if a validator is available (not in cooldown).
+
+        Args:
+            uid: Validator UID
+
+        Returns:
+            True if validator is available, False if in cooldown
+        """
+        with self._lock:
+            status = self._unhealthy.get(uid)
+            if status is None:
+                return True
+
+            now = time.time()
+            if now >= status.unhealthy_until:
+                # Cooldown expired, allow retry
+                # Don't remove from cache yet - let success remove it
+                return True
+
+            return False
+
+    def get_cooldown_remaining(self, uid: int) -> float:
+        """
+        Get remaining cooldown time for a validator.
+
+        Args:
+            uid: Validator UID
+
+        Returns:
+            Remaining cooldown seconds, or 0 if not in cooldown
+        """
+        with self._lock:
+            status = self._unhealthy.get(uid)
+            if status is None:
+                return 0.0
+
+            remaining = status.unhealthy_until - time.time()
+            return max(0.0, remaining)
+
+    def get_status(self, uid: int) -> ValidatorStatus | None:
+        """
+        Get the status of a specific validator.
+
+        Args:
+            uid: Validator UID
+
+        Returns:
+            ValidatorStatus if in cache, None otherwise
+        """
+        with self._lock:
+            return self._unhealthy.get(uid)
+
+    def get_unhealthy_count(self) -> int:
+        """Get count of validators currently in cooldown."""
+        with self._lock:
+            now = time.time()
+            return sum(
+                1 for status in self._unhealthy.values()
+                if status.unhealthy_until > now
+            )
+
+    def get_all_unhealthy(self) -> list[ValidatorStatus]:
+        """
+        Get all validators currently in cooldown.
+
+        Returns:
+            List of ValidatorStatus for unhealthy validators
+        """
+        with self._lock:
+            now = time.time()
+            return [
+                status for status in self._unhealthy.values()
+                if status.unhealthy_until > now
+            ]
+
+    def clear(self) -> None:
+        """Clear all cached statuses."""
+        with self._lock:
+            self._unhealthy.clear()
+
+    def cleanup_expired(self) -> int:
+        """
+        Remove expired entries from the cache.
+
+        Returns:
+            Number of entries removed
+        """
+        with self._lock:
+            now = time.time()
+            expired = [
+                uid for uid, status in self._unhealthy.items()
+                if status.unhealthy_until <= now
+            ]
+            for uid in expired:
+                del self._unhealthy[uid]
+            return len(expired)
+
+
+# Global singleton instance
+_validator_status_cache: ValidatorStatusCache | None = None
+
+
+def get_validator_status_cache() -> ValidatorStatusCache:
+    """Get the global validator status cache singleton."""
+    global _validator_status_cache
+    if _validator_status_cache is None:
+        _validator_status_cache = ValidatorStatusCache()
+    return _validator_status_cache

@@ -9,6 +9,7 @@ from __future__ import annotations
 # Increment when making breaking changes to the telemetry protocol
 PROTOCOL_VERSION = "1.0.0"
 
+import hashlib
 import json
 import threading
 import time
@@ -25,6 +26,8 @@ from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.sdk._logs import ReadableLogRecord
 from opentelemetry.sdk._logs.export import LogExporter, LogExportResult
 from opentelemetry.trace import SpanKind, StatusCode
+
+from aurelius.shared.telemetry.http_client import get_telemetry_session, get_circuit_breaker
 
 
 class AureliusSpanExporter(SpanExporter):
@@ -252,6 +255,24 @@ class AureliusSpanExporter(SpanExporter):
         if not spans:
             return True
 
+        # Check circuit breaker before attempting request
+        circuit_breaker = get_circuit_breaker()
+        if not circuit_breaker.allow_request():
+            bt.logging.debug(f"Circuit breaker open, saving {len(spans)} spans locally")
+            with self._lock:
+                self.spans_failed += len(spans)
+            payload = {
+                "spans": [self._span_to_dict(span) for span in spans],
+                "validator_hotkey": self.validator_hotkey,
+                "validator_uid": self.validator_uid,
+                "netuid": self.netuid,
+                "network": self.network,
+                "batch_id": str(uuid.uuid4()),
+            }
+            if self.local_backup_path:
+                self._save_local_backup(payload)
+            return False
+
         payload = {
             "spans": [self._span_to_dict(span) for span in spans],
             "validator_hotkey": self.validator_hotkey,
@@ -270,17 +291,24 @@ class AureliusSpanExporter(SpanExporter):
         # Add signature authentication (required by API)
         if self.wallet and self.validator_hotkey:
             timestamp = int(time.time())
-            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}"
+            # Include body hash to bind signature to payload (prevents replay with different body)
+            body_json = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+            body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]
+            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}:{body_hash}"
             signature = self.wallet.hotkey.sign(message.encode()).hex()
             headers.update({
                 "X-Validator-Hotkey": self.validator_hotkey,
                 "X-Validator-Signature": signature,
                 "X-Signature-Timestamp": str(timestamp),
+                "X-Body-Hash": body_hash,
             })
+
+        # Use shared session with connection pooling
+        session = get_telemetry_session()
 
         for attempt in range(self.max_retries):
             try:
-                response = requests.post(
+                response = session.post(
                     self.endpoint,
                     json=payload,
                     headers=headers,
@@ -288,6 +316,7 @@ class AureliusSpanExporter(SpanExporter):
                 )
 
                 if response.status_code in (200, 201):
+                    circuit_breaker.record_success()
                     with self._lock:
                         self.spans_exported += len(spans)
                         self.batches_sent += 1
@@ -296,6 +325,7 @@ class AureliusSpanExporter(SpanExporter):
                 elif response.status_code == 207:
                     # Partial success - some items may have failed validation
                     # Don't retry since data that could be stored was stored
+                    circuit_breaker.record_success()
                     try:
                         result = response.json()
                         stored = result.get('spans_stored', 0)
@@ -313,9 +343,11 @@ class AureliusSpanExporter(SpanExporter):
                     return True
                 else:
                     bt.logging.warning(f"Span export failed: HTTP {response.status_code}")
+                    circuit_breaker.record_failure()
 
             except requests.RequestException as e:
                 bt.logging.warning(f"Span export attempt {attempt + 1} failed: {e}")
+                circuit_breaker.record_failure()
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
 
@@ -345,57 +377,82 @@ class AureliusSpanExporter(SpanExporter):
             bt.logging.error(f"Failed to save span backup: {e}")
 
     def _send_heartbeat(self) -> bool:
-        """Send a heartbeat to the telemetry registry API."""
-        import hashlib
+        """Send a heartbeat to the telemetry registry API with retry logic."""
 
         if not self.wallet or not self.validator_hotkey:
             return False
 
-        try:
-            from aurelius.shared.config import Config
+        # Check circuit breaker before attempting heartbeat
+        circuit_breaker = get_circuit_breaker()
+        if not circuit_breaker.allow_request():
+            bt.logging.debug("Circuit breaker open, skipping heartbeat")
+            return False
 
-            # Fix 3: Use explicit registry endpoint or fall back to Config
-            if self.registry_endpoint:
-                heartbeat_endpoint = f"{self.registry_endpoint}/heartbeat"
-            else:
-                heartbeat_endpoint = f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/heartbeat"
+        from aurelius.shared.config import Config
 
-            # A13: Include body hash in signature message to prevent body tampering
-            body = {"hotkey": self.validator_hotkey}
-            body_json = json.dumps(body, separators=(',', ':'), sort_keys=True)
-            body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]  # Use first 16 chars
+        # Fix 3: Use explicit registry endpoint or fall back to Config
+        if self.registry_endpoint:
+            heartbeat_endpoint = f"{self.registry_endpoint}/heartbeat"
+        else:
+            heartbeat_endpoint = f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/heartbeat"
 
-            # Create signed message with body hash
-            timestamp = int(time.time())
-            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}:{body_hash}"
-            signature = self.wallet.hotkey.sign(message.encode()).hex()
+        # Use shared session with connection pooling
+        session = get_telemetry_session()
+        max_retries = 3
 
-            response = requests.post(
-                heartbeat_endpoint,
-                json=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Validator-Hotkey": self.validator_hotkey,
-                    "X-Validator-Signature": signature,
-                    "X-Signature-Timestamp": str(timestamp),
-                    "X-Body-Hash": body_hash,  # A13: Send body hash for server verification
-                    "X-Protocol-Version": PROTOCOL_VERSION,
-                },
-                timeout=5,
-            )
+        for attempt in range(max_retries):
+            try:
+                # A13: Include body hash in signature message to prevent body tampering
+                body = {"hotkey": self.validator_hotkey}
+                body_json = json.dumps(body, separators=(',', ':'), sort_keys=True)
+                body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]  # Use first 16 chars
 
-            if response.status_code in (200, 201):
-                bt.logging.debug("Heartbeat sent successfully")
-                return True
-            else:
-                # Fix 8: Elevate heartbeat failures to warning level
-                bt.logging.warning(f"Heartbeat failed: HTTP {response.status_code} - {response.text[:200]}")
+                # Create signed message with body hash (fresh timestamp each attempt)
+                timestamp = int(time.time())
+                message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}:{body_hash}"
+                signature = self.wallet.hotkey.sign(message.encode()).hex()
+
+                response = session.post(
+                    heartbeat_endpoint,
+                    json=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Validator-Hotkey": self.validator_hotkey,
+                        "X-Validator-Signature": signature,
+                        "X-Signature-Timestamp": str(timestamp),
+                        "X-Body-Hash": body_hash,  # A13: Send body hash for server verification
+                        "X-Protocol-Version": PROTOCOL_VERSION,
+                    },
+                    timeout=5,
+                )
+
+                if response.status_code in (200, 201):
+                    circuit_breaker.record_success()
+                    bt.logging.debug("Heartbeat sent successfully")
+                    return True
+                else:
+                    # Fix 8: Elevate heartbeat failures to warning level
+                    bt.logging.warning(
+                        f"Heartbeat attempt {attempt + 1}/{max_retries} failed: "
+                        f"HTTP {response.status_code} - {response.text[:200]}"
+                    )
+                    circuit_breaker.record_failure()
+
+            except requests.RequestException as e:
+                bt.logging.warning(f"Heartbeat attempt {attempt + 1}/{max_retries} failed: {e}")
+                circuit_breaker.record_failure()
+
+            except Exception as e:
+                # Non-retryable error
+                bt.logging.warning(f"Heartbeat error: {e}")
                 return False
 
-        except Exception as e:
-            # Fix 8: Elevate heartbeat errors to warning level
-            bt.logging.warning(f"Heartbeat error: {e}")
-            return False
+            # Wait before retry (exponential backoff)
+            if attempt < max_retries - 1:
+                time.sleep(2 ** attempt)
+
+        bt.logging.warning(f"Heartbeat failed after {max_retries} attempts")
+        return False
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         """Export spans (called by OpenTelemetry SDK)."""
@@ -623,6 +680,27 @@ class AureliusLogExporter(LogExporter):
         if not logs:
             return True
 
+        # Check circuit breaker before attempting request
+        circuit_breaker = get_circuit_breaker()
+        if not circuit_breaker.allow_request():
+            bt.logging.debug(f"Circuit breaker open, saving {len(logs)} logs locally")
+            with self._lock:
+                self.logs_failed += len(logs)
+            # Convert and save locally
+            converted_logs = [self._log_to_dict(log) for log in logs]
+            valid_logs = [log for log in converted_logs if log is not None]
+            if valid_logs and self.local_backup_path:
+                payload = {
+                    "logs": valid_logs,
+                    "validator_hotkey": self.validator_hotkey,
+                    "validator_uid": self.validator_uid,
+                    "netuid": self.netuid,
+                    "network": self.network,
+                    "batch_id": str(uuid.uuid4()),
+                }
+                self._save_local_backup(payload)
+            return False
+
         # Convert logs and filter out None values (logs with empty bodies are skipped)
         converted_logs = [self._log_to_dict(log) for log in logs]
         valid_logs = [log for log in converted_logs if log is not None]
@@ -648,17 +726,24 @@ class AureliusLogExporter(LogExporter):
         # Add signature authentication (required by API)
         if self.wallet and self.validator_hotkey:
             timestamp = int(time.time())
-            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}"
+            # Include body hash to bind signature to payload (prevents replay with different body)
+            body_json = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+            body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]
+            message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}:{body_hash}"
             signature = self.wallet.hotkey.sign(message.encode()).hex()
             headers.update({
                 "X-Validator-Hotkey": self.validator_hotkey,
                 "X-Validator-Signature": signature,
                 "X-Signature-Timestamp": str(timestamp),
+                "X-Body-Hash": body_hash,
             })
+
+        # Use shared session with connection pooling
+        session = get_telemetry_session()
 
         for attempt in range(self.max_retries):
             try:
-                response = requests.post(
+                response = session.post(
                     self.endpoint,
                     json=payload,
                     headers=headers,
@@ -666,6 +751,7 @@ class AureliusLogExporter(LogExporter):
                 )
 
                 if response.status_code in (200, 201):
+                    circuit_breaker.record_success()
                     with self._lock:
                         self.logs_exported += len(logs)
                     bt.logging.debug(f"Exported {len(valid_logs)} logs (total: {self.logs_exported})")
@@ -673,6 +759,7 @@ class AureliusLogExporter(LogExporter):
                 elif response.status_code == 207:
                     # Partial success - some items may have failed validation
                     # Don't retry since data that could be stored was stored
+                    circuit_breaker.record_success()
                     try:
                         result = response.json()
                         stored = result.get('logs_stored', 0)
@@ -688,9 +775,11 @@ class AureliusLogExporter(LogExporter):
                     return True
                 else:
                     bt.logging.warning(f"Log export failed: HTTP {response.status_code} - {response.text[:200]}")
+                    circuit_breaker.record_failure()
 
             except requests.RequestException as e:
                 bt.logging.warning(f"Log export attempt {attempt + 1} failed: {e}")
+                circuit_breaker.record_failure()
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
 

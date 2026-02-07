@@ -35,6 +35,7 @@ class EmbeddingClient:
         self.model = EMBEDDING_MODEL
         self.dimensions = EMBEDDING_DIMENSIONS
         self.embeddings_url = OPENAI_EMBEDDINGS_URL
+        self._session = requests.Session()
         self._tracer = get_tracer("aurelius.embedding") if Config.TELEMETRY_ENABLED else None
 
         if self.api_key:
@@ -89,7 +90,7 @@ class EmbeddingClient:
     def _do_get_embedding(self, text: str) -> list[float] | None:
         """Internal method to perform the embedding API call."""
         try:
-            response = requests.post(
+            response = self._session.post(
                 self.embeddings_url,
                 json={
                     "model": self.model,
@@ -107,7 +108,7 @@ class EmbeddingClient:
                 data = response.json()
                 embedding = data["data"][0]["embedding"]
                 if len(embedding) != self.dimensions:
-                    bt.logging.warning(
+                    raise ValueError(
                         f"Embedding dimension mismatch: got {len(embedding)}, expected {self.dimensions}"
                     )
                 return embedding
@@ -145,7 +146,7 @@ class EmbeddingClient:
             return []
 
         try:
-            response = requests.post(
+            response = self._session.post(
                 self.embeddings_url,
                 json={
                     "model": self.model,

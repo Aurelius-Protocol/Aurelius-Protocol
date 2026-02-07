@@ -65,6 +65,17 @@ addopts = [
     "--cov=aurelius",
     "--cov-report=term-missing",
 ]
+markers = [
+    "e2e: mark test as end-to-end integration test",
+    "slow: mark test as slow (involves network operations)",
+    "requires_registration: mark test as requiring validator registration",
+    "requires_docker: mark test as requiring Docker services",
+    "stress: mark test as stress test (high load)",
+    "security: mark test as security-related",
+    "boundary: mark test as boundary/edge case test",
+    "onchain: tests that interact with real blockchain",
+    "requires_funding: tests that need funded wallets",
+]
 
 [tool.ruff]
 line-length = 120

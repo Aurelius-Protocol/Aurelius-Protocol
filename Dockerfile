@@ -48,6 +48,9 @@ COPY validator.py ./
 # Install the package with dependencies
 RUN pip install --no-cache-dir -e .
 
+# Install bittensor-cli for wallet management (btcli command)
+RUN pip install --no-cache-dir bittensor-cli
+
 # -----------------------------------------------------------------------------
 # Stage 2: Runtime - Minimal production image
 # -----------------------------------------------------------------------------

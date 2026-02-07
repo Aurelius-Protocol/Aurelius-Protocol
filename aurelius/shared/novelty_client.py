@@ -7,6 +7,7 @@ import bittensor as bt
 import requests
 from opentelemetry.trace import SpanKind
 
+from aurelius.shared.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, get_circuit_breaker
 from aurelius.shared.config import Config
 from aurelius.shared.telemetry.otel_setup import get_tracer
 
@@ -58,7 +59,19 @@ class NoveltyClient:
         """
         self.api_endpoint = api_endpoint or Config.NOVELTY_API_ENDPOINT
         self.timeout = timeout
+        self._session = requests.Session()
         self._tracer = get_tracer("aurelius.novelty") if Config.TELEMETRY_ENABLED else None
+
+        # Initialize circuit breaker for API resilience
+        self._circuit_breaker = get_circuit_breaker(
+            "novelty-api",
+            CircuitBreakerConfig(
+                failure_threshold=5,
+                recovery_timeout=60.0,
+                half_open_max_calls=1,
+                success_threshold=2,
+            ),
+        )
 
         if self.api_endpoint:
             bt.logging.info(f"Novelty client: API endpoint at {self.api_endpoint}")
@@ -74,14 +87,16 @@ class NoveltyClient:
         prompt: str,
         prompt_embedding: list[float] | None = None,
         include_similar_prompt: bool = False,
+        experiment_id: str = "prompt",
     ) -> NoveltyResult | None:
         """
-        Check novelty of a prompt against existing database.
+        Check novelty of a prompt against existing database (T084).
 
         Args:
             prompt: The prompt text to check
             prompt_embedding: Pre-computed embedding (384 dimensions). Required by API.
             include_similar_prompt: Whether to include similar prompt text in response
+            experiment_id: Experiment ID for per-experiment novelty pools (default: "prompt")
 
         Returns:
             NoveltyResult with novelty_score and related metrics, or None on error
@@ -105,9 +120,10 @@ class NoveltyClient:
                     "novelty.endpoint": self.api_endpoint,
                     "novelty.prompt_length": len(prompt),
                     "novelty.has_embedding": True,
+                    "novelty.experiment_id": experiment_id,
                 },
             ) as span:
-                result = self._do_check_novelty(prompt, prompt_embedding, include_similar_prompt)
+                result = self._do_check_novelty(prompt, prompt_embedding, include_similar_prompt, experiment_id)
                 duration_ms = (time.time() - start_time) * 1000
                 span.set_attribute("duration_ms", round(duration_ms, 2))
                 if result:
@@ -116,22 +132,32 @@ class NoveltyClient:
                     span.set_attribute("novelty.similar_count", result.similar_count)
                 return result
         else:
-            return self._do_check_novelty(prompt, prompt_embedding, include_similar_prompt)
+            return self._do_check_novelty(prompt, prompt_embedding, include_similar_prompt, experiment_id)
 
     def _do_check_novelty(
         self,
         prompt: str,
         prompt_embedding: list[float],
         include_similar_prompt: bool,
+        experiment_id: str = "prompt",
     ) -> NoveltyResult | None:
-        """Internal method to perform the novelty check API call."""
+        """Internal method to perform the novelty check API call (T084)."""
+        # Check circuit breaker first - fail fast if API is known to be down
+        if not self._circuit_breaker.can_execute():
+            bt.logging.debug(
+                f"Novelty circuit breaker OPEN - skipping check "
+                f"(retry in {self._circuit_breaker.get_time_until_retry():.1f}s)"
+            )
+            return None
+
         try:
-            response = requests.post(
+            response = self._session.post(
                 f"{self.api_endpoint}/check",
                 json={
                     "prompt": prompt,
                     "prompt_embedding": prompt_embedding,
                     "include_similar_prompt": include_similar_prompt,
+                    "experiment_id": experiment_id,  # T084: Per-experiment novelty pool
                 },
                 headers={"Content-Type": "application/json"},
                 timeout=self.timeout,
@@ -139,6 +165,8 @@ class NoveltyClient:
 
             if response.status_code == 200:
                 data = response.json()
+                # Record success with circuit breaker
+                self._circuit_breaker.record_success()
                 return NoveltyResult(
                     novelty_score=data.get("novelty_score", 1.0),
                     max_similarity=data.get("max_similarity", 0.0),
@@ -146,23 +174,31 @@ class NoveltyClient:
                     most_similar_id=data.get("most_similar_id"),
                 )
             elif response.status_code == 400:
+                # Bad request is a client error, don't count as circuit failure
                 bt.logging.warning(f"Novelty check: bad request - {response.text}")
                 return None
-            elif response.status_code == 503:
-                # Service unavailable
+            elif response.status_code in {502, 503, 504}:
+                # Service unavailable - record failure
+                self._circuit_breaker.record_failure()
                 bt.logging.debug("Novelty check: service not available")
                 return None
             else:
+                # Other server errors - record failure
+                if response.status_code >= 500:
+                    self._circuit_breaker.record_failure()
                 bt.logging.warning(f"Novelty check failed: HTTP {response.status_code} - {response.text}")
                 return None
 
         except requests.Timeout:
+            self._circuit_breaker.record_failure()
             bt.logging.warning(f"Novelty check timed out after {self.timeout}s")
             return None
         except requests.RequestException as e:
+            self._circuit_breaker.record_failure()
             bt.logging.warning(f"Novelty check request failed: {e}")
             return None
         except Exception as e:
+            self._circuit_breaker.record_failure()
             bt.logging.error(f"Novelty check unexpected error: {e}")
             return None
 
@@ -179,8 +215,13 @@ class NoveltyClient:
         if not self.api_endpoint:
             return None
 
+        # Check circuit breaker first
+        if not self._circuit_breaker.can_execute():
+            bt.logging.debug("Novelty circuit breaker OPEN - skipping miner stats")
+            return None
+
         try:
-            response = requests.get(
+            response = self._session.get(
                 f"{self.api_endpoint}/miner/{miner_hotkey}",
                 headers={"Content-Type": "application/json"},
                 timeout=self.timeout,
@@ -188,6 +229,7 @@ class NoveltyClient:
 
             if response.status_code == 200:
                 data = response.json()
+                self._circuit_breaker.record_success()
                 return MinerNoveltyStats(
                     avg_novelty=data.get("avg_novelty", 1.0),
                     total_prompts=data.get("total_prompts", 0),
@@ -195,10 +237,13 @@ class NoveltyClient:
                     duplicate_prompts=data.get("duplicate_prompts", 0),
                 )
             else:
+                if response.status_code >= 500:
+                    self._circuit_breaker.record_failure()
                 bt.logging.warning(f"Get miner novelty stats failed: HTTP {response.status_code}")
                 return None
 
         except Exception as e:
+            self._circuit_breaker.record_failure()
             bt.logging.warning(f"Get miner novelty stats failed: {e}")
             return None
 
@@ -212,20 +257,29 @@ class NoveltyClient:
         if not self.api_endpoint:
             return None
 
+        # Check circuit breaker first
+        if not self._circuit_breaker.can_execute():
+            bt.logging.debug("Novelty circuit breaker OPEN - skipping global stats")
+            return None
+
         try:
-            response = requests.get(
+            response = self._session.get(
                 f"{self.api_endpoint}/stats",
                 headers={"Content-Type": "application/json"},
                 timeout=self.timeout,
             )
 
             if response.status_code == 200:
+                self._circuit_breaker.record_success()
                 return response.json()
             else:
+                if response.status_code >= 500:
+                    self._circuit_breaker.record_failure()
                 bt.logging.warning(f"Get novelty stats failed: HTTP {response.status_code}")
                 return None
 
         except Exception as e:
+            self._circuit_breaker.record_failure()
             bt.logging.warning(f"Get novelty stats failed: {e}")
             return None
 

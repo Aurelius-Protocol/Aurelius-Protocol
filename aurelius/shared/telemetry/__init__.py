@@ -6,6 +6,12 @@ from aurelius.shared.telemetry.schemas import ErrorEvent, LogEvent, SpanEvent, T
 from aurelius.shared.telemetry.span import Span
 from aurelius.shared.telemetry.otel_exporter import AureliusSpanExporter, AureliusLogExporter
 from aurelius.shared.telemetry.otel_setup import setup_opentelemetry, get_tracer, shutdown_opentelemetry
+from aurelius.shared.telemetry.http_client import (
+    get_telemetry_session,
+    get_circuit_breaker,
+    CircuitBreaker,
+    CircuitState,
+)
 
 __all__ = [
     "TelemetryClient",
@@ -21,4 +27,9 @@ __all__ = [
     "setup_opentelemetry",
     "get_tracer",
     "shutdown_opentelemetry",
+    # HTTP client utilities
+    "get_telemetry_session",
+    "get_circuit_breaker",
+    "CircuitBreaker",
+    "CircuitState",
 ]

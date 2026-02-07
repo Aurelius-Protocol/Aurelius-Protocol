@@ -31,6 +31,8 @@ class ExperimentConfig:
     weight_allocation: float  # Raw weight (normalized at startup)
     enabled: bool = True
     settings: dict[str, Any] = field(default_factory=dict)
+    # Load balancing (T076)
+    max_concurrent_requests: int = 10  # Max concurrent requests per experiment
 
     def get_setting(self, key: str, default: Any = None) -> Any:
         """Get experiment-specific setting with optional default."""
@@ -39,11 +41,22 @@ class ExperimentConfig:
 
 @dataclass
 class ExperimentScores:
-    """Normalized scores (0-1) per miner for weight calculation."""
+    """Normalized scores (0-1) per miner for weight calculation.
+
+    Also includes statistics for per-experiment tracking (T048, T059).
+    """
 
     scores: dict[str, float]  # hotkey -> normalized score
     experiment_name: str
     block_height: int
+    # Statistics fields (T048)
+    total_submissions: int = 0  # Total submissions received in window
+    total_accepted: int = 0  # Total submissions accepted in window
+    window_start_block: int = 0  # Block height when current window started
+    # Pull experiment statistics (T059)
+    queries_sent: int = 0  # Number of queries sent to miners
+    responses_received: int = 0  # Number of successful responses
+    timeouts: int = 0  # Number of timeout responses
 
 
 class Experiment(ABC):
@@ -186,16 +199,22 @@ class PushExperiment(Experiment):
         return default_blacklist
 
     def _create_priority_handler(self) -> Callable:
-        """Return the priority handler. Default returns equal priority.
+        """Return the priority handler (T074 - dynamic priority based on allocation).
+
+        Priority = 1.0 + (allocation_percentage / 100), so higher allocation
+        experiments get higher priority.
 
         Returns:
             Callable that returns priority value (higher = more priority)
         """
+        # Calculate priority based on weight allocation
+        allocation_percentage = self.weight_allocation * 100  # Convert to percentage
+        base_priority = 1.0 + (allocation_percentage / 100)
 
-        def default_priority(synapse) -> float:
-            return 1.0
+        def allocation_based_priority(synapse) -> float:
+            return base_priority
 
-        return default_priority
+        return allocation_based_priority
 
     def _create_verify_handler(self) -> Callable:
         """Return the verify handler. Default does nothing.
@@ -215,11 +234,17 @@ class PullExperiment(Experiment):
 
     Pull experiments run a background loop that periodically queries
     miners and processes their responses.
+
+    Features (T055, T056, T058, T059):
+    - Registration-aware miner selection
+    - Configurable query intervals from ExperimentDefinition
+    - Timeout handling and non-response recording
+    - Pull experiment statistics tracking
     """
 
     TYPE = ExperimentType.PULL
 
-    # Configuration (can be overridden via settings)
+    # Configuration (can be overridden via settings or ExperimentDefinition)
     DEFAULT_QUERY_INTERVAL_SECONDS = 300
     DEFAULT_MINERS_PER_ROUND = 10
     DEFAULT_QUERY_TIMEOUT = 30.0
@@ -228,6 +253,11 @@ class PullExperiment(Experiment):
         super().__init__(core, config)
         self._stop_event = threading.Event()
         self._query_thread: threading.Thread | None = None
+        # Pull experiment statistics (T059)
+        self._queries_sent = 0
+        self._responses_received = 0
+        self._timeouts = 0
+        self._non_responses = 0
 
     @property
     def query_interval_seconds(self) -> int:
@@ -312,10 +342,10 @@ class PullExperiment(Experiment):
                 sleep_remaining -= 1.0
 
     def _select_miners(self) -> list:
-        """Select miners to query this round.
+        """Select miners to query this round (T055 - registration-aware).
 
-        Default implementation selects random miners from metagraph.
-        Override for custom selection logic.
+        Default implementation selects random miners from metagraph,
+        filtered by registration status for non-default experiments.
 
         Returns:
             List of axon info for selected miners
@@ -326,26 +356,72 @@ class PullExperiment(Experiment):
         if not miners:
             return []
 
+        # Filter by registration for non-prompt experiments (T055)
+        if self.name != "prompt" and hasattr(self.core, "experiment_client"):
+            registered_hotkeys = set(
+                self.core.experiment_client.get_registered_miners(self.name)
+            )
+            if registered_hotkeys:
+                # Filter to only registered miners
+                miners = [
+                    m for m in miners
+                    if hasattr(m, "hotkey") and m.hotkey in registered_hotkeys
+                ]
+                bt.logging.debug(
+                    f"Pull experiment '{self.name}': {len(miners)} registered miners available"
+                )
+
+        if not miners:
+            bt.logging.warning(
+                f"Pull experiment '{self.name}': no registered miners available"
+            )
+            return []
+
         # Select up to miners_per_round random miners
         count = min(self.miners_per_round, len(miners))
         return random.sample(miners, count)
 
     def _query_miners(self, miners: list) -> list:
-        """Query the selected miners with the experiment's synapse.
+        """Query the selected miners with the experiment's synapse (T058).
+
+        Handles timeouts and records non-responses for scoring.
 
         Args:
             miners: List of miner axon info to query
 
         Returns:
-            List of synapse responses
+            List of synapse responses (includes failed/timeout responses)
         """
         synapse = self._create_query_synapse()
-        responses = self.core.dendrite.query(
-            axons=miners,
-            synapse=synapse,
-            timeout=self.query_timeout,
-        )
-        return responses
+        self._queries_sent += len(miners)
+
+        try:
+            responses = self.core.dendrite.query(
+                axons=miners,
+                synapse=synapse,
+                timeout=self.query_timeout,
+            )
+
+            # Track responses and timeouts (T058)
+            for resp in responses:
+                if resp is None:
+                    self._non_responses += 1
+                elif hasattr(resp, "dendrite") and resp.dendrite:
+                    # Check for timeout based on dendrite status
+                    status_code = getattr(resp.dendrite, "status_code", None)
+                    if status_code == 408:  # Timeout
+                        self._timeouts += 1
+                    else:
+                        self._responses_received += 1
+                else:
+                    self._responses_received += 1
+
+            return responses
+
+        except Exception as e:
+            bt.logging.error(f"Error querying miners in {self.name}: {e}")
+            self._non_responses += len(miners)
+            return []
 
     @abstractmethod
     def _create_query_synapse(self) -> bt.Synapse:
@@ -364,3 +440,25 @@ class PullExperiment(Experiment):
             results: List of synapse responses from miners
         """
         pass
+
+    def get_stats(self) -> dict:
+        """Return pull experiment statistics (T059).
+
+        Returns:
+            Dictionary with pull experiment statistics
+        """
+        return {
+            "experiment_type": "pull",
+            "queries_sent": self._queries_sent,
+            "responses_received": self._responses_received,
+            "timeouts": self._timeouts,
+            "non_responses": self._non_responses,
+            "response_rate": (
+                self._responses_received / self._queries_sent
+                if self._queries_sent > 0
+                else 0.0
+            ),
+            "query_interval_seconds": self.query_interval_seconds,
+            "miners_per_round": self.miners_per_round,
+            "query_timeout": self.query_timeout,
+        }
