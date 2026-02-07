@@ -475,7 +475,7 @@ class ExperimentClient:
                 "Accept": "application/json",
             }
             if self.api_key:
-                headers["X-API-Key"] = self.api_key
+                headers["Authorization"] = f"Bearer {self.api_key}"
 
             # Use conditional fetch if we have a sync version
             if self._sync_version > 0:
