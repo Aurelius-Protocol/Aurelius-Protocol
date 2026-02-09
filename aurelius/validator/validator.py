@@ -879,14 +879,10 @@ class Validator:
         """Process a moral reasoning submission in the background."""
         # Build a minimal synapse for the experiment handler
         synapse = PromptSynapse(prompt=prompt)
-        # Attach miner hotkey info via a simple namespace
+        # Attach miner hotkey info via TerminalInfo
         if miner_hotkey:
             synapse.miner_hotkey = miner_hotkey
-            # Create a minimal dendrite-like object for hotkey access
-            class _DendriteStub:
-                def __init__(self, hk):
-                    self.hotkey = hk
-            synapse.dendrite = _DendriteStub(miner_hotkey)
+            synapse.dendrite = bt.TerminalInfo(hotkey=miner_hotkey)
 
         _, result_dict = self._moral_reasoning_experiment._handle_scenario_with_result(synapse)
 
