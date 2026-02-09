@@ -23,7 +23,7 @@ from aurelius.miner.registration import (
 )
 from aurelius.miner.retry import RetryConfig, RetryHandler
 from aurelius.shared.config import Config, ConfigurationError
-from aurelius.shared.protocol import PromptSynapse
+from aurelius.shared.protocol import PromptSynapse, SubmissionStatusSynapse
 
 
 @dataclass
@@ -171,9 +171,15 @@ def send_prompt(
     skip_preflight: bool = False,
     use_colors: bool | None = None,
     experiment_id: str | None = None,
+    poll_interval: int = 5,
+    max_poll_time: int = 300,
+    submit_only: bool = False,
 ) -> str:
     """
-    Send a prompt to a validator and return the response.
+    Send a prompt to a validator using the async token-based flow.
+
+    Phase 1: Submit prompt and receive a submission token instantly.
+    Phase 2: Poll the validator for results using the token.
 
     Args:
         prompt: The prompt text to send
@@ -190,6 +196,9 @@ def send_prompt(
         max_retries: Maximum retry attempts (default: from config)
         skip_preflight: Skip pre-flight health check
         use_colors: Use colored output for diagnostics (default: from config)
+        poll_interval: Seconds between status polls (default: 5)
+        max_poll_time: Max seconds to poll before giving up (default: 300)
+        submit_only: Submit and print token, don't poll for result
 
     Returns:
         The response from the validator (OpenAI completion)
@@ -267,7 +276,7 @@ def send_prompt(
         print(formatter.format_error(error, context))
         return ""
 
-    bt.logging.info(f"Prompt: {prompt}")
+    bt.logging.info(f"Prompt: {Config.truncate_sensitive_data(prompt)}")
     if vendor or model_requested:
         bt.logging.info(f"Model specs: vendor={vendor}, model={model_requested}")
     if temperature is not None:
@@ -370,18 +379,17 @@ def send_prompt(
         if not health_result.is_healthy:
             return ""
 
-    # Define the query operation for retry
-    def do_query():
+    # --- Phase 1: Submit prompt and get token ---
+    def do_submit():
         return dendrite.query(
             axons=target_axon,
             synapse=synapse,
-            timeout=effective_timeout,
-            deserialize=False,  # Get full synapse back, not just deserialized string
+            timeout=10,  # Submit should be fast
+            deserialize=False,
         )
 
-    # Execute with retry
     result = retry_handler.execute_with_retry(
-        operation=do_query,
+        operation=do_submit,
         context=context,
         on_retry=lambda attempt, error, delay: print(
             formatter.format_retry_progress(attempt, effective_retries, delay, error, context)
@@ -392,41 +400,22 @@ def send_prompt(
         print(formatter.format_error(result.last_error, context))
         return ""
 
-    # Process response
     responses = result.result
-
-    # dendrite.query can return different types:
-    # - Sometimes the deserialized response (string from synapse.deserialize())
-    # - Sometimes the synapse object itself
-    # - Sometimes a list
-
-    # Extract the synapse from response
     result_synapse = None
-
-    # dendrite.query returns the synapse itself when querying a single axon
-    # For lists, it returns a list of synapses
     if isinstance(responses, PromptSynapse):
         result_synapse = responses
     elif isinstance(responses, list) and len(responses) > 0:
         result_synapse = responses[0]
-    elif isinstance(responses, str):
-        # Shouldn't happen with single axon query, but handle it
-        # Create a dummy synapse with the response
-        result_synapse = PromptSynapse(prompt=prompt)
-        result_synapse.response = responses
     else:
         result_synapse = responses if responses else synapse
 
-    # Check for validator-side errors
+    # Check for rejection (rate limit, validation errors)
     if result_synapse and hasattr(result_synapse, "rejection_reason") and result_synapse.rejection_reason:
         rejection = result_synapse.rejection_reason.lower()
-
         if "rate limit" in rejection:
             error = create_error(ErrorCategory.RATE_LIMITED, context)
             context["reason"] = result_synapse.rejection_reason
             print(formatter.format_error(error, context))
-            # Still show the rejection reason
-            print(f"Rejection: {result_synapse.rejection_reason}")
             return ""
         elif "error" in rejection:
             error = create_error(ErrorCategory.API_ERROR, context)
@@ -434,77 +423,182 @@ def send_prompt(
             print(formatter.format_error(error, context))
             return ""
 
-    # Check for response with Error prefix
-    if (
-        result_synapse
-        and hasattr(result_synapse, "response")
-        and result_synapse.response
-        and result_synapse.response.startswith("Error:")
-    ):
-        error = create_error(ErrorCategory.API_ERROR, context)
-        print(formatter.format_error(error, context))
-        print(f"Validator response: {result_synapse.response}")
-        return ""
+    # Extract submission token
+    token = getattr(result_synapse, "submission_token", None) if result_synapse else None
 
-    if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
-        # Display results
-        print("\n" + "=" * 60)
-        print("RESPONSE FROM VALIDATOR")
-        print("=" * 60)
-        print(f"Prompt:   {result_synapse.prompt}")
-        print(f"Response: {result_synapse.response}")
-        print(f"Model:    {result_synapse.model_used or 'unknown'}")
+    if not token:
+        # Fallback: validator may still use legacy sync flow — check for response
+        if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
+            _display_legacy_response(result_synapse, effective_colors)
+            return result_synapse.response
 
-        # Display moderation results if available
-        if result_synapse.danger_score is not None:
-            print("\n--- Moderation Results ---")
-            print(f"Danger Score:  {result_synapse.danger_score:.4f}")
-            print(f"Accepted:      {'✓ YES' if result_synapse.accepted else '✗ NO'}")
-
-            if result_synapse.rejection_reason:
-                print(f"Rejection:     {result_synapse.rejection_reason}")
-
-            if result_synapse.category_scores:
-                print("\nTop Category Scores:")
-                sorted_cats = sorted(
-                    result_synapse.category_scores.items(), key=lambda x: x[1], reverse=True
-                )[:5]
-                for category, score in sorted_cats:
-                    if score > 0.01:
-                        print(f"  {category:25s}: {score:.4f}")
-
-        # Display miner statistics if available
-        if result_synapse.miner_submission_count is not None:
-            print("\n--- Your Statistics ---")
-            print(f"Submissions:   {result_synapse.miner_submission_count}")
-            if result_synapse.miner_hit_rate is not None:
-                print(f"Hit Rate:      {result_synapse.miner_hit_rate:.1%}")
-            if result_synapse.miner_novelty_avg is not None:
-                print(f"Avg Novelty:   {result_synapse.miner_novelty_avg:.3f}")
-
-        print("=" * 60 + "\n")
-        return result_synapse.response
-    else:
-        # No response received - create appropriate error
-        error = create_error(
-            ErrorCategory.VALIDATOR_BUSY,
-            context,
-        )
-        # Customize for no response case
-        error.message = "No response received from validator"
-        error.cause = (
-            "The validator did not return a response. "
-            "This could indicate the validator is overloaded, misconfigured, "
-            "or the request was silently dropped."
-        )
+        error = create_error(ErrorCategory.VALIDATOR_BUSY, context)
+        error.message = "No submission token or response received"
         error.suggestions = [
-            "Check validator logs for errors",
+            "Validator may be running an older version without async support",
             "Try a different validator: --validator-uid <other_uid>",
-            "Verify the validator is running and accepting requests",
-            "Increase timeout: --timeout 60",
         ]
         print(formatter.format_error(error, context))
         return ""
+
+    GREEN = "\033[92m" if effective_colors else ""
+    CYAN = "\033[96m" if effective_colors else ""
+    YELLOW = "\033[93m" if effective_colors else ""
+    BOLD = "\033[1m" if effective_colors else ""
+    RESET = "\033[0m" if effective_colors else ""
+
+    print(f"\n{GREEN}Submission accepted{RESET}")
+    print(f"  Token: {BOLD}{token}{RESET}")
+
+    if submit_only:
+        print(f"\n{CYAN}Submit-only mode. Use --poll-token {token} to check results later.{RESET}")
+        return token
+
+    # --- Phase 2: Poll for results ---
+    print(f"\n{CYAN}Polling for results (interval={poll_interval}s, max={max_poll_time}s)...{RESET}")
+
+    poll_start = time.time()
+    last_status = None
+
+    while (time.time() - poll_start) < max_poll_time:
+        elapsed = int(time.time() - poll_start)
+
+        status_synapse = SubmissionStatusSynapse(submission_token=token)
+        try:
+            status_response = dendrite.query(
+                axons=target_axon,
+                synapse=status_synapse,
+                timeout=10,
+                deserialize=False,
+            )
+        except Exception as e:
+            bt.logging.warning(f"Poll failed: {e}")
+            time.sleep(poll_interval)
+            continue
+
+        # Extract status synapse
+        status_result = None
+        if isinstance(status_response, SubmissionStatusSynapse):
+            status_result = status_response
+        elif isinstance(status_response, list) and len(status_response) > 0:
+            status_result = status_response[0]
+
+        status = getattr(status_result, "status", None) if status_result else None
+
+        if status and status != last_status:
+            print(f"  Status: {BOLD}{status}{RESET} ({elapsed}s elapsed)")
+            last_status = status
+
+        if status in ("COMPLETED", "FAILED", "TIMEOUT"):
+            break
+
+        time.sleep(poll_interval)
+
+    if not status_result or not status:
+        print(f"\n{YELLOW}Polling timed out after {max_poll_time}s. Token: {token}{RESET}")
+        return ""
+
+    # Display results
+    if status == "COMPLETED" and status_result.result:
+        _display_async_result(status_result, effective_colors)
+        return status_result.result.get("response", "")
+    elif status == "FAILED":
+        print(f"\n{YELLOW}Processing failed: {status_result.error_message or 'Unknown error'}{RESET}")
+        return ""
+    elif status == "TIMEOUT":
+        print(f"\n{YELLOW}Processing timed out on validator side{RESET}")
+        return ""
+    else:
+        print(f"\n{YELLOW}Final status: {status}. Token: {token}{RESET}")
+        return ""
+
+
+def _display_legacy_response(synapse: PromptSynapse, use_colors: bool) -> None:
+    """Display results from a legacy synchronous response."""
+    print("\n" + "=" * 60)
+    print("RESPONSE FROM VALIDATOR (sync)")
+    print("=" * 60)
+    print(f"Prompt:   {Config.truncate_sensitive_data(synapse.prompt)}")
+    print(f"Response: {Config.truncate_sensitive_data(synapse.response)}")
+    print(f"Model:    {synapse.model_used or 'unknown'}")
+
+    if synapse.danger_score is not None:
+        print(f"\nDanger Score:  {synapse.danger_score:.4f}")
+        print(f"Accepted:      {'YES' if synapse.accepted else 'NO'}")
+
+    print("=" * 60 + "\n")
+
+
+def _display_async_result(status_synapse: SubmissionStatusSynapse, use_colors: bool) -> None:
+    """Display results from an async submission."""
+    GREEN = "\033[92m" if use_colors else ""
+    RED = "\033[91m" if use_colors else ""
+    BOLD = "\033[1m" if use_colors else ""
+    RESET = "\033[0m" if use_colors else ""
+
+    result = status_synapse.result or {}
+    experiment_id = status_synapse.experiment_id or "unknown"
+
+    print("\n" + "=" * 60)
+    print(f"{BOLD}RESULT FROM VALIDATOR{RESET} (experiment: {experiment_id})")
+    print("=" * 60)
+
+    if experiment_id == "moral-reasoning":
+        quality = result.get("quality_score", 0)
+        screening = result.get("screening", "?")
+        final = result.get("final_score", 0)
+        response_text = result.get("response", "")
+        model = result.get("model_used", "unknown")
+        timing = result.get("timing_ms", {})
+
+        print(f"Quality Score:  {quality:.3f}")
+        screening_color = GREEN if screening == "PASS" else RED
+        print(f"Screening:      {screening_color}{screening}{RESET}")
+        print(f"Final Score:    {final:.3f}")
+        print(f"Model:          {model}")
+        if isinstance(timing, dict) and timing.get("total_ms"):
+            print(f"Processing:     {timing['total_ms']:.0f}ms")
+
+        signals = result.get("signals", {})
+        if signals:
+            true_count = sum(1 for v in signals.values() if v)
+            print(f"Signals:        {true_count}/{len(signals)} true")
+
+        if response_text:
+            print("\nResponse preview:")
+            print(f"  {Config.truncate_sensitive_data(response_text)}")
+
+    else:
+        # Prompt experiment
+        danger = result.get("danger_score", 0)
+        accepted = result.get("accepted", False)
+        response_text = result.get("response", "")
+        model = result.get("model_used", "unknown")
+
+        print(f"Danger Score:   {danger:.4f}")
+        accepted_str = f"{GREEN}YES{RESET}" if accepted else f"{RED}NO{RESET}"
+        print(f"Accepted:       {accepted_str}")
+        print(f"Model:          {model}")
+
+        categories = result.get("category_scores", {})
+        if categories:
+            print("\nTop Categories:")
+            sorted_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
+            for cat, score in sorted_cats:
+                if score > 0.01:
+                    print(f"  {cat:25s}: {score:.4f}")
+
+        miner_stats = result.get("miner_stats", {})
+        if miner_stats:
+            print(f"\nSubmissions:    {miner_stats.get('submission_count', '?')}")
+            hr = miner_stats.get("hit_rate")
+            if hr is not None:
+                print(f"Hit Rate:       {hr:.1%}")
+
+        if response_text:
+            print(f"\nResponse: {Config.truncate_sensitive_data(response_text)}")
+
+    print("=" * 60 + "\n")
 
 
 def send_prompt_multi(
@@ -866,11 +960,7 @@ def display_multi_results(
             print(f"\n{CYAN}--- Validator UID {uid} ---{RESET}")
 
             if synapse.response:
-                # Truncate long responses for display
-                response_display = synapse.response
-                if len(response_display) > 500:
-                    response_display = response_display[:500] + "... [truncated]"
-                print(f"Response: {response_display}")
+                print(f"Response: {Config.truncate_sensitive_data(synapse.response)}")
 
             print(f"Model:    {synapse.model_used or 'unknown'}")
 
@@ -1120,6 +1210,26 @@ Experiment Registration:
         help="Disable colored output",
     )
 
+    # Async submission arguments
+    async_group = parser.add_argument_group("async submission")
+    async_group.add_argument(
+        "--poll-interval",
+        type=int,
+        default=5,
+        help="Seconds between status polls (default: 5)",
+    )
+    async_group.add_argument(
+        "--max-poll-time",
+        type=int,
+        default=300,
+        help="Max seconds to poll before giving up (default: 300)",
+    )
+    async_group.add_argument(
+        "--submit-only",
+        action="store_true",
+        help="Submit and print token, don't poll for result",
+    )
+
     # Experiment registration arguments (T063)
     experiment_group = parser.add_argument_group("experiment registration")
     experiment_group.add_argument(
@@ -1194,6 +1304,9 @@ Experiment Registration:
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
             experiment_id=args.experiment,
+            poll_interval=args.poll_interval,
+            max_poll_time=args.max_poll_time,
+            submit_only=args.submit_only,
         )
     else:
         # Multi-validator mode (default when MINER_MULTI_VALIDATOR=true)

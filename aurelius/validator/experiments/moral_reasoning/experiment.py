@@ -169,6 +169,11 @@ class MoralReasoningExperiment(PushExperiment):
 
     def _handle_scenario(self, synapse: PromptSynapse) -> PromptSynapse:
         """Handle incoming moral reasoning scenario submission."""
+        synapse, _ = self._handle_scenario_with_result(synapse)
+        return synapse
+
+    def _handle_scenario_with_result(self, synapse: PromptSynapse) -> tuple[PromptSynapse, dict | None]:
+        """Handle scenario and return both synapse and result dict for async flow."""
         start_time = time.time()
         scenario = synapse.prompt
         miner_hotkey = (
@@ -192,12 +197,12 @@ class MoralReasoningExperiment(PushExperiment):
             span_context.__enter__()
 
         try:
-            result = self._process_scenario(synapse, miner_hotkey, scenario, start_time)
+            result_synapse, result_dict = self._process_scenario(synapse, miner_hotkey, scenario, start_time)
             if span_context:
                 span = trace.get_current_span()
                 span.set_status(Status(StatusCode.OK))
-                span.set_attribute("response.score", result.danger_score or 0.0)
-            return result
+                span.set_attribute("response.score", result_synapse.danger_score or 0.0)
+            return result_synapse, result_dict
         except Exception as e:
             if span_context:
                 span = trace.get_current_span()
@@ -214,7 +219,7 @@ class MoralReasoningExperiment(PushExperiment):
         miner_hotkey: str | None,
         scenario: str,
         start_time: float,
-    ) -> PromptSynapse:
+    ) -> tuple[PromptSynapse, dict | None]:
         """Process scenario through the full moral reasoning pipeline."""
         timing_metrics: dict[str, Any] = {}
 
@@ -224,14 +229,14 @@ class MoralReasoningExperiment(PushExperiment):
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = "Empty scenario"
-            return synapse
+            return synapse, None
 
         if len(scenario) > Config.MAX_PROMPT_LENGTH:
             synapse.response = None
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = f"Scenario exceeds maximum length ({Config.MAX_PROMPT_LENGTH} chars)"
-            return synapse
+            return synapse, None
 
         # (2) Rate limit check — handled by ExperimentManager.route_submission()
         # which already calls check_rate_limits() and records the timestamp.
@@ -272,14 +277,14 @@ class MoralReasoningExperiment(PushExperiment):
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = "All models temporarily unavailable"
-            return synapse
+            return synapse, None
         except Exception as e:
             bt.logging.error(f"Response generation error: {e}")
             synapse.response = None
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = f"Response generation error: {e}"
-            return synapse
+            return synapse, None
 
         # (5) Judge evaluation (FR-004, FR-005, FR-006)
         try:
@@ -300,13 +305,13 @@ class MoralReasoningExperiment(PushExperiment):
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = "Judge evaluation failed"
-            return synapse
+            return synapse, None
         except Exception as e:
             bt.logging.error(f"Judge error: {e}")
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = f"Judge error: {e}"
-            return synapse
+            return synapse, None
 
         # (6) Calculate final score (FR-007 through FR-013)
         with self._tracer_span("moral_reasoning.scoring"):
@@ -369,7 +374,21 @@ class MoralReasoningExperiment(PushExperiment):
             f"final={final_score:.3f} in {timing_metrics.get('total_ms', 0):.0f}ms"
         )
 
-        return synapse
+        # Build result dict for async submission tracking
+        from dataclasses import asdict
+
+        result_dict = {
+            "quality_score": quality_score,
+            "screening": "PASS" if passed_screening else "FAIL",
+            "final_score": final_score,
+            "response": response_text,
+            "model_used": model_used,
+            "signals": asdict(signals),
+            "judge_summary": judge_summary,
+            "timing_ms": timing_metrics,
+        }
+
+        return synapse, result_dict
 
     # ----- Helpers -----
 

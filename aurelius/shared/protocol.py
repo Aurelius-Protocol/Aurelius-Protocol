@@ -225,6 +225,13 @@ class PromptSynapse(bt.Synapse):
         description="List of active experiment IDs. Returned on invalid experiment_id rejection.",
     )
 
+    # Async submission token (returned by validator on submit)
+    submission_token: str | None = Field(
+        None,
+        title="Submission Token",
+        description="Unique token for this submission. Use with SubmissionStatusSynapse to poll for results.",
+    )
+
     def deserialize(self) -> str:
         """Return the response for easy access."""
         return self.response or ""
@@ -362,3 +369,69 @@ class PullRequestSynapse(bt.Synapse):
     def deserialize(self) -> dict | None:
         """Return the response data for easy access."""
         return self.response_data
+
+
+class SubmissionStatusSynapse(bt.Synapse):
+    """
+    Synapse for polling async submission results.
+
+    After submitting a PromptSynapse and receiving a submission_token,
+    miners use this synapse to poll for processing results.
+
+    Attributes:
+        submission_token: The token received from PromptSynapse submission
+        status: Current submission status (PENDING, PROCESSING, COMPLETED, FAILED, TIMEOUT)
+        result: Experiment-specific result blob (filled when COMPLETED)
+        error_message: Error details (filled when FAILED/TIMEOUT)
+        experiment_id: Which experiment processed this submission
+        created_at: ISO timestamp when submission was created
+        completed_at: ISO timestamp when processing finished
+    """
+
+    # Input from miner
+    submission_token: str = Field(
+        ...,
+        title="Submission Token",
+        description="The token received from PromptSynapse submission",
+    )
+
+    # Output from validator
+    status: str | None = Field(
+        None,
+        title="Status",
+        description="Current status: PENDING, PROCESSING, COMPLETED, FAILED, TIMEOUT",
+    )
+
+    result: dict[str, Any] | None = Field(
+        None,
+        title="Result",
+        description="Experiment-specific result data (filled when COMPLETED)",
+    )
+
+    error_message: str | None = Field(
+        None,
+        title="Error Message",
+        description="Error details if processing failed",
+    )
+
+    experiment_id: str | None = Field(
+        None,
+        title="Experiment ID",
+        description="Which experiment processed this submission",
+    )
+
+    created_at: str | None = Field(
+        None,
+        title="Created At",
+        description="ISO timestamp when submission was created",
+    )
+
+    completed_at: str | None = Field(
+        None,
+        title="Completed At",
+        description="ISO timestamp when processing finished",
+    )
+
+    def deserialize(self) -> dict | None:
+        """Return the result for easy access."""
+        return self.result
