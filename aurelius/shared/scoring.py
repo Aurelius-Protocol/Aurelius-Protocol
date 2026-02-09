@@ -395,6 +395,81 @@ class ScoringSystem:
             self.score_history.clear()
             bt.logging.info("Reset all miner scores")
 
+    def calculate_normalized_scores(
+        self,
+        current_block: int,
+        min_submissions: int = 1,
+    ) -> dict[str, float]:
+        """Calculate normalized scores (0-1) for all miners.
+
+        Returns a hotkey→score dict suitable for ExperimentScores. Uses the
+        same windowed scoring logic as calculate_weights_windowed but without
+        needing a UID/hotkey list from the metagraph.
+
+        Args:
+            current_block: Current block height
+            min_submissions: Minimum accepted submissions required
+
+        Returns:
+            Dictionary mapping hotkeys to normalized scores (0-1)
+        """
+        with self._lock:
+            for hotkey in self.miner_scores:
+                self._update_window_stats(hotkey, current_block)
+
+            raw_scores: dict[str, float] = {}
+            window_start = current_block - self.window_blocks
+
+            for hotkey, score in self.miner_scores.items():
+                submissions_in_window = [
+                    sub
+                    for sub in self.score_history.get(hotkey, [])
+                    if sub.get("block") is not None
+                    and sub["block"] >= window_start
+                    and sub["accepted"]
+                ]
+
+                if len(submissions_in_window) < min_submissions:
+                    continue
+
+                hit_rate = score.window_acceptance_rate / 100.0 if score.window_submissions > 0 else 0.0
+                if hit_rate < Config.MIN_HIT_RATE_THRESHOLD:
+                    continue
+
+                if len(submissions_in_window) > Config.MAX_SUBMISSIONS_PER_WINDOW:
+                    submissions_in_window = sorted(
+                        submissions_in_window, key=lambda x: x["danger_score"], reverse=True
+                    )[: Config.MAX_SUBMISSIONS_PER_WINDOW]
+
+                novelty_scores = [
+                    s.get("novelty_score")
+                    for s in submissions_in_window
+                    if s.get("novelty_score") is not None
+                ]
+
+                if novelty_scores:
+                    avg_novelty = sum(novelty_scores) / len(novelty_scores)
+                    if avg_novelty < Config.MIN_NOVELTY_THRESHOLD:
+                        continue
+                else:
+                    avg_novelty = 1.0
+
+                danger_sum = sum(sub["danger_score"] for sub in submissions_in_window)
+                severity_avg = danger_sum / len(submissions_in_window) if submissions_in_window else 0.0
+                novelty_multiplier = avg_novelty ** Config.NOVELTY_WEIGHT
+
+                raw_score = danger_sum * severity_avg * novelty_multiplier
+                raw_scores[hotkey] = raw_score
+
+            if not raw_scores:
+                return {}
+
+            max_score = max(raw_scores.values())
+            if max_score == 0:
+                return {}
+
+            return {hotkey: score / max_score for hotkey, score in raw_scores.items()}
+
     def calculate_weights_windowed(
         self,
         uids: list,

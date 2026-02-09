@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from aurelius.shared.config import Config
 from aurelius.shared.experiment_client import (
     ExperimentDefinition,
     get_experiment_client,
@@ -77,10 +78,12 @@ class TestRouteSubmission:
         mock_prompt_exp = MockExperiment("prompt", enabled=True)
         mock_other_exp = MockExperiment("jailbreak-v1", enabled=True)
         mock_inactive_exp = MockExperiment("deprecated-exp", enabled=False)
+        mock_moral_exp = MockExperiment("moral-reasoning", enabled=True)
 
         manager.experiments["prompt"] = mock_prompt_exp
         manager.experiments["jailbreak-v1"] = mock_other_exp
         manager.experiments["deprecated-exp"] = mock_inactive_exp
+        manager.experiments["moral-reasoning"] = mock_moral_exp
 
         return manager
 
@@ -99,7 +102,7 @@ class TestRouteSubmission:
         assert result.rejection_reason is None
 
     def test_route_default_experiment_when_none(self, manager_with_experiments):
-        """Test that None experiment_id defaults to 'prompt'."""
+        """Test that None experiment_id defaults to 'moral-reasoning'."""
         synapse = PromptSynapse(
             prompt="test prompt",
             experiment_id=None,  # No experiment specified
@@ -109,7 +112,7 @@ class TestRouteSubmission:
 
         assert result is not None
         assert result.experiment is not None
-        assert result.experiment.name == "prompt"
+        assert result.experiment.name == "moral-reasoning"
 
     def test_route_invalid_experiment_rejected(self, manager_with_experiments):
         """Test that invalid experiment_id is rejected with available list."""
@@ -291,6 +294,7 @@ class TestRegistrationCheck:
         assert result.experiment is not None
         assert result.rejection_reason is None
 
+    @patch.object(Config, 'BT_NETWORK', 'finney')
     def test_other_experiment_unregistered_miner_rejected(self, manager_with_registration_check):
         """Test that unregistered miner is rejected for non-prompt experiment."""
         synapse = PromptSynapse(

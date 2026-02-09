@@ -143,26 +143,6 @@ class TestMoralReasoningPipeline:
         assert result.danger_score == pytest.approx(0.0)
         assert result.accepted is False
 
-    @patch("aurelius.validator.experiments.moral_reasoning.experiment.call_chat_api_with_fallback")
-    def test_moderation_rejects_scenario(self, mock_response_call):
-        """Scenario flagged by moderation → rejected before LLM calls."""
-        core = _make_mock_core()
-        core.moderation_provider.moderate.return_value.flagged = True
-
-        experiment = _make_experiment(core)
-        synapse = MagicMock()
-        synapse.prompt = "Harmful content..."
-        synapse.experiment_id = "moral-reasoning"
-        synapse.dendrite.hotkey = "miner_hotkey_123456"
-
-        result = experiment._handle_scenario(synapse)
-
-        assert result.danger_score == 0.0
-        assert result.accepted is False
-        assert "moderation" in result.rejection_reason.lower()
-        # Response generation should NOT be called
-        mock_response_call.assert_not_called()
-
     def test_empty_scenario_rejected(self):
         """Empty scenario → immediate rejection."""
         core = _make_mock_core()

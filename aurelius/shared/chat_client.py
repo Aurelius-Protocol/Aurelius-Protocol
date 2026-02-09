@@ -128,10 +128,6 @@ def call_chat_api_with_fallback(
             _chat_circuit_breaker.record_failure()
             raise
 
-    # Should not reach here, but just in case
-    _chat_circuit_breaker.record_failure()
-    raise ModelUnavailableError(
-        primary_model=primary_model,
-        fallback_models=fallback_models,
-        errors=errors,
-    )
+    # Unreachable: the for loop always returns or raises.
+    # Kept as a defensive assertion in case the loop logic changes.
+    raise AssertionError("Unreachable: models_to_try loop did not return or raise")

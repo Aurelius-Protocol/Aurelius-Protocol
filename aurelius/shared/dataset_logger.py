@@ -337,8 +337,8 @@ class DatasetLogger:
             try:
                 if 'tmp_path' in locals():
                     os.unlink(tmp_path)
-            except:
-                pass
+            except OSError as cleanup_err:
+                bt.logging.debug(f"Failed to clean up temp file: {cleanup_err}")
             return False
 
     def log_entry(
@@ -449,9 +449,10 @@ class DatasetLogger:
                 self.queue.put_nowait(entry)
                 bt.logging.debug(f"Dataset logger: Entry queued (queue size: {self.queue.qsize()})")
             except Full:
+                self.submissions_failed += 1
                 bt.logging.warning(
                     f"Dataset logger: Queue full ({self.queue.maxsize} entries), dropping entry. "
-                    "Central API may be slow or down."
+                    f"Central API may be slow or down. (total dropped: {self.submissions_failed})"
                 )
 
     def stop(self):
@@ -481,8 +482,8 @@ class DatasetLogger:
             try:
                 self.queue.join()  # This will return when queue is empty
                 break
-            except:
-                pass
+            except Exception as e:
+                bt.logging.debug(f"Queue join interrupted: {e}")
             remaining_items = self.queue.qsize()
             items_processed = queue_size - remaining_items
 
@@ -503,6 +504,9 @@ class DatasetLogger:
         else:
             bt.logging.info("Dataset logger worker stopped cleanly")
 
+        # Close HTTP session to release connection pool resources
+        self._session.close()
+
     def _persist_queue(self):
         """Persist remaining queue items to disk to prevent data loss."""
         if not self.enable_local_backup or not self.local_path:
@@ -516,7 +520,7 @@ class DatasetLogger:
                     entry = self.queue.get_nowait()
                     if entry is not None:  # Skip poison pill
                         remaining_items.append(entry)
-                except:
+                except Exception:
                     break
 
             if remaining_items:

@@ -31,11 +31,12 @@ NETWORK_DEFAULTS = {
         "TELEMETRY_LOGS_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/logs",
         "TELEMETRY_REGISTRY_ENDPOINT": "https://collector.aureliusaligned.ai/api/validator-registry",
         "MINER_BURN_ENABLED": True,
-        "MINER_BURN_PERCENTAGE": 0.9,
+        "MINER_BURN_PERCENTAGE": 0.75,
         "BURN_UID": 200,
     },
     290: {  # Testnet
         "DANGER_THRESHOLD": 0.2,
+        "SINGLE_CATEGORY_THRESHOLD": 0.8,
         "MIN_HIT_RATE_THRESHOLD": 0.3,
         "MIN_VALIDATOR_STAKE": 5.0,
         "MIN_NOVELTY_THRESHOLD": 0.3,
@@ -46,7 +47,23 @@ NETWORK_DEFAULTS = {
         "TELEMETRY_LOGS_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/telemetry/logs",
         "TELEMETRY_REGISTRY_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/validator-registry",
         "MINER_BURN_ENABLED": True,
-        "MINER_BURN_PERCENTAGE": 0.9,
+        "MINER_BURN_PERCENTAGE": 0.75,
+        "BURN_UID": 200,
+    },
+    1: {  # Local development
+        "DANGER_THRESHOLD": 0.1,
+        "SINGLE_CATEGORY_THRESHOLD": 0.5,
+        "MIN_HIT_RATE_THRESHOLD": 0.0,
+        "MIN_VALIDATOR_STAKE": 0.0,
+        "MIN_NOVELTY_THRESHOLD": 0.0,
+        "CENTRAL_API_ENDPOINT": "http://localhost:3000/api/collections",
+        "NOVELTY_API_ENDPOINT": "http://localhost:3000/api/novelty",
+        "EXPERIMENT_API_ENDPOINT": "http://localhost:3000/api/experiments",
+        "TELEMETRY_TRACES_ENDPOINT": "http://localhost:3000/api/telemetry/traces",
+        "TELEMETRY_LOGS_ENDPOINT": "http://localhost:3000/api/telemetry/logs",
+        "TELEMETRY_REGISTRY_ENDPOINT": "http://localhost:3000/api/validator-registry",
+        "MINER_BURN_ENABLED": False,
+        "MINER_BURN_PERCENTAGE": 0.0,
         "BURN_UID": 200,
     },
 }
@@ -722,7 +739,7 @@ class Config:
             bt.logging.debug(f"No network defaults defined for netuid {netuid}")
             return
 
-        network_name = "mainnet" if netuid == 37 else "testnet" if netuid == 290 else f"subnet {netuid}"
+        network_name = "mainnet" if netuid == 37 else "testnet" if netuid == 290 else "local" if netuid == 1 else f"subnet {netuid}"
 
         if cls.ADVANCED_MODE:
             # Advanced mode: respect user's explicit env vars
@@ -904,21 +921,21 @@ class Config:
     @classmethod
     def truncate_sensitive_data(cls, text: str) -> str:
         """
-        Truncate sensitive data for logging if LOG_SENSITIVE_DATA is False.
+        Hash sensitive data for logging if LOG_SENSITIVE_DATA is False.
 
         Args:
-            text: The text to potentially truncate
+            text: The text to potentially hash
 
         Returns:
-            str: Original text if logging enabled, truncated text otherwise
+            str: Original text if logging enabled, sha256 hash summary otherwise
         """
         if cls.LOG_SENSITIVE_DATA:
             return text
 
-        if len(text) <= cls.MAX_LOG_LENGTH:
-            return text
+        import hashlib
 
-        return text[: cls.MAX_LOG_LENGTH] + "... [TRUNCATED]"
+        h = hashlib.sha256(text.encode()).hexdigest()[:8]
+        return f"[sha256:{h}… len={len(text)}]"
 
     @classmethod
     def warn_default_endpoints(cls) -> None:

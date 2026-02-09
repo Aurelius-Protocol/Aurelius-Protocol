@@ -165,10 +165,14 @@ class NoveltyClient:
 
             if response.status_code == 200:
                 data = response.json()
+                # Validate required fields to avoid silently defaulting to 1.0
+                if "novelty_score" not in data:
+                    bt.logging.warning("Novelty API returned 200 but missing 'novelty_score' field")
+                    return None
                 # Record success with circuit breaker
                 self._circuit_breaker.record_success()
                 return NoveltyResult(
-                    novelty_score=data.get("novelty_score", 1.0),
+                    novelty_score=data["novelty_score"],
                     max_similarity=data.get("max_similarity", 0.0),
                     similar_count=data.get("similar_count", 0),
                     most_similar_id=data.get("most_similar_id"),
@@ -246,6 +250,10 @@ class NoveltyClient:
             self._circuit_breaker.record_failure()
             bt.logging.warning(f"Get miner novelty stats failed: {e}")
             return None
+
+    def close(self):
+        """Close the HTTP session to release connection pool resources."""
+        self._session.close()
 
     def get_global_stats(self) -> dict | None:
         """

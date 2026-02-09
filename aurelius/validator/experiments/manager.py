@@ -474,8 +474,8 @@ class ExperimentManager:
 
         tracer = get_tracer("aurelius.experiments") if Config.TELEMETRY_ENABLED else None
 
-        # Default to "prompt" experiment for backward compatibility (FR-022)
-        experiment_id = synapse.experiment_id or "prompt"
+        # Default to "moral-reasoning" experiment (prompt experiment deprecated)
+        experiment_id = synapse.experiment_id or "moral-reasoning"
 
         bt.logging.debug(
             f"Routing submission: experiment_id={experiment_id}, "
@@ -525,6 +525,19 @@ class ExperimentManager:
                 ):
                     pass
 
+            return RoutingResult(
+                experiment=None,
+                rejection_reason=rejection,
+                available_experiments=available,
+            )
+
+        # Check if experiment has zero weight allocation (no rewards)
+        if hasattr(experiment, 'weight_allocation') and experiment.weight_allocation == 0:
+            rejection = (
+                f"Experiment '{experiment_id}' is not accepting submissions "
+                f"(0% reward allocation). Available: {', '.join(available)}"
+            )
+            bt.logging.debug(f"Routing rejected: {rejection}")
             return RoutingResult(
                 experiment=None,
                 rejection_reason=rejection,
@@ -625,7 +638,10 @@ class ExperimentManager:
         Returns:
             List of experiment ID strings
         """
-        return [exp.name for exp in self.experiments.values() if exp.is_enabled]
+        return [
+            exp.name for exp in self.experiments.values()
+            if exp.is_enabled and getattr(exp, 'weight_allocation', 1.0) > 0
+        ]
 
     def apply_routing_rejection(self, synapse: PromptSynapse, result: RoutingResult) -> None:
         """Apply routing rejection details to synapse for miner feedback.

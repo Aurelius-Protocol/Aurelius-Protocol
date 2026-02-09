@@ -245,6 +245,28 @@ class TestConcurrentSubmissions:
         mock_client.is_miner_registered.return_value = True
         mock_client.get_active_experiments.return_value = []
 
+        # Return proper experiment definitions with real rate_limit values
+        def get_experiment(exp_id):
+            return ExperimentDefinition(
+                id=exp_id,
+                name=exp_id,
+                version=1,
+                experiment_type="push",
+                scoring_type="danger",
+                status="active",
+                deprecated_at=None,
+                thresholds={},
+                rate_limit_requests=100,
+                rate_limit_window_hours=1,
+                novelty_threshold=0.02,
+                pull_interval_seconds=None,
+                pull_timeout_seconds=None,
+                settings={},
+                created_at="",
+                updated_at="",
+            )
+        mock_client.get_experiment.side_effect = get_experiment
+
         mock_core = MagicMock()
         mock_core.experiment_client = mock_client
 

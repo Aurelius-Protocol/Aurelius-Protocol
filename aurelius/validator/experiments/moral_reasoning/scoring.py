@@ -306,11 +306,11 @@ class MoralReasoningScoringSystem:
             if not raw_scores:
                 return {}
 
-            max_score = max(raw_scores.values())
-            if max_score == 0:
-                return {}
-
-            return {hotkey: s / max_score for hotkey, s in raw_scores.items()}
+            # Top-N equal split: top miners share weight equally
+            sorted_miners = sorted(raw_scores.items(), key=lambda x: x[1], reverse=True)
+            top_n = sorted_miners[:Config.TOP_REWARDED_MINERS]
+            equal_weight = 1.0 / len(top_n)
+            return {hotkey: equal_weight for hotkey, _ in top_n}
 
     def get_stats(self) -> dict:
         """Get scoring system statistics."""

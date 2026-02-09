@@ -496,55 +496,21 @@ class ExperimentClient:
             if response.status_code == 200:
                 data = response.json()
 
-                # Handle simple list format from GET /api/experiments
-                # Response: {"count": N, "experiments": [{experiment_id, description, ...}]}
-                if "sync_version" in data:
-                    # Full sync response format
-                    sync_response = ExperimentSyncResponse.from_dict(data)
-                    with self._lock:
-                        self._cache = {exp.id: exp for exp in sync_response.experiments}
-                        self._registrations = {}
-                        for reg in sync_response.registrations:
-                            if reg.status == "active":
-                                if reg.experiment_id not in self._registrations:
-                                    self._registrations[reg.experiment_id] = []
-                                self._registrations[reg.experiment_id].append(
-                                    reg.miner_hotkey
-                                )
-                        self._reward_allocation = sync_response.reward_allocation
-                        self._sync_version = sync_response.sync_version
-                        self._synced_at = sync_response.server_time
-                else:
-                    # Simple list format — merge API experiments into local cache
-                    api_experiment_ids = set()
-                    for exp_data in data.get("experiments", []):
-                        exp_id = exp_data.get("experiment_id")
-                        if exp_id:
-                            api_experiment_ids.add(exp_id)
-                            # Only add if not already in cache (local defs take priority)
-                            if exp_id not in self._cache:
-                                self._cache[exp_id] = ExperimentDefinition(
-                                    id=exp_id,
-                                    name=exp_data.get("description", exp_id),
-                                    version=1,
-                                    experiment_type="push",
-                                    scoring_type="danger",
-                                    status="active",
-                                    deprecated_at=None,
-                                    thresholds={},
-                                    rate_limit_requests=100,
-                                    rate_limit_window_hours=1,
-                                    novelty_threshold=0.02,
-                                    pull_interval_seconds=None,
-                                    pull_timeout_seconds=None,
-                                    settings={},
-                                    created_at=exp_data.get("created_at", ""),
-                                    updated_at=exp_data.get("created_at", ""),
-                                )
-                    bt.logging.debug(
-                        f"Experiment sync: API has {len(api_experiment_ids)} experiments, "
-                        f"local cache has {len(self._cache)}"
-                    )
+                # Full sync response format (API always returns sync_version)
+                sync_response = ExperimentSyncResponse.from_dict(data)
+                with self._lock:
+                    self._cache = {exp.id: exp for exp in sync_response.experiments}
+                    self._registrations = {}
+                    for reg in sync_response.registrations:
+                        if reg.status == "active":
+                            if reg.experiment_id not in self._registrations:
+                                self._registrations[reg.experiment_id] = []
+                            self._registrations[reg.experiment_id].append(
+                                reg.miner_hotkey
+                            )
+                    self._reward_allocation = sync_response.reward_allocation
+                    self._sync_version = sync_response.sync_version
+                    self._synced_at = sync_response.server_time
 
                 # Save to cache
                 self._save_cache()

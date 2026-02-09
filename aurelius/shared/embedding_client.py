@@ -43,6 +43,10 @@ class EmbeddingClient:
         else:
             bt.logging.warning("Embedding client: Missing OpenAI API key")
 
+    def close(self):
+        """Close the HTTP session to release connection pool resources."""
+        self._session.close()
+
     def is_available(self) -> bool:
         """Check if embedding generation is available."""
         return bool(self.api_key)
