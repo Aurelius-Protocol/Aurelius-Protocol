@@ -33,6 +33,7 @@ NETWORK_DEFAULTS = {
         "MINER_BURN_ENABLED": True,
         "MINER_BURN_PERCENTAGE": 0.75,
         "BURN_UID": 200,
+        "CHAT_API_TIMEOUT": 120,
     },
     290: {  # Testnet
         "DANGER_THRESHOLD": 0.2,
@@ -49,6 +50,7 @@ NETWORK_DEFAULTS = {
         "MINER_BURN_ENABLED": True,
         "MINER_BURN_PERCENTAGE": 0.75,
         "BURN_UID": 200,
+        "CHAT_API_TIMEOUT": 120,
     },
     1: {  # Local development
         "DANGER_THRESHOLD": 0.1,
