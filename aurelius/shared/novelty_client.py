@@ -49,16 +49,18 @@ class MinerNoveltyStats:
 class NoveltyClient:
     """Client for novelty detection API calls."""
 
-    def __init__(self, api_endpoint: str | None = None, timeout: int = 10):
+    def __init__(self, api_endpoint: str | None = None, timeout: int = 10, api_key: str | None = None):
         """
         Initialize novelty client.
 
         Args:
             api_endpoint: Base URL for novelty API (e.g., https://api.example.com/api/novelty)
             timeout: Request timeout in seconds
+            api_key: API key for authenticated requests
         """
         self.api_endpoint = api_endpoint or Config.NOVELTY_API_ENDPOINT
         self.timeout = timeout
+        self._api_key = api_key or getattr(Config, "CENTRAL_API_KEY", None)
         self._session = requests.Session()
         self._tracer = get_tracer("aurelius.novelty") if Config.TELEMETRY_ENABLED else None
 
@@ -151,6 +153,10 @@ class NoveltyClient:
             return None
 
         try:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+
             response = self._session.post(
                 f"{self.api_endpoint}/check",
                 json={
@@ -159,7 +165,7 @@ class NoveltyClient:
                     "include_similar_prompt": include_similar_prompt,
                     "experiment_id": experiment_id,  # T084: Per-experiment novelty pool
                 },
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=self.timeout,
             )
 
@@ -225,9 +231,13 @@ class NoveltyClient:
             return None
 
         try:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+
             response = self._session.get(
                 f"{self.api_endpoint}/miner/{miner_hotkey}",
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=self.timeout,
             )
 
@@ -271,9 +281,13 @@ class NoveltyClient:
             return None
 
         try:
+            headers: dict[str, str] = {"Content-Type": "application/json"}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+
             response = self._session.get(
                 f"{self.api_endpoint}/stats",
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 timeout=self.timeout,
             )
 

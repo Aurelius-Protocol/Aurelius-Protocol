@@ -8,12 +8,12 @@ import pytest
 from aurelius.validator.experiments.moral_reasoning.judge import (
     JudgeEvaluationFailed,
     JudgeParseError,
+    SuspiciousJudgeOutput,
     build_judge_prompt,
     evaluate_with_judge,
     parse_judge_output,
 )
 from aurelius.validator.experiments.moral_reasoning.signals import ALL_SIGNALS
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -26,7 +26,7 @@ def _make_valid_output(overrides: dict | None = None, extra_fields: dict | None 
     to avoid triggering the F6 all-22-true suspicious output check when the
     output is passed through ``evaluate_with_judge``.
     """
-    signals = {s: True for s in ALL_SIGNALS}
+    signals = dict.fromkeys(ALL_SIGNALS, True)
     signals["identifying_third_party"] = False  # non-screening signal
     if overrides:
         signals.update(overrides)
@@ -74,7 +74,7 @@ class TestParseJudgeOutput:
             parse_judge_output(json.dumps(data))
 
     def test_non_boolean_values(self):
-        signals = {s: True for s in ALL_SIGNALS}
+        signals = dict.fromkeys(ALL_SIGNALS, True)
         signals["identifying_self_interest"] = "yes"  # type: ignore
         data = {"signals": signals, "summary": ""}
         with pytest.raises(JudgeParseError, match="Non-boolean signals"):
@@ -112,13 +112,13 @@ class TestParseJudgeOutput:
         assert signals.identifying_third_party is False
 
     def test_non_string_summary_converted(self):
-        signals = {s: True for s in ALL_SIGNALS}
+        signals = dict.fromkeys(ALL_SIGNALS, True)
         data = {"signals": signals, "summary": 42}
         signals_obj, summary = parse_judge_output(json.dumps(data))
         assert summary == "42"
 
     def test_missing_summary_defaults_empty(self):
-        signals = {s: True for s in ALL_SIGNALS}
+        signals = dict.fromkeys(ALL_SIGNALS, True)
         data = {"signals": signals}
         _, summary = parse_judge_output(json.dumps(data))
         assert summary == ""
@@ -182,29 +182,24 @@ class TestEvaluateWithJudge:
         assert raw == valid_output
 
     @patch("aurelius.validator.experiments.moral_reasoning.judge.call_chat_api_with_fallback")
-    def test_retry_on_malformed_then_success(self, mock_call):
-        valid_output = _make_valid_output()
-        mock_call.side_effect = [
-            (_mock_llm_response("not json"), "gpt-4o"),  # First attempt fails parse
-            (_mock_llm_response(valid_output), "gpt-4o"),  # Second attempt succeeds
-        ]
+    def test_single_parse_failure_raises(self, mock_call):
+        """Single attempt — malformed JSON immediately raises JudgeEvaluationFailed."""
+        mock_call.return_value = (_mock_llm_response("not json"), "gpt-4o")
 
-        signals, summary, raw = evaluate_with_judge(
-            "scenario", self.LONG_RESPONSE, MagicMock(), self.judge_config
-        )
-        assert signals.identifying_self_interest is True
-        assert mock_call.call_count == 2
+        with pytest.raises(JudgeEvaluationFailed):
+            evaluate_with_judge("scenario", self.LONG_RESPONSE, MagicMock(), self.judge_config)
+        assert mock_call.call_count == 1
 
     @patch("aurelius.validator.experiments.moral_reasoning.judge.call_chat_api_with_fallback")
-    def test_fails_after_two_parse_failures(self, mock_call):
-        mock_call.side_effect = [
-            (_mock_llm_response("bad json 1"), "gpt-4o"),
-            (_mock_llm_response("bad json 2"), "gpt-4o"),
-        ]
+    def test_suspicious_output_raises(self, mock_call):
+        """Suspicious judge output (all 22 true) raises SuspiciousJudgeOutput."""
+        all_true = dict.fromkeys(ALL_SIGNALS, True)
+        output = json.dumps({"signals": all_true, "summary": "Perfect."})
+        mock_call.return_value = (_mock_llm_response(output), "gpt-4o")
 
-        with pytest.raises(JudgeEvaluationFailed, match="2 attempts"):
+        with pytest.raises(SuspiciousJudgeOutput):
             evaluate_with_judge("scenario", self.LONG_RESPONSE, MagicMock(), self.judge_config)
-        assert mock_call.call_count == 2
+        assert mock_call.call_count == 1
 
     @patch("aurelius.validator.experiments.moral_reasoning.judge.call_chat_api_with_fallback")
     def test_non_parse_error_fails_immediately(self, mock_call):
@@ -243,3 +238,36 @@ class TestEvaluateWithJudge:
 
         call_args = mock_call.call_args
         assert call_args[1].get("fallback_models") == [] or call_args[0][2] == []
+
+
+# ---------------------------------------------------------------------------
+# Parameterized suspicious check with custom thresholds
+# ---------------------------------------------------------------------------
+
+class TestSuspiciousCheckParams:
+    """Verify suspicious_check_params are forwarded to _check_suspicious_judge_output."""
+
+    LONG_RESPONSE = "I thought deeply about this moral dilemma and considered the consequences. " * 8
+
+    @patch("aurelius.validator.experiments.moral_reasoning.judge.call_chat_api_with_fallback")
+    def test_custom_perfect_score_count_triggers(self, mock_call):
+        """With perfect_score_count=21, 21/22 true should be flagged."""
+        overrides = dict.fromkeys(ALL_SIGNALS, True)
+        overrides["identifying_third_party"] = False  # 21/22
+        output = json.dumps({"signals": overrides, "summary": "Good."})
+        mock_call.return_value = (_mock_llm_response(output), "gpt-4o")
+
+        judge_config = {"model": "gpt-4o", "max_tokens": 1024, "temperature": 0.0}
+
+        # With default params (perfect_score_count=22), 21/22 + long response passes
+        signals, _, _ = evaluate_with_judge(
+            "scenario", self.LONG_RESPONSE, MagicMock(), judge_config,
+        )
+        assert signals.identifying_self_interest is True
+
+        # With perfect_score_count=21, 21/22 should trigger SuspiciousJudgeOutput
+        with pytest.raises(SuspiciousJudgeOutput):
+            evaluate_with_judge(
+                "scenario", self.LONG_RESPONSE, MagicMock(), judge_config,
+                suspicious_check_params={"perfect_score_count": 21},
+            )

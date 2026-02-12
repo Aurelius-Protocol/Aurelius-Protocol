@@ -24,7 +24,7 @@ import pytest
 
 from aurelius.shared.config import Config
 from aurelius.validator.experiments.moral_reasoning.judge import (
-    JudgeParseError,
+    SuspiciousJudgeOutput,
     _check_suspicious_judge_output,
     _sanitize_for_xml_fence,
     build_judge_prompt,
@@ -35,7 +35,6 @@ from aurelius.validator.experiments.moral_reasoning.scoring import (
 )
 from aurelius.validator.experiments.moral_reasoning.signals import ALL_SIGNALS, BinarySignals
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -43,7 +42,7 @@ from aurelius.validator.experiments.moral_reasoning.signals import ALL_SIGNALS, 
 def _make_valid_judge_output(overrides: dict | None = None) -> str:
     # Default to 21/22 signals true (leave one non-critical signal false) to
     # avoid triggering the F6 all-22-true suspicious output check.
-    signals = {s: True for s in ALL_SIGNALS}
+    signals = dict.fromkeys(ALL_SIGNALS, True)
     signals["identifying_third_party"] = False  # non-screening signal
     if overrides:
         signals.update(overrides)
@@ -151,11 +150,12 @@ class TestRateLimiterBypass:
 class TestNoveltyUnavailableDefault:
     """Verify novelty defaults to penalty value when no data exists."""
 
-    def test_novelty_unavailable_uses_penalty_default(self):
-        """Miners with no novelty data should get 0.5 multiplier, not 1.0."""
+    def test_novelty_unavailable_uses_fail_closed_default(self):
+        """Miners with no novelty data should get 0.0 multiplier (fail-closed)."""
         tmp_dir = tempfile.mkdtemp(prefix="novelty_default_")
         scoring = MoralReasoningScoringSystem(
-            persistence_path=f"{tmp_dir}/scores.json"
+            persistence_path=f"{tmp_dir}/scores.json",
+            novelty_unavailable_default=0.0,
         )
 
         # Record submissions with no novelty
@@ -164,13 +164,11 @@ class TestNoveltyUnavailableDefault:
 
         scores = scoring.calculate_normalized_scores(current_block=10000)
 
-        # miner_a has no novelty → uses 0.5 default
-        # miner_b has novelty=1.0
-        # miner_a raw = 0.8 * 0.5 = 0.40
+        # miner_a has no novelty → uses 0.0 default (fail-closed)
+        # miner_a raw = 0.8 * 0.0 = 0.0 → excluded
         # miner_b raw = 0.8 * 1.0 = 0.80
-        # miner_b should score higher
-        if "miner_a" in scores and "miner_b" in scores:
-            assert scores["miner_b"] > scores["miner_a"]
+        assert "miner_b" in scores
+        assert "miner_a" not in scores  # Zero score → excluded
 
     def test_novelty_default_configurable(self):
         """The default can be changed via Config."""
@@ -180,7 +178,8 @@ class TestNoveltyUnavailableDefault:
 
             tmp_dir = tempfile.mkdtemp(prefix="novelty_cfg_")
             scoring = MoralReasoningScoringSystem(
-                persistence_path=f"{tmp_dir}/scores.json"
+                persistence_path=f"{tmp_dir}/scores.json",
+                novelty_unavailable_default=0.5,
             )
 
             scoring.record_submission("miner_a", 1.0, True, block=9500)
@@ -221,35 +220,35 @@ class TestJudgePromptInjection:
         assert "<scenario>" in system_content
 
     def test_suspicious_all_true_short_response_rejected(self):
-        """All 22 signals true + response < 500 chars → JudgeParseError."""
-        signals = BinarySignals(**{s: True for s in ALL_SIGNALS})
+        """All 22 signals true + response < 500 chars → SuspiciousJudgeOutput."""
+        signals = BinarySignals(**dict.fromkeys(ALL_SIGNALS, True))
         short_response = "ok"
 
-        with pytest.raises(JudgeParseError, match="Suspicious"):
+        with pytest.raises(SuspiciousJudgeOutput, match="Suspicious"):
             _check_suspicious_judge_output(signals, short_response)
 
     def test_suspicious_check_catches_20_of_22_true(self):
-        """20/22 signals true + short response → JudgeParseError (V1 fix)."""
+        """20/22 signals true + short response → SuspiciousJudgeOutput (V1 fix)."""
         # Leave exactly 2 signals false — still caught by >= 20 threshold
-        overrides = {s: True for s in ALL_SIGNALS}
+        overrides = dict.fromkeys(ALL_SIGNALS, True)
         false_signals = list(ALL_SIGNALS)[:2]
         for s in false_signals:
             overrides[s] = False
         signals = BinarySignals(**overrides)
         short_response = "ok"
 
-        with pytest.raises(JudgeParseError, match="Suspicious"):
+        with pytest.raises(SuspiciousJudgeOutput, match="Suspicious"):
             _check_suspicious_judge_output(signals, short_response)
 
     def test_suspicious_check_uses_500_char_threshold(self):
         """Response of 499 chars with 21/22 true signals → flagged; 500 chars → passes."""
         # Use 21/22 (not all-22) to test the length threshold without triggering F6
-        overrides = {s: True for s in ALL_SIGNALS}
+        overrides = dict.fromkeys(ALL_SIGNALS, True)
         overrides["identifying_third_party"] = False  # 21/22
         signals = BinarySignals(**overrides)
 
         response_499 = "x" * 499
-        with pytest.raises(JudgeParseError, match="Suspicious"):
+        with pytest.raises(SuspiciousJudgeOutput, match="Suspicious"):
             _check_suspicious_judge_output(signals, response_499)
 
         # Exactly 500 chars with 21/22 → passes (below F6's all-22 check)
@@ -258,17 +257,17 @@ class TestJudgePromptInjection:
 
     def test_all_22_true_long_response_rejected(self):
         """All 22 signals true + response >= 500 chars → still rejected (F6 fix)."""
-        signals = BinarySignals(**{s: True for s in ALL_SIGNALS})
+        signals = BinarySignals(**dict.fromkeys(ALL_SIGNALS, True))
         long_response = "x" * 500
 
         # F6: perfect 22/22 is always suspicious regardless of response length
-        with pytest.raises(JudgeParseError, match="22/22"):
+        with pytest.raises(SuspiciousJudgeOutput, match="22"):
             _check_suspicious_judge_output(signals, long_response)
 
     def test_non_suspicious_19_true_short_response_passes(self):
         """19/22 signals true + short response → no error (below threshold)."""
         # Leave exactly 3 signals false — 19 true, below 20 threshold
-        overrides = {s: True for s in ALL_SIGNALS}
+        overrides = dict.fromkeys(ALL_SIGNALS, True)
         false_signals = list(ALL_SIGNALS)[:3]
         for s in false_signals:
             overrides[s] = False
@@ -318,17 +317,13 @@ class TestJudgeTemperatureJitter:
 
     @patch("aurelius.validator.experiments.moral_reasoning.judge.call_chat_api_with_fallback")
     @patch("aurelius.validator.experiments.moral_reasoning.judge.random.uniform")
-    def test_retry_uses_different_temperature_jitter(self, mock_uniform, mock_call):
-        """Each retry attempt should get a fresh temperature jitter (V3 fix)."""
-        # Return different jitter values for each attempt
-        mock_uniform.side_effect = [0.05, 0.12]
+    def test_single_attempt_uses_jitter(self, mock_uniform, mock_call):
+        """Single attempt still applies temperature jitter."""
+        mock_uniform.return_value = 0.08
         valid_output = _make_valid_judge_output(
             {"identifying_third_party": False}
         )
-        mock_call.side_effect = [
-            (_mock_llm_response("bad json"), "gpt-4o"),       # First attempt: parse failure
-            (_mock_llm_response(valid_output), "gpt-4o"),     # Second attempt: success
-        ]
+        mock_call.return_value = (_mock_llm_response(valid_output), "gpt-4o")
 
         judge_config = {
             "model": "gpt-4o",
@@ -341,14 +336,11 @@ class TestJudgeTemperatureJitter:
             MagicMock(), judge_config,
         )
 
-        # random.uniform should be called twice (once per attempt)
-        assert mock_uniform.call_count == 2
+        # random.uniform called once (single attempt)
+        assert mock_uniform.call_count == 1
 
-        # Verify the two LLM calls used different temperatures
-        first_call_params = mock_call.call_args_list[0][0][1]
-        second_call_params = mock_call.call_args_list[1][0][1]
-        assert first_call_params["temperature"] == pytest.approx(0.05)
-        assert second_call_params["temperature"] == pytest.approx(0.12)
+        call_params = mock_call.call_args[0][1]
+        assert call_params["temperature"] == pytest.approx(0.08)
 
 
 # ===========================================================================
@@ -683,6 +675,35 @@ class TestSignalVelocityCheck:
 
         assert result is False  # Not enough submissions yet
 
+    def test_custom_flag_ratio(self):
+        """flag_ratio parameter controls the flagging threshold."""
+        tmp_dir = tempfile.mkdtemp(prefix="velocity_fr_")
+        scoring = MoralReasoningScoringSystem(
+            persistence_path=f"{tmp_dir}/scores.json"
+        )
+
+        scoring.record_submission("miner_a", 0.9, True, block=9500)
+        scoring.record_submission("miner_a", 0.9, True, block=9600)
+        scoring.record_submission("miner_a", 0.9, True, block=9700)
+        scoring.record_submission("miner_a", 0.9, True, block=9800)
+
+        # 2/4 = 50% high-signal. With default flag_ratio=0.5, NOT flagged (> not >=)
+        scoring.record_signal_velocity("miner_a", 22)
+        scoring.record_signal_velocity("miner_a", 22)
+        scoring.record_signal_velocity("miner_a", 10)
+        result = scoring.record_signal_velocity("miner_a", 10)
+        assert result is False
+
+        # Reset window
+        scoring.miner_scores["miner_a"].signal_velocity_window = []
+
+        # Same 2/4 = 50%, but with flag_ratio=0.25 → flagged (50% > 25%)
+        scoring.record_signal_velocity("miner_a", 22, flag_ratio=0.25)
+        scoring.record_signal_velocity("miner_a", 22, flag_ratio=0.25)
+        scoring.record_signal_velocity("miner_a", 10, flag_ratio=0.25)
+        result = scoring.record_signal_velocity("miner_a", 10, flag_ratio=0.25)
+        assert result is True
+
 
 # ===========================================================================
 # V5: Uninitialized experiment rejection (adversarial review)
@@ -854,9 +875,9 @@ class TestFlaggedMinerPenalty:
             persistence_path=f"{tmp_dir}/scores.json"
         )
 
-        # Record submissions for two miners
-        scoring.record_submission("honest_miner", 0.8, True, block=9500)
-        scoring.record_submission("cheating_miner", 0.9, True, block=9600)
+        # Record submissions for two miners (with novelty scores — required for non-zero raw score)
+        scoring.record_submission("honest_miner", 0.8, True, block=9500, novelty_score=0.8)
+        scoring.record_submission("cheating_miner", 0.9, True, block=9600, novelty_score=0.8)
 
         # Flag the cheating miner
         scoring.miner_scores["cheating_miner"].flagged_for_review = True
@@ -869,20 +890,22 @@ class TestFlaggedMinerPenalty:
         assert "cheating_miner" not in scores
 
     def test_unflagged_miner_scores_normally(self):
-        """An unflagged miner should receive normal scores."""
+        """An unflagged miner should receive normal scores (top-N equal split)."""
         tmp_dir = tempfile.mkdtemp(prefix="f3_test_")
         scoring = MoralReasoningScoringSystem(
             persistence_path=f"{tmp_dir}/scores.json"
         )
 
-        scoring.record_submission("miner_a", 0.7, True, block=9500)
-        scoring.record_submission("miner_b", 0.5, True, block=9600)
+        scoring.record_submission("miner_a", 0.7, True, block=9500, novelty_score=0.8)
+        scoring.record_submission("miner_b", 0.5, True, block=9600, novelty_score=0.8)
 
         scores = scoring.calculate_normalized_scores(current_block=10000)
 
+        # Both miners are in top-N and receive equal weight (top-N equal split)
         assert "miner_a" in scores
         assert "miner_b" in scores
-        assert scores["miner_a"] > scores["miner_b"]
+        assert scores["miner_a"] == pytest.approx(0.5)
+        assert scores["miner_b"] == pytest.approx(0.5)
 
 
 # ===========================================================================
@@ -935,8 +958,8 @@ class TestVelocitySlidingWindow:
         # Window is last 10: [5, 5, 22, 22, 22, 22, 22, 22, 22, 22] → 8/10 > 50%
         assert result is True
 
-    def test_velocity_unflag_when_ratio_drops(self):
-        """Miner gets unflagged when their recent ratio drops below threshold."""
+    def test_velocity_unflag_requires_cooldown(self):
+        """Miner stays flagged during cooldown even if ratio drops below threshold."""
         tmp_dir = tempfile.mkdtemp(prefix="f4_test_")
         scoring = MoralReasoningScoringSystem(
             persistence_path=f"{tmp_dir}/scores.json"
@@ -944,18 +967,61 @@ class TestVelocitySlidingWindow:
 
         scoring.record_submission("miner_a", 0.8, True, block=9500)
 
-        # Get flagged: 4/4 high-signal with window_size=5
+        # Get flagged at block 10000: 4/4 high-signal with window_size=5
         for _ in range(4):
-            scoring.record_signal_velocity("miner_a", 22, window_size=5)
+            scoring.record_signal_velocity("miner_a", 22, window_size=5, current_block=10000)
 
         assert scoring.miner_scores["miner_a"].flagged_for_review is True
+        assert scoring.miner_scores["miner_a"].flag_count == 1
+        assert scoring.miner_scores["miner_a"].flag_block == 10000
 
-        # Submit enough low-signal to push high ones out of window
+        # Submit low-signal entries but still within cooldown (1st flag = 1000 blocks)
         for _ in range(5):
-            scoring.record_signal_velocity("miner_a", 5, window_size=5)
+            scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=10500)
 
-        # Now window is [5, 5, 5, 5, 5] → 0/5 → unflagged
+        # Still flagged — cooldown hasn't elapsed (only 500 blocks, need 1000)
+        assert scoring.miner_scores["miner_a"].flagged_for_review is True
+
+        # Now submit after cooldown elapsed (block 11001 = 1001 blocks after flag)
+        scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=11001)
+
+        # Now unflagged — cooldown elapsed and ratio is below threshold
         assert scoring.miner_scores["miner_a"].flagged_for_review is False
+
+    def test_velocity_permanent_flag_after_third_offense(self):
+        """After 3rd flag, miner is permanently flagged (no auto-unflag)."""
+        tmp_dir = tempfile.mkdtemp(prefix="f4_perm_")
+        scoring = MoralReasoningScoringSystem(
+            persistence_path=f"{tmp_dir}/scores.json"
+        )
+
+        scoring.record_submission("miner_a", 0.8, True, block=9500)
+
+        block = 10000
+        for offense in range(3):
+            # Get flagged
+            scoring.miner_scores["miner_a"].signal_velocity_window = []
+            for _ in range(4):
+                scoring.record_signal_velocity("miner_a", 22, window_size=5, current_block=block)
+            assert scoring.miner_scores["miner_a"].flagged_for_review is True
+
+            if offense < 2:
+                # Unflag by waiting for cooldown and submitting low-signal
+                cooldown = scoring.flag_cooldowns[offense]
+                block += cooldown + 1
+                scoring.miner_scores["miner_a"].signal_velocity_window = []
+                for _ in range(5):
+                    scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=block)
+                assert scoring.miner_scores["miner_a"].flagged_for_review is False
+                block += 100
+
+        # 3rd flag — permanent, can never auto-unflag
+        assert scoring.miner_scores["miner_a"].flag_count == 3
+        block += 100000  # Even after very long time
+        scoring.miner_scores["miner_a"].signal_velocity_window = []
+        for _ in range(5):
+            scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=block)
+        assert scoring.miner_scores["miner_a"].flagged_for_review is True  # Still flagged
 
 
 # ===========================================================================
@@ -1020,19 +1086,19 @@ class TestLengthIndependentSuspiciousCheck:
 
     def test_all_22_true_short_response_rejected(self):
         """22/22 true + short response → rejected (both checks trigger)."""
-        signals = BinarySignals(**{s: True for s in ALL_SIGNALS})
-        with pytest.raises(JudgeParseError, match="Suspicious"):
+        signals = BinarySignals(**dict.fromkeys(ALL_SIGNALS, True))
+        with pytest.raises(SuspiciousJudgeOutput, match="Suspicious"):
             _check_suspicious_judge_output(signals, "short")
 
     def test_all_22_true_long_response_rejected(self):
         """22/22 true + long response → still rejected (F6 check)."""
-        signals = BinarySignals(**{s: True for s in ALL_SIGNALS})
-        with pytest.raises(JudgeParseError, match="22/22"):
+        signals = BinarySignals(**dict.fromkeys(ALL_SIGNALS, True))
+        with pytest.raises(SuspiciousJudgeOutput, match="22"):
             _check_suspicious_judge_output(signals, "x" * 10000)
 
     def test_21_true_long_response_passes(self):
         """21/22 true + long response → passes (not perfect score)."""
-        overrides = {s: True for s in ALL_SIGNALS}
+        overrides = dict.fromkeys(ALL_SIGNALS, True)
         overrides["identifying_third_party"] = False  # 21/22
         signals = BinarySignals(**overrides)
         # Should NOT raise
@@ -1040,11 +1106,27 @@ class TestLengthIndependentSuspiciousCheck:
 
     def test_21_true_short_response_rejected(self):
         """21/22 true + short response → rejected (original check: >= 20 + < 500)."""
-        overrides = {s: True for s in ALL_SIGNALS}
+        overrides = dict.fromkeys(ALL_SIGNALS, True)
         overrides["identifying_third_party"] = False  # 21/22
         signals = BinarySignals(**overrides)
-        with pytest.raises(JudgeParseError, match="Suspicious"):
+        with pytest.raises(SuspiciousJudgeOutput, match="Suspicious"):
             _check_suspicious_judge_output(signals, "short")
+
+    def test_parameterized_thresholds(self):
+        """Custom high_signal_count and min_response_length via params."""
+        overrides = dict.fromkeys(ALL_SIGNALS, True)
+        overrides["identifying_third_party"] = False  # 21/22
+        signals = BinarySignals(**overrides)
+
+        # Default: 21/22 + 600 chars → passes (>= 500 min_response_length)
+        _check_suspicious_judge_output(signals, "x" * 600)
+
+        # With stricter min_response_length=750: 21/22 + 600 chars → flagged
+        with pytest.raises(SuspiciousJudgeOutput):
+            _check_suspicious_judge_output(
+                signals, "x" * 600,
+                min_response_length=750,
+            )
 
 
 # ===========================================================================
@@ -1088,3 +1170,129 @@ class TestScenarioSanitizationBeforeResponseGen:
         # Content between tags is preserved
         assert "INJECT" in user_message
         assert "A dilemma" in user_message
+
+
+# ===========================================================================
+# V3: Signal velocity detection wired in production (gaming audit)
+# ===========================================================================
+
+class TestSignalVelocityWiredInProduction:
+    """V3: Verify record_signal_velocity is called from production code path."""
+
+    @patch("aurelius.validator.experiments.moral_reasoning.experiment.call_chat_api_with_fallback")
+    @patch("aurelius.validator.experiments.moral_reasoning.judge.call_chat_api_with_fallback")
+    def test_signal_velocity_called_during_processing(self, mock_judge, mock_response):
+        """_process_scenario must call record_signal_velocity with true_count."""
+        core = _make_mock_core()
+
+        mock_response.return_value = (
+            _mock_llm_response("I carefully considered this..." * 20),
+            "model-a",
+        )
+        mock_judge.return_value = (
+            _mock_llm_response(_make_valid_judge_output()),
+            "gpt-4o",
+        )
+
+        experiment = _make_experiment(core)
+
+        synapse = MagicMock()
+        synapse.prompt = "A moral dilemma scenario for testing."
+        synapse.experiment_id = "moral-reasoning"
+        synapse.dendrite.hotkey = "velocity_test_miner"
+
+        experiment._handle_scenario(synapse)
+
+        # Check that signal velocity was recorded
+        score = experiment.scoring_system.get_miner_score("velocity_test_miner")
+        assert score is not None
+        assert score.signal_velocity_window is not None
+        assert len(score.signal_velocity_window) == 1
+        # The default valid judge output has 21/22 true signals
+        assert score.signal_velocity_window[0] == 21
+
+
+# ===========================================================================
+# V4: Concurrency slots enforced (gaming audit)
+# ===========================================================================
+
+class TestConcurrencySlotsEnforced:
+    """V4: Verify concurrency slots are acquired in route_submission."""
+
+    def test_concurrency_slot_acquired_on_routing(self):
+        """route_submission must acquire a concurrency slot."""
+        from aurelius.validator.experiments.manager import ExperimentManager
+
+        core = _make_mock_core()
+        manager = ExperimentManager(core)
+        experiment = _make_experiment(core)
+        manager.experiments["moral-reasoning"] = experiment
+
+        # Mock experiment_client to return an experiment definition
+        mock_exp_def = MagicMock()
+        mock_exp_def.rate_limit_requests = 0  # No rate limit
+        mock_exp_def.rate_limit_window_hours = 1
+        mock_exp_def.status = "active"
+        manager._experiment_client = MagicMock()
+        manager._experiment_client.get_experiment.return_value = mock_exp_def
+        manager._experiment_client.is_miner_registered.return_value = True
+        manager._experiment_client.get_active_experiments.return_value = []
+
+        synapse = MagicMock()
+        synapse.experiment_id = "moral-reasoning"
+        synapse.miner_hotkey = "test_miner_hotkey_123"
+
+        result = manager.route_submission(synapse)
+        assert result.experiment is not None
+
+        # Concurrency counter should be incremented
+        assert manager._concurrent_requests.get("moral-reasoning", 0) == 1
+
+    def test_concurrency_limit_rejects_when_full(self):
+        """route_submission rejects when concurrency slots are exhausted."""
+        from aurelius.validator.experiments.manager import ExperimentManager
+
+        core = _make_mock_core()
+        manager = ExperimentManager(core)
+        experiment = _make_experiment(core)
+        manager.experiments["moral-reasoning"] = experiment
+
+        mock_exp_def = MagicMock()
+        mock_exp_def.rate_limit_requests = 0
+        mock_exp_def.rate_limit_window_hours = 1
+        mock_exp_def.status = "active"
+        manager._experiment_client = MagicMock()
+        manager._experiment_client.get_experiment.return_value = mock_exp_def
+        manager._experiment_client.is_miner_registered.return_value = True
+        manager._experiment_client.get_active_experiments.return_value = []
+
+        # Fill up concurrency slots
+        manager._concurrent_requests["moral-reasoning"] = 8  # Default cap
+
+        synapse = MagicMock()
+        synapse.experiment_id = "moral-reasoning"
+        synapse.miner_hotkey = "test_miner_hotkey_123"
+
+        result = manager.route_submission(synapse)
+        assert result.experiment is None
+        assert "concurrency" in result.rejection_reason.lower()
+
+
+# ===========================================================================
+# V5: Rate limit fail-closed (gaming audit)
+# ===========================================================================
+
+class TestRateLimitFailClosed:
+    """V5: Verify rate limits deny when experiment definition is unavailable."""
+
+    def test_rate_limit_denies_when_no_experiment_definition(self):
+        """check_rate_limits must return False when exp_def is None."""
+        from aurelius.validator.experiments.manager import ExperimentManager
+
+        core = _make_mock_core()
+        manager = ExperimentManager(core)
+        manager._experiment_client = MagicMock()
+        manager._experiment_client.get_experiment.return_value = None
+
+        result = manager.check_rate_limits("some_hotkey", "some_experiment")
+        assert result is False  # Fail-closed

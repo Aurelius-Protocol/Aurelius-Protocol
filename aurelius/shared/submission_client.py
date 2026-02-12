@@ -51,7 +51,7 @@ class SubmissionClient:
                 hotkey = self._wallet.hotkey.ss58_address
                 body_hash = ""
                 if body_json:
-                    body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]
+                    body_hash = hashlib.sha256(body_json.encode()).hexdigest()
                     message = f"aurelius-submission:{timestamp}:{hotkey}:{body_hash}"
                 else:
                     message = f"aurelius-submission:{timestamp}:{hotkey}"

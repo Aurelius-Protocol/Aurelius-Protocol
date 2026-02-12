@@ -411,8 +411,11 @@ class ExperimentManager:
         # Get rate limit config from experiment definition
         exp_def = self.experiment_client.get_experiment(experiment_id)
         if not exp_def:
-            # No experiment definition = no rate limit
-            return True
+            # Fail-closed: deny when definition unavailable (V5 fix)
+            bt.logging.warning(
+                f"Rate limit check fail-closed: no experiment definition for '{experiment_id}'"
+            )
+            return False
 
         max_requests = exp_def.rate_limit_requests
         window_hours = exp_def.rate_limit_window_hours
@@ -599,6 +602,31 @@ class ExperimentManager:
                 available_experiments=available,
             )
 
+        # Check concurrency limits (V4 fix: slots were defined but never called)
+        if not self.acquire_concurrency_slot(experiment_id):
+            rejection = (
+                f"Concurrency limit reached for experiment '{experiment_id}'. "
+                f"Please try again later."
+            )
+            bt.logging.debug(f"Routing rejected: {rejection}")
+
+            if tracer:
+                with tracer.start_as_current_span(
+                    "experiment.route",
+                    attributes={
+                        "experiment.id": experiment_id,
+                        "experiment.route.success": False,
+                        "experiment.route.reason": "concurrency_limited",
+                    },
+                ):
+                    pass
+
+            return RoutingResult(
+                experiment=None,
+                rejection_reason=rejection,
+                available_experiments=available,
+            )
+
         # Check for deprecated experiment (T042) - process with warning
         if self.is_experiment_deprecated(experiment_id):
             bt.logging.warning(
@@ -654,6 +682,21 @@ class ExperimentManager:
         synapse.rejection_reason = result.rejection_reason
         synapse.available_experiments = result.available_experiments
         synapse.registration_required = result.registration_required
+
+        # Set structured rejection code
+        reason = (result.rejection_reason or "").lower()
+        if result.registration_required:
+            synapse.rejection_code = "REGISTRATION_REQUIRED"
+        elif "rate limit" in reason:
+            synapse.rejection_code = "RATE_LIMITED"
+        elif "concurren" in reason:
+            synapse.rejection_code = "CONCURRENCY_LIMIT"
+        elif "not found" in reason or "unknown" in reason:
+            synapse.rejection_code = "EXPERIMENT_NOT_FOUND"
+        elif "disabled" in reason or "allocation" in reason:
+            synapse.rejection_code = "EXPERIMENT_DISABLED"
+        else:
+            synapse.rejection_code = "ROUTING_REJECTED"
 
     def calculate_merged_weights(
         self,

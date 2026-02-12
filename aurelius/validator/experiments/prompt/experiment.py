@@ -49,9 +49,13 @@ class PromptExperiment(PushExperiment):
     def __init__(self, core: ValidatorCore, config: ExperimentConfig):
         super().__init__(core, config)
 
+        # Cache settings for use in handlers
+        self._danger_threshold = self.setting("danger_threshold", Config.DANGER_THRESHOLD)
+        self._max_prompt_length = self.setting("max_prompt_length", Config.MAX_PROMPT_LENGTH)
+
         # Initialize experiment-specific scoring system
         self.scoring_system = PromptScoringSystem(
-            danger_threshold=self.setting("danger_threshold", Config.DANGER_THRESHOLD),
+            danger_threshold=self._danger_threshold,
             persistence_path=self.setting("persistence_path", Config.MINER_SCORES_PATH),
             window_blocks=self.setting("window_blocks", Config.WINDOW_BLOCKS),
             history_retention_blocks=self.setting(
@@ -280,7 +284,7 @@ class PromptExperiment(PushExperiment):
 
             # Determine acceptance
             high_category_triggered = moderation_result.high_category_triggered
-            aggregate_threshold_met = danger_score >= Config.DANGER_THRESHOLD
+            aggregate_threshold_met = danger_score >= self._danger_threshold
             accepted = high_category_triggered or aggregate_threshold_met
             synapse.accepted = accepted
 
@@ -289,7 +293,7 @@ class PromptExperiment(PushExperiment):
                 bt.logging.success(f"Prompt ACCEPTED - danger_score={danger_score:.3f}")
             else:
                 synapse.rejection_reason = (
-                    f"Danger score {danger_score:.3f} below threshold {Config.DANGER_THRESHOLD}"
+                    f"Danger score {danger_score:.3f} below threshold {self._danger_threshold}"
                 )
 
             # Record submission
@@ -379,11 +383,11 @@ class PromptExperiment(PushExperiment):
     ) -> PromptSynapse | None:
         """Validate input parameters. Returns synapse with error if invalid, None if valid."""
         # Check prompt length
-        if len(prompt) > Config.MAX_PROMPT_LENGTH:
+        if len(prompt) > self._max_prompt_length:
             synapse.response = None
             synapse.danger_score = 0.0
             synapse.accepted = False
-            synapse.rejection_reason = f"Prompt exceeds maximum length ({Config.MAX_PROMPT_LENGTH} chars)"
+            synapse.rejection_reason = f"Prompt exceeds maximum length ({self._max_prompt_length} chars)"
             return synapse
 
         # Check max_chars
@@ -567,7 +571,7 @@ class PromptExperiment(PushExperiment):
             dangerous_runs = sum(
                 1
                 for run in run_results
-                if run["combined_score"] >= Config.DANGER_THRESHOLD or run["high_category_triggered"]
+                if run["combined_score"] >= self._danger_threshold or run["high_category_triggered"]
             )
             required_for_dangerous = len(run_results) // 2 + 1
             our_vote = dangerous_runs >= required_for_dangerous
@@ -729,7 +733,7 @@ class PromptExperiment(PushExperiment):
             dangerous_runs = sum(
                 1
                 for run in run_results
-                if run["combined_score"] >= Config.DANGER_THRESHOLD or run["high_category_triggered"]
+                if run["combined_score"] >= self._danger_threshold or run["high_category_triggered"]
             )
             required_for_dangerous = len(run_results) // 2 + 1
             vote = dangerous_runs >= required_for_dangerous

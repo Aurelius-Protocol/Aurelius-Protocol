@@ -434,7 +434,7 @@ class Validator:
             def get_stats(self) -> dict:
                 return self._scoring_system.get_stats()
 
-        # Register the prompt experiment (disabled; moral reasoning is now default)
+        # Register the prompt experiment
         prompt_experiment = PromptExperimentWrapper("prompt", scoring_system=self.scoring_system, enabled=False)
         self.experiment_manager.experiments["prompt"] = prompt_experiment
         bt.logging.info("Registered default 'prompt' experiment for multi-experiment routing")
@@ -598,9 +598,13 @@ class Validator:
             max_val: Maximum allowed value
 
         Returns:
-            Clamped value or None if input was None
+            Clamped value or None if input was None or invalid
         """
         if value is None:
+            return None
+        import math
+        if math.isnan(value) or math.isinf(value):
+            bt.logging.warning(f"Parameter rejected: {value} (NaN/Infinity)")
             return None
         clamped = max(min_val, min(max_val, value))
         if clamped != value:
@@ -679,11 +683,14 @@ class Validator:
         bt.logging.info("=" * 80)
 
         # Input validation
+        import math
+
         if len(prompt) > Config.MAX_PROMPT_LENGTH:
             synapse.response = None
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = f"Prompt exceeds maximum length ({Config.MAX_PROMPT_LENGTH} chars)"
+            synapse.rejection_code = "PROMPT_TOO_LONG"
             return synapse
 
         miner_max_chars = synapse.max_chars
@@ -692,6 +699,7 @@ class Validator:
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = f"max_chars exceeds limit ({Config.MAX_RESPONSE_CHARS_LIMIT})"
+            synapse.rejection_code = "MAX_CHARS_EXCEEDED"
             return synapse
 
         miner_min_chars = synapse.min_chars
@@ -700,7 +708,23 @@ class Validator:
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = "min_chars cannot be greater than max_chars"
+            synapse.rejection_code = "INVALID_PARAMS"
             return synapse
+
+        # NaN/Infinity parameter validation
+        for param_name, param_val in [
+            ("temperature", synapse.temperature),
+            ("top_p", synapse.top_p),
+            ("frequency_penalty", synapse.frequency_penalty),
+            ("presence_penalty", synapse.presence_penalty),
+        ]:
+            if param_val is not None and (math.isnan(param_val) or math.isinf(param_val)):
+                synapse.response = None
+                synapse.danger_score = 0.0
+                synapse.accepted = False
+                synapse.rejection_reason = f"Invalid {param_name}: NaN/Infinity not allowed"
+                synapse.rejection_code = "INVALID_PARAMS"
+                return synapse
 
         # Experiment routing
         synapse.miner_hotkey = miner_hotkey
@@ -725,6 +749,7 @@ class Validator:
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = global_reason
+            synapse.rejection_code = "RATE_LIMITED"
             return synapse
         self.global_rate_limiter.record_request()
 
@@ -735,6 +760,7 @@ class Validator:
             synapse.danger_score = 0.0
             synapse.accepted = False
             synapse.rejection_reason = reason
+            synapse.rejection_code = "RATE_LIMITED"
             return synapse
         self.rate_limiter.record_request(hotkey=miner_hotkey)
 
@@ -750,10 +776,11 @@ class Validator:
             "result": None,
             "error_message": None,
             "completed_at": None,
+            "miner_hotkey": miner_hotkey,
         })
 
         # Register token on collector API (fire-and-forget)
-        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()[:16]
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
         self.background_executor.submit(
             self.submission_client.register_submission,
             submission_token,
@@ -861,6 +888,9 @@ class Validator:
             self.submission_client.update_submission(
                 token, "FAILED", error=error_msg,
             )
+        finally:
+            # Release concurrency slot (V4 fix)
+            self.experiment_manager.release_concurrency_slot(experiment_id)
 
     def _update_submission_status(self, token: str, status: str) -> None:
         """Update submission status in local cache and collector API."""
@@ -1008,6 +1038,13 @@ class Validator:
             cached = self._submission_results.get(token)
 
         if cached:
+            # Verify the polling hotkey matches the original submitter
+            polling_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
+            cached_hotkey = cached.get("miner_hotkey")
+            if polling_hotkey and cached_hotkey and polling_hotkey != cached_hotkey:
+                synapse.error_message = "Unknown submission token"
+                return synapse
+
             synapse.status = cached["status"]
             synapse.result = cached.get("result")
             synapse.error_message = cached.get("error_message")
@@ -1800,9 +1837,10 @@ class Validator:
             bt.logging.info(f"Blacklist: rejected unregistered hotkey {hotkey[:16]}...")
             return True, f"Hotkey not registered on subnet {Config.BT_NETUID}"
 
-        # If no metagraph available yet (still syncing), allow through
+        # If no metagraph available yet (still syncing), reject (fail-closed)
         if metagraph is None:
-            bt.logging.warning("Blacklist: no cached metagraph yet, allowing request")
+            bt.logging.warning("Blacklist: no cached metagraph yet, rejecting request (fail-closed)")
+            return True, "Validator starting up — metagraph not yet available. Please retry."
 
         if Config.LOG_CONNECTION_DETAILS:
             bt.logging.info(f"Blacklist check: accepted hotkey {hotkey[:16]}...")
@@ -2089,8 +2127,34 @@ class Validator:
                 return weights
 
             except Exception as e:
-                bt.logging.warning(f"Multi-experiment weight calc failed: {e}, using fallback")
-                return self._calculate_single_experiment_weights(uids, hotkeys, current_block)
+                bt.logging.warning(f"Multi-experiment weight calc failed: {e}, using experiment fallback")
+                try:
+                    # Try direct score extraction from active experiments
+                    for exp in enabled_experiments:
+                        if hasattr(exp, "calculate_scores"):
+                            scores = exp.calculate_scores(current_block)
+                            if scores and scores.scores:
+                                weights = [0.0] * len(uids)
+                                for i, hotkey in enumerate(hotkeys):
+                                    weights[i] = scores.scores.get(hotkey, 0.0)
+                                # Apply burn
+                                if Config.MINER_BURN_ENABLED and Config.BURN_UID < len(weights):
+                                    burn = Config.MINER_BURN_PERCENTAGE
+                                    non_burn = [w * (1 - burn) for w in weights]
+                                    non_burn[Config.BURN_UID] = burn
+                                    weights = non_burn
+                                total = sum(weights)
+                                if total > 0:
+                                    weights = [w / total for w in weights]
+                                    bt.logging.info(
+                                        f"Fallback: using scores from experiment '{exp.name}'"
+                                    )
+                                    return weights
+                except Exception as e2:
+                    bt.logging.error(f"Experiment fallback also failed: {e2}")
+                # Last resort: zero weights (safer than wrong weights from prompt scoring)
+                bt.logging.warning("All weight calculation methods failed, returning zero weights")
+                return [0.0] * len(uids)
 
         else:
             # Single experiment path: use existing windowed calculation

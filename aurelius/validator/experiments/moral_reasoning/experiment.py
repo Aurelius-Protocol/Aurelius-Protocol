@@ -34,6 +34,7 @@ from aurelius.validator.experiments.moral_reasoning.signals import (
     calculate_final_score,
     calculate_quality_score,
 )
+from aurelius.validator.experiments.moral_reasoning.strictness import resolve_strictness_params
 
 if TYPE_CHECKING:
     from aurelius.validator.core import ValidatorCore
@@ -61,6 +62,9 @@ def generate_moral_response(
     scenario: str,
     chat_client: Any,
     model_config: dict[str, Any],
+    *,
+    max_tokens: int | None = None,
+    timeout: float | None = None,
 ) -> tuple[str, str]:
     """Generate a first-person narrative response to a moral dilemma.
 
@@ -68,6 +72,8 @@ def generate_moral_response(
         scenario: The moral dilemma scenario from the miner.
         chat_client: OpenAI client instance.
         model_config: Dict with 'model' key and optional 'timeout'.
+        max_tokens: Override for max response tokens.
+        timeout: Override for API call timeout.
 
     Returns:
         (response_text, model_used)
@@ -78,12 +84,12 @@ def generate_moral_response(
             {"role": "system", "content": RESPONSE_SYSTEM_PROMPT},
             {"role": "user", "content": scenario},
         ],
-        "max_tokens": Config.OPENAI_MAX_TOKENS,
+        "max_tokens": max_tokens or Config.OPENAI_MAX_TOKENS,
     }
 
-    timeout = model_config.get("timeout", Config.CHAT_API_TIMEOUT)
+    effective_timeout = timeout or model_config.get("timeout", Config.CHAT_API_TIMEOUT)
     response, model_used = call_chat_api_with_fallback(
-        chat_client, api_params, timeout=timeout,
+        chat_client, api_params, timeout=effective_timeout,
     )
 
     response_text = response.choices[0].message.content.strip()
@@ -103,6 +109,9 @@ class MoralReasoningExperiment(PushExperiment):
     def __init__(self, core: ValidatorCore, config: ExperimentConfig):
         super().__init__(core, config)
 
+        # Cache settings for use in handlers
+        self._max_prompt_length = self.setting("max_prompt_length", Config.MAX_PROMPT_LENGTH)
+
         self.scoring_system = MoralReasoningScoringSystem(
             persistence_path=self.setting(
                 "persistence_path",
@@ -113,14 +122,40 @@ class MoralReasoningExperiment(PushExperiment):
                 "history_retention_blocks",
                 Config.HISTORY_RETENTION_BLOCKS,
             ),
+            novelty_unavailable_default=self.setting(
+                "novelty_unavailable_default", Config.MORAL_NOVELTY_UNAVAILABLE_DEFAULT
+            ),
+            top_rewarded_miners=self.setting(
+                "top_rewarded_miners", Config.TOP_REWARDED_MINERS
+            ),
         )
 
         # Build judge config from Config env vars
         self._judge_config = self._build_judge_config()
 
+        # Resolve strictness: collector API settings > env var > default "low"
+        strictness_mode = self.setting("strictness_mode", Config.MORAL_STRICTNESS_MODE)
+        # Collect per-field overrides from settings dict
+        field_overrides = {
+            k: self.setting(k)
+            for k in (
+                "quality_threshold",
+                "suspicious_high_signal_count",
+                "suspicious_min_response_length",
+                "suspicious_perfect_score_count",
+                "velocity_high_signal_threshold",
+                "velocity_flag_ratio",
+                "min_submissions",
+            )
+            if self.setting(k) is not None
+        }
+        self.strictness = resolve_strictness_params(strictness_mode, field_overrides or None)
+
         bt.logging.info(
             f"MoralReasoningExperiment initialized "
-            f"(judge_model={self._judge_config['model']})"
+            f"(judge_model={self._judge_config['model']}, "
+            f"strictness_mode={strictness_mode}, "
+            f"quality_threshold={self.strictness.quality_threshold})"
         )
 
     def _build_judge_config(self) -> dict[str, Any]:
@@ -131,9 +166,9 @@ class MoralReasoningExperiment(PushExperiment):
                 or Config.MORAL_JUDGE_MODEL
                 or Config.DEFAULT_MODEL
             ),
-            "max_tokens": Config.MORAL_JUDGE_MAX_TOKENS,
-            "temperature": Config.MORAL_JUDGE_TEMPERATURE,
-            "timeout": Config.CHAT_API_TIMEOUT,
+            "max_tokens": self.setting("judge_max_tokens", Config.MORAL_JUDGE_MAX_TOKENS),
+            "temperature": self.setting("judge_temperature", Config.MORAL_JUDGE_TEMPERATURE),
+            "timeout": self.setting("chat_api_timeout", Config.CHAT_API_TIMEOUT),
         }
 
     # ----- Experiment interface -----
@@ -141,7 +176,7 @@ class MoralReasoningExperiment(PushExperiment):
     def calculate_scores(self, current_block: int) -> ExperimentScores:
         normalized = self.scoring_system.calculate_normalized_scores(
             current_block=current_block,
-            min_submissions=self.setting("min_submissions", Config.MIN_SAMPLES_FOR_WEIGHTS),
+            min_submissions=self.strictness.min_submissions,
         )
         stats = self.scoring_system.get_stats()
         return ExperimentScores(
@@ -158,6 +193,8 @@ class MoralReasoningExperiment(PushExperiment):
         stats["experiment_type"] = self.TYPE.value
         stats["weight_allocation"] = self.weight_allocation
         stats["judge_model"] = self._judge_config["model"]
+        stats["strictness_mode"] = self.setting("strictness_mode", Config.MORAL_STRICTNESS_MODE)
+        stats["quality_threshold"] = self.strictness.quality_threshold
         return stats
 
     # ----- Handler -----
@@ -231,11 +268,11 @@ class MoralReasoningExperiment(PushExperiment):
             synapse.rejection_reason = "Empty scenario"
             return synapse, None
 
-        if len(scenario) > Config.MAX_PROMPT_LENGTH:
+        if len(scenario) > self._max_prompt_length:
             synapse.response = None
             synapse.danger_score = 0.0
             synapse.accepted = False
-            synapse.rejection_reason = f"Scenario exceeds maximum length ({Config.MAX_PROMPT_LENGTH} chars)"
+            synapse.rejection_reason = f"Scenario exceeds maximum length ({self._max_prompt_length} chars)"
             return synapse, None
 
         # (2) Rate limit check — handled by ExperimentManager.route_submission()
@@ -265,6 +302,8 @@ class MoralReasoningExperiment(PushExperiment):
             with self._tracer_span("moral_reasoning.generate_response"):
                 response_text, model_used = generate_moral_response(
                     scenario, self.core.chat_client, response_model_config,
+                    max_tokens=self.setting("response_max_tokens", Config.OPENAI_MAX_TOKENS),
+                    timeout=self.setting("chat_api_timeout", Config.CHAT_API_TIMEOUT),
                 )
 
             timing_metrics["response_gen_ms"] = round((time.time() - resp_start) * 1000, 2)
@@ -293,9 +332,16 @@ class MoralReasoningExperiment(PushExperiment):
             # Build judge client — use separate API key if configured
             judge_client = self._get_judge_client()
 
+            suspicious_check_params = {
+                "high_signal_count": self.strictness.suspicious_high_signal_count,
+                "min_response_length": self.strictness.suspicious_min_response_length,
+                "perfect_score_count": self.strictness.suspicious_perfect_score_count,
+            }
+
             with self._tracer_span("moral_reasoning.judge_evaluation"):
                 signals, judge_summary, raw_judge_output = evaluate_with_judge(
                     scenario, response_text, judge_client, self._judge_config,
+                    suspicious_check_params=suspicious_check_params,
                 )
 
             timing_metrics["judge_eval_ms"] = round((time.time() - judge_start) * 1000, 2)
@@ -318,7 +364,7 @@ class MoralReasoningExperiment(PushExperiment):
             dim_scores = calculate_dimension_scores(signals)
             quality_score = calculate_quality_score(dim_scores)
             _, passed_screening, final_score = calculate_final_score(
-                signals, threshold=Config.MORAL_QUALITY_THRESHOLD
+                signals, threshold=self.strictness.quality_threshold
             )
             timing_metrics["scoring_ms"] = round((time.time() - judge_start) * 1000, 2)
 
@@ -338,6 +384,9 @@ class MoralReasoningExperiment(PushExperiment):
 
         timing_metrics["total_ms"] = round((time.time() - start_time) * 1000, 2)
 
+        # Count true signals (used for OTel + signal velocity detection)
+        true_count = sum(1 for s in signals.__dataclass_fields__ if getattr(signals, s))
+
         # Set OTel span attributes
         if self.core._tracer:
             span = trace.get_current_span()
@@ -346,8 +395,15 @@ class MoralReasoningExperiment(PushExperiment):
             span.set_attribute("moral.final_score", final_score)
             span.set_attribute("moral.response_model", model_used)
             span.set_attribute("moral.judge_model", self._judge_config["model"])
-            true_count = sum(1 for s in signals.__dataclass_fields__ if getattr(signals, s))
             span.set_attribute("moral.signals_true", true_count)
+
+        # Signal velocity detection (V3 fix: was defined but never called)
+        self.scoring_system.record_signal_velocity(
+            hotkey=miner_hotkey or "unknown",
+            true_signal_count=true_count,
+            high_signal_threshold=self.strictness.velocity_high_signal_threshold,
+            current_block=current_block,
+        )
 
         # (8) Background: audit trail logging + novelty check (FR-019)
         self.core.background_executor.submit(
@@ -487,7 +543,10 @@ class MoralReasoningExperiment(PushExperiment):
                 # exploit service quirks.
                 self.scoring_system.update_novelty(
                     hotkey=miner_hotkey or "unknown",
-                    novelty_score=Config.MORAL_NOVELTY_CHECKED_NO_SCORE_DEFAULT,
+                    novelty_score=self.setting(
+                        "novelty_checked_no_score_default",
+                        Config.MORAL_NOVELTY_CHECKED_NO_SCORE_DEFAULT,
+                    ),
                     submission_id=submission_id,
                 )
         except Exception as e:

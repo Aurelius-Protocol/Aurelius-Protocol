@@ -195,7 +195,10 @@ class OpenAIModerationProvider(ModerationProvider):
         total_weight = 0.0
 
         for category, score in category_scores.items():
-            weight = self.category_weights.get(category, 1.0)
+            weight = self.category_weights.get(category)
+            if weight is None:
+                bt.logging.warning(f"Unknown moderation category '{category}' — skipping (no default weight)")
+                continue
             weighted_sum += score * weight
             total_weight += weight
 

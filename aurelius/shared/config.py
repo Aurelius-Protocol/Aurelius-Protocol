@@ -327,13 +327,10 @@ class Config:
     MORAL_JUDGE_MAX_TOKENS: int = int(os.getenv("MORAL_JUDGE_MAX_TOKENS", "1024"))
     MORAL_JUDGE_TEMPERATURE_JITTER: float = float(os.getenv("MORAL_JUDGE_TEMPERATURE_JITTER", "0.15"))
 
-    # Per-dimension quality threshold for moral reasoning acceptance.
-    # Every dimension must score >= this value for the submission to pass.
-    MORAL_QUALITY_THRESHOLD: float = float(os.getenv("MORAL_QUALITY_THRESHOLD", "0.4"))
-
     # Novelty default when service is completely down (embedding/novelty client
-    # unavailable). Set to median of real scores so "unknown" is neutral.
-    MORAL_NOVELTY_UNAVAILABLE_DEFAULT: float = float(os.getenv("MORAL_NOVELTY_UNAVAILABLE_DEFAULT", "0.5"))
+    # unavailable). Fail-closed: unknown novelty = zero multiplier, same as
+    # the prompt experiment. Scores recover when the novelty API comes back.
+    MORAL_NOVELTY_UNAVAILABLE_DEFAULT: float = float(os.getenv("MORAL_NOVELTY_UNAVAILABLE_DEFAULT", "0.0"))
 
     # Novelty default when service was reachable but returned no score.
     # Lower than the "service down" default so miners cannot exploit service
@@ -341,6 +338,9 @@ class Config:
     MORAL_NOVELTY_CHECKED_NO_SCORE_DEFAULT: float = float(
         os.getenv("MORAL_NOVELTY_CHECKED_NO_SCORE_DEFAULT", "0.3")
     )
+
+    # Strictness mode for moral reasoning: "low", "medium", or "high".
+    MORAL_STRICTNESS_MODE: str = os.getenv("MORAL_STRICTNESS_MODE", "low")
 
     # Experiment Sync Configuration
     # Interval for syncing experiment definitions from central API (seconds)

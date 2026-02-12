@@ -293,7 +293,7 @@ class AureliusSpanExporter(SpanExporter):
             timestamp = int(time.time())
             # Include body hash to bind signature to payload (prevents replay with different body)
             body_json = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-            body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]
+            body_hash = hashlib.sha256(body_json.encode()).hexdigest()
             message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}:{body_hash}"
             signature = self.wallet.hotkey.sign(message.encode()).hex()
             headers.update({
@@ -405,7 +405,7 @@ class AureliusSpanExporter(SpanExporter):
                 # A13: Include body hash in signature message to prevent body tampering
                 body = {"hotkey": self.validator_hotkey}
                 body_json = json.dumps(body, separators=(',', ':'), sort_keys=True)
-                body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]  # Use first 16 chars
+                body_hash = hashlib.sha256(body_json.encode()).hexdigest()
 
                 # Create signed message with body hash (fresh timestamp each attempt)
                 timestamp = int(time.time())
@@ -728,7 +728,7 @@ class AureliusLogExporter(LogExporter):
             timestamp = int(time.time())
             # Include body hash to bind signature to payload (prevents replay with different body)
             body_json = json.dumps(payload, separators=(',', ':'), sort_keys=True)
-            body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]
+            body_hash = hashlib.sha256(body_json.encode()).hexdigest()
             message = f"aurelius-telemetry:{timestamp}:{self.validator_hotkey}:{body_hash}"
             signature = self.wallet.hotkey.sign(message.encode()).hex()
             headers.update({

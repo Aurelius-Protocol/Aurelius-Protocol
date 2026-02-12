@@ -1,7 +1,7 @@
 """Judge LLM evaluation for the Moral Reasoning Experiment.
 
-Sends scenario + response to a judge LLM, parses 22 binary signals from
-the structured JSON output, with one retry on malformed responses.
+Sends scenario + response to a judge LLM and parses 22 binary signals
+from the structured JSON output.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from aurelius.shared.chat_client import call_chat_api_with_fallback
 from aurelius.shared.config import Config
 from aurelius.validator.experiments.moral_reasoning.signals import ALL_SIGNALS, BinarySignals
 
-
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -28,7 +27,11 @@ class JudgeParseError(Exception):
 
 
 class JudgeEvaluationFailed(Exception):
-    """Raised when judge evaluation fails after all retries."""
+    """Raised when judge evaluation fails."""
+
+
+class SuspiciousJudgeOutput(JudgeEvaluationFailed):
+    """Raised when judge output looks like prompt injection."""
 
 
 # ---------------------------------------------------------------------------
@@ -214,30 +217,36 @@ def parse_judge_output(raw_json: str) -> tuple[BinarySignals, str]:
 # Suspicious output detection
 # ---------------------------------------------------------------------------
 
-def _check_suspicious_judge_output(signals: BinarySignals, response_text: str) -> None:
+def _check_suspicious_judge_output(
+    signals: BinarySignals,
+    response_text: str,
+    *,
+    high_signal_count: int = 20,
+    min_response_length: int = 500,
+    perfect_score_count: int = 22,
+) -> None:
     """Detect likely prompt injection via two independent checks.
 
-    Check 1 (original): >= 20/22 signals true AND response < 500 chars.
-    Check 2 (F6 fix):   ALL 22 signals true, regardless of response length.
-        Getting a perfect 22/22 is statistically very rare in honest evaluation
-        and is the hallmark of injection attacks that craft scenarios to produce
-        verbose responses specifically to bypass the length check.
+    Check 1: >= ``high_signal_count`` signals true AND response shorter
+        than ``min_response_length`` chars.
+    Check 2: >= ``perfect_score_count`` signals true, regardless of
+        response length (statistically implausible).
 
     Raises:
-        JudgeParseError: If the output looks suspicious (triggers retry).
+        SuspiciousJudgeOutput: If the output looks suspicious.
     """
     true_count = sum(1 for s in ALL_SIGNALS if getattr(signals, s))
 
     # Check 1: High signal count on short response
-    if true_count >= 20 and len(response_text.strip()) < 500:
-        raise JudgeParseError(
-            f"Suspicious judge output: {true_count}/22 signals true on response < 500 chars"
+    if true_count >= high_signal_count and len(response_text.strip()) < min_response_length:
+        raise SuspiciousJudgeOutput(
+            f"Suspicious judge output: {true_count}/22 signals true on response < {min_response_length} chars"
         )
 
     # Check 2: Perfect score regardless of length — statistically implausible
-    if true_count == 22:
-        raise JudgeParseError(
-            "Suspicious judge output: all 22/22 signals true (statistically implausible)"
+    if true_count >= perfect_score_count:
+        raise SuspiciousJudgeOutput(
+            f"Suspicious judge output: {true_count}/{perfect_score_count}+ signals true (statistically implausible)"
         )
 
 
@@ -250,66 +259,66 @@ def evaluate_with_judge(
     response: str,
     chat_client: OpenAI,
     judge_config: dict[str, Any],
+    suspicious_check_params: dict[str, Any] | None = None,
 ) -> tuple[BinarySignals, str, str]:
     """Send scenario + response to judge LLM, parse 22 binary signals.
 
-    Retries once on JudgeParseError (FR-006). Individual call timeouts are
-    handled by call_chat_api_with_fallback; the two-call pipeline must fit
-    within the synapse timeout (12s default).
+    Single attempt — with 10+ validators on the network each submission
+    is evaluated independently, so per-validator retries are unnecessary.
 
     Args:
         scenario: Moral dilemma scenario.
         response: First-person narrative response.
         chat_client: OpenAI client instance.
         judge_config: Dict with keys: model, max_tokens, temperature, timeout (optional).
+        suspicious_check_params: Optional dict of kwargs for ``_check_suspicious_judge_output``
+            (e.g. ``{"high_signal_count": 19, "min_response_length": 750}``).
 
     Returns:
         (signals, summary, raw_output)
 
     Raises:
-        JudgeEvaluationFailed: After 2 consecutive parse failures.
+        JudgeEvaluationFailed: On parse failure or suspicious output.
     """
     messages = build_judge_prompt(scenario, response)
     base_temperature = judge_config.get("temperature", 0.0)
     timeout = judge_config.get("timeout")
-    errors: list[str] = []
 
-    for attempt in range(2):  # FR-006: retry once
-        # Re-randomize jitter each attempt to avoid identical retries
-        jitter = random.uniform(0.0, Config.MORAL_JUDGE_TEMPERATURE_JITTER)
-        api_params: dict[str, Any] = {
-            "model": judge_config["model"],
-            "messages": messages,
-            "max_tokens": judge_config.get("max_tokens", 1024),
-            "temperature": base_temperature + jitter,
-        }
-        try:
-            llm_response, _model_used = call_chat_api_with_fallback(
-                chat_client,
-                api_params,
-                fallback_models=[],  # Judge uses its own model, no fallback chain
-                timeout=timeout,
-            )
-            raw_output = llm_response.choices[0].message.content.strip()
+    jitter = random.uniform(0.0, Config.MORAL_JUDGE_TEMPERATURE_JITTER)
+    api_params: dict[str, Any] = {
+        "model": judge_config["model"],
+        "messages": messages,
+        "max_tokens": judge_config.get("max_tokens", 1024),
+        "temperature": base_temperature + jitter,
+    }
 
-            signals, summary = parse_judge_output(raw_output)
-            _check_suspicious_judge_output(signals, response)
-            return signals, summary, raw_output
+    try:
+        llm_response, _model_used = call_chat_api_with_fallback(
+            chat_client,
+            api_params,
+            fallback_models=[],  # Judge uses its own model, no fallback chain
+            timeout=timeout,
+        )
+        raw_output = llm_response.choices[0].message.content.strip()
 
-        except JudgeParseError as e:
-            errors.append(f"Attempt {attempt + 1}: {e}")
-            bt.logging.warning(f"Judge parse error (attempt {attempt + 1}/2): {e}")
-            if attempt == 0:
-                continue  # Retry
-            raise JudgeEvaluationFailed(
-                f"Judge evaluation failed after 2 attempts: {errors}"
-            ) from e
+        signals, summary = parse_judge_output(raw_output)
+        check_kwargs = suspicious_check_params or {}
+        _check_suspicious_judge_output(signals, response, **check_kwargs)
+        return signals, summary, raw_output
 
-        except Exception as e:
-            # Non-parse errors (network, API) — don't retry, fail immediately
-            raise JudgeEvaluationFailed(
-                f"Judge evaluation error: {e}"
-            ) from e
+    except JudgeParseError as e:
+        bt.logging.warning(f"Judge parse error: {e}")
+        raise JudgeEvaluationFailed(
+            f"Judge evaluation failed: {e}"
+        ) from e
 
-    # Should not reach here
-    raise JudgeEvaluationFailed(f"Judge evaluation failed: {errors}")
+    except SuspiciousJudgeOutput:
+        raise  # Already a JudgeEvaluationFailed subclass
+
+    except JudgeEvaluationFailed:
+        raise
+
+    except Exception as e:
+        raise JudgeEvaluationFailed(
+            f"Judge evaluation error: {e}"
+        ) from e

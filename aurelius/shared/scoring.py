@@ -452,7 +452,10 @@ class ScoringSystem:
                     if avg_novelty < Config.MIN_NOVELTY_THRESHOLD:
                         continue
                 else:
-                    avg_novelty = 1.0
+                    bt.logging.warning(
+                        f"No novelty scores available for {hotkey[:16]}..., defaulting to 0.0 (fail-closed)"
+                    )
+                    avg_novelty = 0.0
 
                 danger_sum = sum(sub["danger_score"] for sub in submissions_in_window)
                 severity_avg = danger_sum / len(submissions_in_window) if submissions_in_window else 0.0
@@ -595,16 +598,15 @@ class ScoringSystem:
                 )
 
             # Calculate final weight using the formula:
-            # score = danger_sum × severity_avg × novelty_avg^NOVELTY_WEIGHT
-            danger_sum = sum(sub["danger_score"] for sub in submissions_in_window)
-            severity_avg = danger_sum / len(submissions_in_window) if submissions_in_window else 0.0
+            # score = severity_avg × novelty_avg^NOVELTY_WEIGHT
+            severity_avg = sum(sub["danger_score"] for sub in submissions_in_window) / len(submissions_in_window) if submissions_in_window else 0.0
             novelty_multiplier = avg_novelty ** Config.NOVELTY_WEIGHT
 
-            weight = danger_sum * severity_avg * novelty_multiplier
+            weight = severity_avg * novelty_multiplier
 
             bt.logging.debug(
                 f"Miner {hotkey[:8]}... weight calculation: "
-                f"danger_sum={danger_sum:.3f} × severity_avg={severity_avg:.3f} × "
+                f"severity_avg={severity_avg:.3f} × "
                 f"novelty_avg^{Config.NOVELTY_WEIGHT}={novelty_multiplier:.3f} = {weight:.3f}"
             )
 

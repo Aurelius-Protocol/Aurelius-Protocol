@@ -170,6 +170,7 @@ class ValidatorHealthChecker:
         This performs:
         1. DNS resolution (if hostname)
         2. TCP connectivity test
+        3. HTTP readiness probe (best-effort)
 
         Args:
             host: Validator host (IP or hostname)
@@ -186,7 +187,51 @@ class ValidatorHealthChecker:
 
         # Step 2: TCP connectivity
         tcp_result = self.check_tcp_connectivity(host, port)
+        if not tcp_result.is_healthy:
+            return tcp_result
+
+        # Step 3: HTTP readiness probe (best-effort)
+        http_result = self._check_http_readiness(host, port)
+        if http_result is not None and not http_result.is_healthy:
+            return http_result
+
         return tcp_result
+
+    def _check_http_readiness(self, host: str, port: int) -> HealthCheckResult | None:
+        """Best-effort HTTP readiness check. Returns None if inconclusive."""
+        import urllib.error
+        import urllib.request
+
+        try:
+            url = f"http://{host}:{port}/"
+            req = urllib.request.Request(url, method="HEAD")
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                if resp.status >= 500:
+                    return HealthCheckResult(
+                        is_healthy=False,
+                        error=create_error(
+                            ErrorCategory.API_ERROR,
+                            {"host": host, "port": port},
+                            Exception(f"Validator returned HTTP {resp.status}"),
+                        ),
+                        details={"host": host, "port": port, "http_status": resp.status},
+                    )
+        except urllib.error.HTTPError as e:
+            # 4xx errors (405 Method Not Allowed, etc.) mean the server is up
+            if e.code >= 500:
+                return HealthCheckResult(
+                    is_healthy=False,
+                    error=create_error(
+                        ErrorCategory.API_ERROR,
+                        {"host": host, "port": port},
+                        e,
+                    ),
+                    details={"host": host, "port": port, "http_status": e.code},
+                )
+        except Exception:
+            # HTTP check is best-effort; TCP already passed, so don't fail
+            pass
+        return None
 
     def _is_ip_address(self, host: str) -> bool:
         """Check if host is an IP address (not hostname)."""

@@ -6,13 +6,11 @@ Tests the full pipeline with mocked LLM calls: scenario submission → moderatio
 
 import json
 import tempfile
-from dataclasses import asdict
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aurelius.validator.experiments.moral_reasoning.signals import ALL_SIGNALS, BinarySignals
-
+from aurelius.validator.experiments.moral_reasoning.signals import ALL_SIGNALS
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -21,7 +19,7 @@ from aurelius.validator.experiments.moral_reasoning.signals import ALL_SIGNALS, 
 def _make_valid_judge_output(overrides: dict | None = None) -> str:
     # Default to 21/22 signals true (leave one non-critical signal false) to
     # avoid triggering the F6 all-22-true suspicious output check.
-    signals = {s: True for s in ALL_SIGNALS}
+    signals = dict.fromkeys(ALL_SIGNALS, True)
     signals["identifying_third_party"] = False  # non-screening signal
     if overrides:
         signals.update(overrides)
@@ -190,18 +188,17 @@ class TestMoralReasoningPipeline:
     @patch("aurelius.validator.experiments.moral_reasoning.experiment.call_chat_api_with_fallback")
     @patch("aurelius.validator.experiments.moral_reasoning.judge.call_chat_api_with_fallback")
     def test_judge_failure_returns_zero(self, mock_judge_call, mock_response_call):
-        """If judge fails after retries, score = 0."""
+        """If judge fails (single attempt), score = 0."""
         core = _make_mock_core()
 
         mock_response_call.return_value = (
             _mock_llm_response("My response..."),
             "model-a",
         )
-        # Judge returns malformed JSON both times
-        mock_judge_call.side_effect = [
-            (_mock_llm_response("not json"), "gpt-4o"),
-            (_mock_llm_response("still not json"), "gpt-4o"),
-        ]
+        # Judge returns malformed JSON — single attempt, no retry
+        mock_judge_call.return_value = (
+            _mock_llm_response("not json"), "gpt-4o",
+        )
 
         experiment = _make_experiment(core)
         synapse = MagicMock()
@@ -214,6 +211,7 @@ class TestMoralReasoningPipeline:
         assert result.danger_score == 0.0
         assert result.accepted is False
         assert "judge" in result.rejection_reason.lower()
+        assert mock_judge_call.call_count == 1
 
     def test_calculate_scores_returns_experiment_scores(self):
         """Verify calculate_scores returns ExperimentScores format."""
@@ -262,3 +260,63 @@ class TestMoralReasoningPipeline:
 
         # _handle_scenario should NOT call check_rate_limits (F2 fix)
         core.experiment_manager.check_rate_limits.assert_not_called()
+
+
+class TestStrictnessIntegration:
+    """Verify strictness mode wiring in the experiment."""
+
+    def test_default_strictness_is_low(self):
+        core = _make_mock_core()
+        experiment = _make_experiment(core)
+        assert experiment.strictness.quality_threshold == 0.4
+
+    def test_strictness_from_settings(self):
+        """Strictness mode from experiment settings overrides default."""
+        from aurelius.validator.experiments.base import ExperimentConfig, ExperimentType
+        from aurelius.validator.experiments.moral_reasoning.experiment import MoralReasoningExperiment
+
+        core = _make_mock_core()
+        tmp_dir = tempfile.mkdtemp(prefix="strict_test_")
+        config = ExperimentConfig(
+            name="moral-reasoning",
+            experiment_type=ExperimentType.PUSH,
+            weight_allocation=0.2,
+            enabled=True,
+            settings={
+                "persistence_path": f"{tmp_dir}/scores.json",
+                "strictness_mode": "high",
+            },
+        )
+        experiment = MoralReasoningExperiment(core=core, config=config)
+        assert experiment.strictness.quality_threshold == 0.8
+
+    def test_field_override_from_settings(self):
+        """Per-field override from settings takes precedence over mode."""
+        from aurelius.validator.experiments.base import ExperimentConfig, ExperimentType
+        from aurelius.validator.experiments.moral_reasoning.experiment import MoralReasoningExperiment
+
+        core = _make_mock_core()
+        tmp_dir = tempfile.mkdtemp(prefix="strict_test_")
+        config = ExperimentConfig(
+            name="moral-reasoning",
+            experiment_type=ExperimentType.PUSH,
+            weight_allocation=0.2,
+            enabled=True,
+            settings={
+                "persistence_path": f"{tmp_dir}/scores.json",
+                "strictness_mode": "low",
+                "quality_threshold": 0.55,
+            },
+        )
+        experiment = MoralReasoningExperiment(core=core, config=config)
+        assert experiment.strictness.quality_threshold == 0.55
+        # Other low defaults remain
+        assert experiment.strictness.suspicious_high_signal_count == 20
+
+    def test_stats_include_strictness(self):
+        core = _make_mock_core()
+        experiment = _make_experiment(core)
+        stats = experiment.get_stats()
+        assert "strictness_mode" in stats
+        assert "quality_threshold" in stats
+        assert stats["quality_threshold"] == 0.4

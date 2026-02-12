@@ -1,9 +1,11 @@
 """Protocol definitions for miner-validator communication."""
 
+import json
+import math
 from typing import Any
 
 import bittensor as bt
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class PromptSynapse(bt.Synapse):
@@ -93,6 +95,14 @@ class PromptSynapse(bt.Synapse):
         le=2.0,
     )
 
+    @field_validator("temperature", "top_p", "frequency_penalty", "presence_penalty", mode="before")
+    @classmethod
+    def reject_nan_inf(cls, v: float | None) -> float | None:
+        """Reject NaN and Infinity values that could propagate to LLM APIs."""
+        if v is not None and (math.isnan(v) or math.isinf(v)):
+            raise ValueError(f"Value cannot be NaN or Infinity: {v}")
+        return v
+
     min_chars: int | None = Field(
         None,
         title="Minimum Characters",
@@ -143,6 +153,12 @@ class PromptSynapse(bt.Synapse):
         None,
         title="Rejection Reason",
         description="Reason for rejection (rate limit, low score, error, etc.)",
+    )
+
+    rejection_code: str | None = Field(
+        None,
+        title="Rejection Code",
+        description="Machine-readable rejection code (e.g., RATE_LIMITED, INVALID_PARAMS)",
     )
 
     # Miner statistics (filled by validator)
@@ -231,6 +247,50 @@ class PromptSynapse(bt.Synapse):
         title="Submission Token",
         description="Unique token for this submission. Use with SubmissionStatusSynapse to poll for results.",
     )
+
+    @field_validator("distribution_stats", mode="before")
+    @classmethod
+    def validate_distribution_stats(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject distribution_stats exceeding size limits (max 100 keys, max 50KB serialized)."""
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("distribution_stats must be a dict")
+        if len(v) > 100:
+            raise ValueError(f"distribution_stats has {len(v)} keys, max 100")
+        serialized = json.dumps(v, separators=(",", ":"))
+        if len(serialized) > 50 * 1024:
+            raise ValueError(f"distribution_stats is {len(serialized)} bytes serialized, max 50KB")
+        return v
+
+    @field_validator("available_experiments", mode="before")
+    @classmethod
+    def validate_available_experiments(cls, v: list[str] | None) -> list[str] | None:
+        """Reject available_experiments exceeding size limits (max 100 items, each max 100 chars)."""
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("available_experiments must be a list")
+        if len(v) > 100:
+            raise ValueError(f"available_experiments has {len(v)} items, max 100")
+        for i, item in enumerate(v):
+            if not isinstance(item, str):
+                raise ValueError(f"available_experiments[{i}] must be a string")
+            if len(item) > 100:
+                raise ValueError(f"available_experiments[{i}] is {len(item)} chars, max 100")
+        return v
+
+    @field_validator("category_scores", mode="before")
+    @classmethod
+    def validate_category_scores(cls, v: dict[str, float] | None) -> dict[str, float] | None:
+        """Reject category_scores exceeding size limits (max 50 keys)."""
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("category_scores must be a dict")
+        if len(v) > 50:
+            raise ValueError(f"category_scores has {len(v)} keys, max 50")
+        return v
 
     def deserialize(self) -> str:
         """Return the response for easy access."""

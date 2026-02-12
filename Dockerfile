@@ -52,7 +52,20 @@ RUN pip install --no-cache-dir -e .
 RUN pip install --no-cache-dir bittensor-cli
 
 # -----------------------------------------------------------------------------
-# Stage 2: Runtime - Minimal production image
+# Stage 2: Test runner - Builder + dev dependencies
+# -----------------------------------------------------------------------------
+FROM builder AS test
+
+# Install dev dependencies (pytest, ruff, mypy, etc.)
+RUN pip install --no-cache-dir -e ".[dev]"
+
+WORKDIR /build
+
+# Default: run all tests. Override with docker compose command.
+CMD ["python", "-m", "pytest"]
+
+# -----------------------------------------------------------------------------
+# Stage 3: Runtime - Minimal production image
 # -----------------------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
 

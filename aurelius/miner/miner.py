@@ -1,6 +1,7 @@
 """Miner implementation - submits prompts to validators."""
 
 import argparse
+import os
 import signal
 import sys
 import threading
@@ -282,6 +283,24 @@ def send_prompt(
     if temperature is not None:
         bt.logging.info(f"Temperature: {temperature}")
 
+    # Validate and clamp parameters before synapse construction
+    import math
+
+    def _validate_param(
+        name: str, value: float | None, lo: float, hi: float
+    ) -> float | None:
+        if value is None:
+            return None
+        if math.isnan(value) or math.isinf(value):
+            bt.logging.warning(f"Parameter {name}={value} is NaN/Infinity, ignoring")
+            return None
+        return max(lo, min(hi, value))
+
+    temperature = _validate_param("temperature", temperature, 0.0, 2.0)
+    top_p = _validate_param("top_p", top_p, 0.0, 1.0)
+    frequency_penalty = _validate_param("frequency_penalty", frequency_penalty, -2.0, 2.0)
+    presence_penalty = _validate_param("presence_penalty", presence_penalty, -2.0, 2.0)
+
     # Create the synapse with the prompt and model specifications
     synapse = PromptSynapse(
         prompt=prompt,
@@ -319,13 +338,17 @@ def send_prompt(
         )
 
         # Create a custom axon info for the local validator
+        # Use real validator hotkey if available (env VALIDATOR_HOTKEY_SS58)
+        # so that Bittensor's signature verification passes
+        local_hotkey = os.environ.get("VALIDATOR_HOTKEY_SS58", "local_validator")
+        local_coldkey = os.environ.get("VALIDATOR_COLDKEY_SS58", "local_coldkey")
         target_axon = bt.AxonInfo(
             version=1,
             ip=Config.VALIDATOR_HOST,
             port=Config.BT_PORT_VALIDATOR,
             ip_type=4,
-            hotkey="local_validator",  # Dummy hotkey for local mode
-            coldkey="local_coldkey",
+            hotkey=local_hotkey,
+            coldkey=local_coldkey,
         )
     else:
         # Normal mode: Query metagraph for validator UID
@@ -411,13 +434,14 @@ def send_prompt(
 
     # Check for rejection (rate limit, validation errors)
     if result_synapse and hasattr(result_synapse, "rejection_reason") and result_synapse.rejection_reason:
+        code = getattr(result_synapse, "rejection_code", None) or ""
         rejection = result_synapse.rejection_reason.lower()
-        if "rate limit" in rejection:
+        if code == "RATE_LIMITED" or (not code and "rate limit" in rejection):
             error = create_error(ErrorCategory.RATE_LIMITED, context)
             context["reason"] = result_synapse.rejection_reason
             print(formatter.format_error(error, context))
             return ""
-        elif "error" in rejection:
+        elif code.startswith("INVALID") or (not code and "error" in rejection):
             error = create_error(ErrorCategory.API_ERROR, context)
             context["reason"] = result_synapse.rejection_reason
             print(formatter.format_error(error, context))
@@ -455,12 +479,16 @@ def send_prompt(
         return token
 
     # --- Phase 2: Poll for results ---
+    MAX_POLL_COUNT = 60
     print(f"\n{CYAN}Polling for results (interval={poll_interval}s, max={max_poll_time}s)...{RESET}")
 
     poll_start = time.time()
     last_status = None
+    poll_count = 0
+    current_interval = poll_interval
 
-    while (time.time() - poll_start) < max_poll_time:
+    while (time.time() - poll_start) < max_poll_time and poll_count < MAX_POLL_COUNT:
+        poll_count += 1
         elapsed = int(time.time() - poll_start)
 
         status_synapse = SubmissionStatusSynapse(submission_token=token)
@@ -473,7 +501,8 @@ def send_prompt(
             )
         except Exception as e:
             bt.logging.warning(f"Poll failed: {e}")
-            time.sleep(poll_interval)
+            time.sleep(current_interval)
+            current_interval = min(current_interval * 1.5, 30.0)
             continue
 
         # Extract status synapse
@@ -492,7 +521,11 @@ def send_prompt(
         if status in ("COMPLETED", "FAILED", "TIMEOUT"):
             break
 
-        time.sleep(poll_interval)
+        time.sleep(current_interval)
+        current_interval = min(current_interval * 1.5, 30.0)
+
+    if poll_count >= MAX_POLL_COUNT:
+        bt.logging.warning(f"Max poll count ({MAX_POLL_COUNT}) reached for token {token}")
 
     if not status_result or not status:
         print(f"\n{YELLOW}Polling timed out after {max_poll_time}s. Token: {token}{RESET}")

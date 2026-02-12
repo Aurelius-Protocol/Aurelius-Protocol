@@ -237,7 +237,7 @@ class DatasetLogger:
                 timestamp = int(time.time())
                 hotkey = self.wallet.hotkey.ss58_address
                 # Compute body hash to bind signature to payload (prevents replay with different body)
-                body_hash = hashlib.sha256(body_json.encode()).hexdigest()[:16]
+                body_hash = hashlib.sha256(body_json.encode()).hexdigest()
                 message = f"aurelius-submission:{timestamp}:{hotkey}:{body_hash}"
                 signature = self.wallet.hotkey.sign(message.encode()).hex()
                 headers.update({

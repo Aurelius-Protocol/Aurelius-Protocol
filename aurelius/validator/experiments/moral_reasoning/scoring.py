@@ -19,8 +19,6 @@ from pathlib import Path
 
 import bittensor as bt
 
-from aurelius.shared.config import Config
-
 
 @dataclass
 class MinerMoralScore:
@@ -50,6 +48,8 @@ class MinerMoralScore:
     # Signal velocity tracking — sliding window of recent true-signal counts
     signal_velocity_window: list[int] | None = None  # Recent true-signal counts
     flagged_for_review: bool = False
+    flag_count: int = 0  # Total times flagged (persisted, never resets)
+    flag_block: int | None = None  # Block height when last flagged
 
 
 class MoralReasoningScoringSystem:
@@ -64,14 +64,21 @@ class MoralReasoningScoringSystem:
         persistence_path: str = "./moral_reasoning_scores.json",
         window_blocks: int = 1000,
         history_retention_blocks: int = 10000,
+        novelty_unavailable_default: float = 0.0,
+        top_rewarded_miners: int = 3,
     ):
         self._lock = threading.RLock()
         self.persistence_path = persistence_path
         self.window_blocks = window_blocks
         self.history_retention_blocks = history_retention_blocks
+        self.novelty_unavailable_default = novelty_unavailable_default
+        self.top_rewarded_miners = top_rewarded_miners
 
         self.miner_scores: dict[str, MinerMoralScore] = {}
         self.score_history: dict[str, list] = defaultdict(list)
+
+        # Escalating cooldown: 1st flag = 1000 blocks (~3.3h), 2nd = 5000 (~16h), 3rd+ = permanent
+        self.flag_cooldowns = [1000, 5000]
 
         self._load()
         bt.logging.info(f"MoralReasoningScoringSystem initialized (path: {persistence_path})")
@@ -141,17 +148,26 @@ class MoralReasoningScoringSystem:
         true_signal_count: int,
         high_signal_threshold: int = 20,
         window_size: int | None = None,
+        flag_ratio: float = 0.5,
+        current_block: int | None = None,
     ) -> bool:
         """Track signal velocity using a sliding window — flag miners with high ratios.
 
         Only the most recent *window_size* submissions are considered, so old
         legitimate submissions cannot dilute a burst of injected ones (F4 fix).
 
+        Flagging uses escalating cooldowns (V2 fix):
+        - 1st flag: 1000-block cooldown before possible unflag
+        - 2nd flag: 5000-block cooldown
+        - 3rd+ flag: permanent (no auto-unflag)
+
         Args:
             hotkey: Miner's hotkey.
             true_signal_count: Number of true signals in this submission.
             high_signal_threshold: Threshold for "high signal" (default 20).
             window_size: Number of recent submissions to track (default 20).
+            flag_ratio: Fraction of high-signal submissions that triggers flagging (default 0.5).
+            current_block: Current block height (needed for cooldown tracking).
 
         Returns:
             True if the miner is flagged for review.
@@ -179,29 +195,50 @@ class MoralReasoningScoringSystem:
             recent_count = len(window)
             high_count = sum(1 for c in window if c >= high_signal_threshold)
 
-            # Flag if > 50% of recent window has 20+ signals (min 4 submissions)
-            if recent_count >= 4 and high_count / recent_count > 0.5:
+            # Flag if ratio of high-signal submissions exceeds threshold (min 4 submissions)
+            if recent_count >= 4 and high_count / recent_count > flag_ratio:
                 if not score.flagged_for_review:
                     score.flagged_for_review = True
+                    score.flag_count += 1
+                    score.flag_block = current_block
                     bt.logging.warning(
-                        f"Miner {hotkey} flagged for review: "
+                        f"Miner {hotkey} flagged for review (flag #{score.flag_count}): "
                         f"{high_count}/{recent_count} recent submissions "
                         f"have {high_signal_threshold}+ signals"
                     )
                     self._save()
                 return True
 
-            # Un-flag if miner's recent window drops below threshold
-            if score.flagged_for_review and (recent_count < 4 or high_count / recent_count <= 0.5):
-                score.flagged_for_review = False
-                bt.logging.info(
-                    f"Miner {hotkey} un-flagged: "
-                    f"{high_count}/{recent_count} recent submissions "
-                    f"now below threshold"
-                )
-                self._save()
+            # Only consider unflagging if cooldown has elapsed (V2 fix)
+            if score.flagged_for_review:
+                cooldown = self._get_cooldown_blocks(score.flag_count)
+                if cooldown is None:
+                    # Permanent flag (3rd+ offense) — no auto-unflag
+                    return False
+                if current_block is None or score.flag_block is None:
+                    return False  # Can't check cooldown without block heights
+                blocks_since_flag = current_block - score.flag_block
+                if blocks_since_flag < cooldown:
+                    return False  # Still in cooldown
+                # Cooldown elapsed AND window is now below threshold → unflag
+                if recent_count < 4 or high_count / recent_count <= flag_ratio:
+                    score.flagged_for_review = False
+                    bt.logging.info(
+                        f"Miner {hotkey} un-flagged after cooldown ({blocks_since_flag} blocks, "
+                        f"flag #{score.flag_count}): {high_count}/{recent_count} below threshold"
+                    )
+                    self._save()
 
             return False
+
+    def _get_cooldown_blocks(self, flag_count: int) -> int | None:
+        """Return cooldown in blocks for this flag offense, or None for permanent."""
+        if flag_count <= 0:
+            return 0
+        idx = flag_count - 1
+        if idx >= len(self.flag_cooldowns):
+            return None  # Permanent
+        return self.flag_cooldowns[idx]
 
     def update_novelty(
         self, hotkey: str, novelty_score: float, submission_id: str | None = None
@@ -289,7 +326,7 @@ class MoralReasoningScoringSystem:
                 if novelty_scores:
                     avg_novelty = sum(novelty_scores) / len(novelty_scores)
                 else:
-                    avg_novelty = Config.MORAL_NOVELTY_UNAVAILABLE_DEFAULT
+                    avg_novelty = self.novelty_unavailable_default
 
                 raw_score = avg_quality * avg_novelty
 
@@ -308,7 +345,7 @@ class MoralReasoningScoringSystem:
 
             # Top-N equal split: top miners share weight equally
             sorted_miners = sorted(raw_scores.items(), key=lambda x: x[1], reverse=True)
-            top_n = sorted_miners[:Config.TOP_REWARDED_MINERS]
+            top_n = sorted_miners[:self.top_rewarded_miners]
             equal_weight = 1.0 / len(top_n)
             return {hotkey: equal_weight for hotkey, _ in top_n}
 
