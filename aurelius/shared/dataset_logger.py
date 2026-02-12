@@ -1,6 +1,7 @@
 """Dataset logger for collecting alignment data."""
 
 import atexit
+import hashlib
 import json
 import os
 import tempfile
@@ -9,7 +10,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from queue import Queue
+from queue import Full, Queue
 
 import bittensor as bt
 import requests
@@ -51,6 +52,7 @@ class DatasetEntry:
         timing_metrics: Timing information (API call duration, moderation, total)
         network_context: Network context (subnet_uid, block_height, stakes)
         prompt_embedding: Pre-computed embedding vector (384 dimensions)
+        experiment_id: Experiment ID for per-experiment novelty pools (T087)
     """
 
     timestamp: str
@@ -81,6 +83,7 @@ class DatasetEntry:
     timing_metrics: dict | None = None
     network_context: dict | None = None
     prompt_embedding: list[float] | None = None
+    experiment_id: str | None = None  # T087: Per-experiment tracking
 
 
 class DatasetLogger:
@@ -92,6 +95,7 @@ class DatasetLogger:
         central_api_endpoint: str | None = None,
         central_api_key: str | None = None,
         enable_local_backup: bool = True,
+        wallet: "bt.Wallet | None" = None,
     ):
         """
         Initialize dataset logger.
@@ -101,24 +105,30 @@ class DatasetLogger:
             central_api_endpoint: URL of central API for data collection
             central_api_key: API key for authentication
             enable_local_backup: Whether to save local backups
+            wallet: Bittensor wallet for signing submissions (optional)
         """
         self.local_path = local_path
         self.central_api_endpoint = central_api_endpoint
         self.central_api_key = central_api_key
         self.enable_local_backup = enable_local_backup
+        self.wallet = wallet
 
         # Create local directory if needed
         if self.enable_local_backup and self.local_path:
             Path(self.local_path).mkdir(parents=True, exist_ok=True)
             bt.logging.info(f"Dataset logger: Local backup enabled at {self.local_path}")
 
-        # Queue for async processing
-        self.queue: Queue = Queue()
+        # Queue for async processing (bounded to prevent memory exhaustion during API outages)
+        from aurelius.shared.config import Config
+        self.queue: Queue = Queue(maxsize=Config.DATASET_LOGGER_QUEUE_MAXSIZE)
         self.worker_thread = None
         self.running = False
 
         # Thread lock for atomic file writes
         self._file_write_lock = threading.Lock()
+
+        # HTTP session for connection pooling
+        self._session = requests.Session()
 
         # Submission statistics
         self.submissions_successful = 0
@@ -217,14 +227,37 @@ class DatasetLogger:
         if self.central_api_key:
             headers["Authorization"] = f"Bearer {self.central_api_key}"
 
+        # Serialize body once — used for both hashing and sending to ensure consistency
         data = asdict(entry)
+        body_json = json.dumps(data, separators=(',', ':'), sort_keys=True)
+
+        # Add wallet signature for authenticated submissions
+        if self.wallet:
+            try:
+                timestamp = int(time.time())
+                hotkey = self.wallet.hotkey.ss58_address
+                # Compute body hash to bind signature to payload (prevents replay with different body)
+                body_hash = hashlib.sha256(body_json.encode()).hexdigest()
+                message = f"aurelius-submission:{timestamp}:{hotkey}:{body_hash}"
+                signature = self.wallet.hotkey.sign(message.encode()).hex()
+                headers.update({
+                    "X-Validator-Hotkey": hotkey,
+                    "X-Signature": signature,
+                    "X-Timestamp": str(timestamp),
+                    "X-Body-Hash": body_hash,
+                })
+            except Exception as e:
+                bt.logging.warning(f"Failed to sign dataset submission: {e}")
+
         last_status_code = None
 
         for attempt in range(max_retries):
             try:
-                response = requests.post(
+                # Send body_json directly (not json=data) to ensure the exact bytes
+                # that were hashed are what the server receives
+                response = self._session.post(
                     self.central_api_endpoint,
-                    json=data,
+                    data=body_json,
                     headers=headers,
                     timeout=10,
                 )
@@ -304,8 +337,8 @@ class DatasetLogger:
             try:
                 if 'tmp_path' in locals():
                     os.unlink(tmp_path)
-            except:
-                pass
+            except OSError as cleanup_err:
+                bt.logging.debug(f"Failed to clean up temp file: {cleanup_err}")
             return False
 
     def log_entry(
@@ -337,6 +370,7 @@ class DatasetLogger:
         timing_metrics: dict | None = None,
         network_context: dict | None = None,
         prompt_embedding: list[float] | None = None,
+        experiment_id: str | None = None,
     ) -> None:
         """
         Log a dataset entry.
@@ -402,6 +436,7 @@ class DatasetLogger:
             timing_metrics=timing_metrics,
             network_context=network_context,
             prompt_embedding=prompt_embedding,
+            experiment_id=experiment_id,  # T087: Per-experiment tracking
         )
 
         # Save locally (blocking, fast)
@@ -410,8 +445,15 @@ class DatasetLogger:
 
         # Queue for central API submission (non-blocking)
         if self.central_api_endpoint:
-            self.queue.put(entry)
-            bt.logging.debug(f"Dataset logger: Entry queued (queue size: {self.queue.qsize()})")
+            try:
+                self.queue.put_nowait(entry)
+                bt.logging.debug(f"Dataset logger: Entry queued (queue size: {self.queue.qsize()})")
+            except Full:
+                self.submissions_failed += 1
+                bt.logging.warning(
+                    f"Dataset logger: Queue full ({self.queue.maxsize} entries), dropping entry. "
+                    f"Central API may be slow or down. (total dropped: {self.submissions_failed})"
+                )
 
     def stop(self):
         """Stop the background worker thread with queue persistence."""
@@ -440,8 +482,8 @@ class DatasetLogger:
             try:
                 self.queue.join()  # This will return when queue is empty
                 break
-            except:
-                pass
+            except Exception as e:
+                bt.logging.debug(f"Queue join interrupted: {e}")
             remaining_items = self.queue.qsize()
             items_processed = queue_size - remaining_items
 
@@ -462,6 +504,9 @@ class DatasetLogger:
         else:
             bt.logging.info("Dataset logger worker stopped cleanly")
 
+        # Close HTTP session to release connection pool resources
+        self._session.close()
+
     def _persist_queue(self):
         """Persist remaining queue items to disk to prevent data loss."""
         if not self.enable_local_backup or not self.local_path:
@@ -475,7 +520,7 @@ class DatasetLogger:
                     entry = self.queue.get_nowait()
                     if entry is not None:  # Skip poison pill
                         remaining_items.append(entry)
-                except:
+                except Exception:
                     break
 
             if remaining_items:

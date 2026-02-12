@@ -338,11 +338,11 @@ class ConsensusCoordinator:
         if Config.LOG_CONSENSUS_DETAILS:
             bt.logging.info("=" * 60)
             bt.logging.info("🗳️  INITIATING CONSENSUS VERIFICATION")
-            bt.logging.info(f"   Prompt: {prompt[:50]}...")
+            bt.logging.info(f"   Prompt: {Config.truncate_sensitive_data(prompt)}")
             bt.logging.info(f"   Our vote: {primary_result.get('vote', 'N/A')}")
             bt.logging.info("=" * 60)
         else:
-            bt.logging.info(f"Initiating consensus verification for prompt: {prompt[:50]}...")
+            bt.logging.info(f"Initiating consensus verification for prompt: {Config.truncate_sensitive_data(prompt)}")
 
         # Generate unique request ID
         request_id = str(uuid.uuid4())

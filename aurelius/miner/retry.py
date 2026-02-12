@@ -1,6 +1,7 @@
 """Retry logic with exponential backoff for miner operations."""
 
 import random
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -35,8 +36,9 @@ class RetryResult:
 class RetryHandler:
     """Handles retry logic with exponential backoff."""
 
-    def __init__(self, config: RetryConfig | None = None):
+    def __init__(self, config: RetryConfig | None = None, shutdown_event: threading.Event | None = None):
         self.config = config or RetryConfig()
+        self.shutdown_event = shutdown_event
 
     def calculate_delay(self, attempt: int) -> float:
         """
@@ -123,7 +125,17 @@ class RetryHandler:
                 if on_retry:
                     on_retry(attempt + 1, error, delay)
 
-                time.sleep(delay)
+                if self.shutdown_event and self.shutdown_event.wait(timeout=delay):
+                    # Shutdown requested during retry delay
+                    return RetryResult(
+                        success=False,
+                        attempts=attempt + 1,
+                        total_time_seconds=time.time() - start_time,
+                        last_error=error,
+                        all_errors=all_errors,
+                    )
+                elif not self.shutdown_event:
+                    time.sleep(delay)
 
         # Should not reach here, but handle edge case
         return RetryResult(

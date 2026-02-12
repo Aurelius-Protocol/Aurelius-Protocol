@@ -1,9 +1,11 @@
 """Protocol definitions for miner-validator communication."""
 
+import json
+import math
 from typing import Any
 
 import bittensor as bt
-from pydantic import Field
+from pydantic import Field, field_validator
 
 
 class PromptSynapse(bt.Synapse):
@@ -93,6 +95,14 @@ class PromptSynapse(bt.Synapse):
         le=2.0,
     )
 
+    @field_validator("temperature", "top_p", "frequency_penalty", "presence_penalty", mode="before")
+    @classmethod
+    def reject_nan_inf(cls, v: float | None) -> float | None:
+        """Reject NaN and Infinity values that could propagate to LLM APIs."""
+        if v is not None and (math.isnan(v) or math.isinf(v)):
+            raise ValueError(f"Value cannot be NaN or Infinity: {v}")
+        return v
+
     min_chars: int | None = Field(
         None,
         title="Minimum Characters",
@@ -145,6 +155,12 @@ class PromptSynapse(bt.Synapse):
         description="Reason for rejection (rate limit, low score, error, etc.)",
     )
 
+    rejection_code: str | None = Field(
+        None,
+        title="Rejection Code",
+        description="Machine-readable rejection code (e.g., RATE_LIMITED, INVALID_PARAMS)",
+    )
+
     # Miner statistics (filled by validator)
     miner_novelty_avg: float | None = Field(
         None,
@@ -165,21 +181,116 @@ class PromptSynapse(bt.Synapse):
     )
 
     # Distribution statistics (from multiple runs across validators)
+    # Also used for experiment-specific feedback to miners (T088: dual-use documentation)
     distribution_stats: dict[str, Any] | None = Field(
         None,
         title="Distribution Statistics",
-        description="Aggregated statistics from multiple runs across validators",
+        description="Aggregated statistics from multiple runs across validators. "
+        "Also provides experiment-specific feedback including thresholds and miner stats.",
     )
+    # Dual-use field (T088):
+    #
+    # 1. CONSENSUS DISTRIBUTION: Statistics from multiple validator runs
+    #    Used when validators collaborate on scoring dangerous prompts.
+    #
+    # 2. EXPERIMENT FEEDBACK: Per-experiment context for miners
+    #    Miners can read this to understand experiment-specific thresholds
+    #    and their performance within a specific experiment.
+    #
     # Structure:
     # {
+    #     # Consensus distribution stats:
     #     "mean_danger_score": 0.75,
     #     "std_dev_danger_score": 0.12,
     #     "min_danger_score": 0.51,
     #     "max_danger_score": 0.91,
     #     "total_runs": 15,
     #     "validator_count": 5,
-    #     "all_scores": [0.75, 0.82, ...]
+    #     "all_scores": [0.75, 0.82, ...],
+    #
+    #     # Experiment feedback (optional, included for multi-experiment):
+    #     "experiment_id": "prompt",           # Current experiment
+    #     "thresholds": {                       # Experiment-specific thresholds
+    #         "acceptance": 0.3,                # Danger score threshold
+    #         "novelty": 0.02                   # Novelty score threshold
+    #     },
+    #     "miner_stats": {                      # Miner's stats in this experiment
+    #         "total_submissions": 100,
+    #         "hit_rate": 0.45,
+    #         "novelty_avg": 0.85
+    #     }
     # }
+
+    # Experiment targeting (NEW: multi-experiment framework)
+    experiment_id: str | None = Field(
+        None,
+        title="Experiment ID",
+        description="Target experiment ID. Defaults to 'prompt' if None for backward compatibility.",
+    )
+
+    registration_required: bool | None = Field(
+        None,
+        title="Registration Required",
+        description="True if miner needs to register for this experiment before submitting. "
+        "Set by validator on rejection responses.",
+    )
+
+    available_experiments: list[str] | None = Field(
+        None,
+        title="Available Experiments",
+        description="List of active experiment IDs. Returned on invalid experiment_id rejection.",
+    )
+
+    # Async submission token (returned by validator on submit)
+    submission_token: str | None = Field(
+        None,
+        title="Submission Token",
+        description="Unique token for this submission. Use with SubmissionStatusSynapse to poll for results.",
+    )
+
+    @field_validator("distribution_stats", mode="before")
+    @classmethod
+    def validate_distribution_stats(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Reject distribution_stats exceeding size limits (max 100 keys, max 50KB serialized)."""
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("distribution_stats must be a dict")
+        if len(v) > 100:
+            raise ValueError(f"distribution_stats has {len(v)} keys, max 100")
+        serialized = json.dumps(v, separators=(",", ":"))
+        if len(serialized) > 50 * 1024:
+            raise ValueError(f"distribution_stats is {len(serialized)} bytes serialized, max 50KB")
+        return v
+
+    @field_validator("available_experiments", mode="before")
+    @classmethod
+    def validate_available_experiments(cls, v: list[str] | None) -> list[str] | None:
+        """Reject available_experiments exceeding size limits (max 100 items, each max 100 chars)."""
+        if v is None:
+            return v
+        if not isinstance(v, list):
+            raise ValueError("available_experiments must be a list")
+        if len(v) > 100:
+            raise ValueError(f"available_experiments has {len(v)} items, max 100")
+        for i, item in enumerate(v):
+            if not isinstance(item, str):
+                raise ValueError(f"available_experiments[{i}] must be a string")
+            if len(item) > 100:
+                raise ValueError(f"available_experiments[{i}] is {len(item)} chars, max 100")
+        return v
+
+    @field_validator("category_scores", mode="before")
+    @classmethod
+    def validate_category_scores(cls, v: dict[str, float] | None) -> dict[str, float] | None:
+        """Reject category_scores exceeding size limits (max 50 keys)."""
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("category_scores must be a dict")
+        if len(v) > 50:
+            raise ValueError(f"category_scores has {len(v)} keys, max 50")
+        return v
 
     def deserialize(self) -> str:
         """Return the response for easy access."""
@@ -243,3 +354,144 @@ class ConsensusVerificationSynapse(bt.Synapse):
     def deserialize(self) -> dict | None:
         """Return the verification result for easy access."""
         return self.verification_result
+
+
+class PullRequestSynapse(bt.Synapse):
+    """
+    Synapse for pull-based experiment queries from validator to miner (T057).
+
+    In pull experiments, validators initiate queries to miners on a schedule.
+    Miners respond with requested data, which the validator then scores.
+
+    This is the inverse of push experiments where miners initiate contact.
+
+    Attributes:
+        experiment_id: The pull experiment ID this query is for
+        request_id: Unique identifier for this pull request
+        validator_hotkey: The validator's hotkey making the query
+        query_type: Type of data being requested (e.g., 'data', 'benchmark')
+        query_params: Experiment-specific query parameters
+        response_data: The miner's response data (filled by miner)
+        response_timestamp: When the miner responded (filled by miner)
+        error_message: Error message if miner couldn't respond (filled by miner)
+    """
+
+    # Input from validator
+    experiment_id: str = Field(
+        ...,
+        title="Experiment ID",
+        description="The pull experiment ID this query is for",
+    )
+
+    request_id: str = Field(
+        ...,
+        title="Request ID",
+        description="Unique identifier for this pull request",
+    )
+
+    validator_hotkey: str = Field(
+        ...,
+        title="Validator Hotkey",
+        description="The validator's hotkey making this query",
+    )
+
+    query_type: str = Field(
+        "data",
+        title="Query Type",
+        description="Type of data being requested (e.g., 'data', 'benchmark', 'health')",
+    )
+
+    query_params: dict[str, Any] | None = Field(
+        None,
+        title="Query Parameters",
+        description="Experiment-specific parameters for the query",
+    )
+
+    # Output from miner
+    response_data: dict[str, Any] | None = Field(
+        None,
+        title="Response Data",
+        description="The miner's response data for this pull request",
+    )
+
+    response_timestamp: str | None = Field(
+        None,
+        title="Response Timestamp",
+        description="ISO timestamp when the miner responded",
+    )
+
+    error_message: str | None = Field(
+        None,
+        title="Error Message",
+        description="Error message if miner couldn't fulfill the request",
+    )
+
+    def deserialize(self) -> dict | None:
+        """Return the response data for easy access."""
+        return self.response_data
+
+
+class SubmissionStatusSynapse(bt.Synapse):
+    """
+    Synapse for polling async submission results.
+
+    After submitting a PromptSynapse and receiving a submission_token,
+    miners use this synapse to poll for processing results.
+
+    Attributes:
+        submission_token: The token received from PromptSynapse submission
+        status: Current submission status (PENDING, PROCESSING, COMPLETED, FAILED, TIMEOUT)
+        result: Experiment-specific result blob (filled when COMPLETED)
+        error_message: Error details (filled when FAILED/TIMEOUT)
+        experiment_id: Which experiment processed this submission
+        created_at: ISO timestamp when submission was created
+        completed_at: ISO timestamp when processing finished
+    """
+
+    # Input from miner
+    submission_token: str = Field(
+        ...,
+        title="Submission Token",
+        description="The token received from PromptSynapse submission",
+    )
+
+    # Output from validator
+    status: str | None = Field(
+        None,
+        title="Status",
+        description="Current status: PENDING, PROCESSING, COMPLETED, FAILED, TIMEOUT",
+    )
+
+    result: dict[str, Any] | None = Field(
+        None,
+        title="Result",
+        description="Experiment-specific result data (filled when COMPLETED)",
+    )
+
+    error_message: str | None = Field(
+        None,
+        title="Error Message",
+        description="Error details if processing failed",
+    )
+
+    experiment_id: str | None = Field(
+        None,
+        title="Experiment ID",
+        description="Which experiment processed this submission",
+    )
+
+    created_at: str | None = Field(
+        None,
+        title="Created At",
+        description="ISO timestamp when submission was created",
+    )
+
+    completed_at: str | None = Field(
+        None,
+        title="Completed At",
+        description="ISO timestamp when processing finished",
+    )
+
+    def deserialize(self) -> dict | None:
+        """Return the result for easy access."""
+        return self.result

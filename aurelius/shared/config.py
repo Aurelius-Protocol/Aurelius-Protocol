@@ -26,25 +26,46 @@ NETWORK_DEFAULTS = {
         "MIN_NOVELTY_THRESHOLD": 0.02,
         "CENTRAL_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/collections",
         "NOVELTY_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/novelty",
+        "EXPERIMENT_API_ENDPOINT": "https://collector.aureliusaligned.ai/api/experiments",
         "TELEMETRY_TRACES_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/traces",
         "TELEMETRY_LOGS_ENDPOINT": "https://collector.aureliusaligned.ai/api/telemetry/logs",
         "TELEMETRY_REGISTRY_ENDPOINT": "https://collector.aureliusaligned.ai/api/validator-registry",
         "MINER_BURN_ENABLED": True,
-        "MINER_BURN_PERCENTAGE": 0.9,
+        "MINER_BURN_PERCENTAGE": 0.75,
         "BURN_UID": 200,
+        "CHAT_API_TIMEOUT": 120,
     },
     290: {  # Testnet
         "DANGER_THRESHOLD": 0.2,
+        "SINGLE_CATEGORY_THRESHOLD": 0.8,
         "MIN_HIT_RATE_THRESHOLD": 0.3,
-        "MIN_VALIDATOR_STAKE": 100.0,
+        "MIN_VALIDATOR_STAKE": 5.0,
         "MIN_NOVELTY_THRESHOLD": 0.3,
         "CENTRAL_API_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/collections",
         "NOVELTY_API_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/novelty",
+        "EXPERIMENT_API_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/experiments",
         "TELEMETRY_TRACES_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/telemetry/traces",
         "TELEMETRY_LOGS_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/telemetry/logs",
         "TELEMETRY_REGISTRY_ENDPOINT": "https://aurelius-data-collector-api-staging.up.railway.app/api/validator-registry",
         "MINER_BURN_ENABLED": True,
-        "MINER_BURN_PERCENTAGE": 0.9,
+        "MINER_BURN_PERCENTAGE": 0.75,
+        "BURN_UID": 200,
+        "CHAT_API_TIMEOUT": 120,
+    },
+    1: {  # Local development
+        "DANGER_THRESHOLD": 0.1,
+        "SINGLE_CATEGORY_THRESHOLD": 0.5,
+        "MIN_HIT_RATE_THRESHOLD": 0.0,
+        "MIN_VALIDATOR_STAKE": 0.0,
+        "MIN_NOVELTY_THRESHOLD": 0.0,
+        "CENTRAL_API_ENDPOINT": "http://localhost:3000/api/collections",
+        "NOVELTY_API_ENDPOINT": "http://localhost:3000/api/novelty",
+        "EXPERIMENT_API_ENDPOINT": "http://localhost:3000/api/experiments",
+        "TELEMETRY_TRACES_ENDPOINT": "http://localhost:3000/api/telemetry/traces",
+        "TELEMETRY_LOGS_ENDPOINT": "http://localhost:3000/api/telemetry/logs",
+        "TELEMETRY_REGISTRY_ENDPOINT": "http://localhost:3000/api/validator-registry",
+        "MINER_BURN_ENABLED": False,
+        "MINER_BURN_PERCENTAGE": 0.0,
         "BURN_UID": 200,
     },
 }
@@ -142,6 +163,10 @@ class Config:
     # Rate Limiting Configuration
     RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
     RATE_LIMIT_WINDOW_HOURS: float = float(os.getenv("RATE_LIMIT_WINDOW_HOURS", "1.0"))
+    GLOBAL_RATE_LIMIT_REQUESTS: int = int(os.getenv("GLOBAL_RATE_LIMIT_REQUESTS", "500"))
+
+    # Dataset Logger Queue Configuration
+    DATASET_LOGGER_QUEUE_MAXSIZE: int = int(os.getenv("DATASET_LOGGER_QUEUE_MAXSIZE", "1000"))
 
     # Dataset / Central API Configuration
     CENTRAL_API_ENDPOINT: str | None = os.getenv(
@@ -254,6 +279,9 @@ class Config:
     MINER_MAX_VALIDATORS: int = int(os.getenv("MINER_MAX_VALIDATORS", "10"))
     MINER_MIN_VALIDATOR_STAKE: float = float(os.getenv("MINER_MIN_VALIDATOR_STAKE", "0"))
 
+    # Subtensor Lock Timeout (seconds to wait for blockchain RPC lock)
+    SUBTENSOR_LOCK_TIMEOUT: float = float(os.getenv("SUBTENSOR_LOCK_TIMEOUT", "30.0"))
+
     # Chain endpoint (for local development)
     SUBTENSOR_ENDPOINT: str | None = os.getenv("SUBTENSOR_ENDPOINT")
 
@@ -271,9 +299,16 @@ class Config:
     AUTO_DETECT_EXTERNAL_IP: bool = os.getenv("AUTO_DETECT_EXTERNAL_IP", "false").lower() == "true"
     VALIDATOR_HOST: str = os.getenv("VALIDATOR_HOST", "127.0.0.1")
 
+    # Validator Restart Configuration
+    VALIDATOR_MAX_RESTART_RETRIES: int = int(os.getenv("VALIDATOR_MAX_RESTART_RETRIES", "10"))
+    VALIDATOR_MAX_RESTART_BACKOFF: int = int(os.getenv("VALIDATOR_MAX_RESTART_BACKOFF", "300"))
+
     # Skip Weight Setting - For testing against real blockchain without registration
     # Allows using real block heights while avoiding registration/stake requirements
     SKIP_WEIGHT_SETTING: bool = os.getenv("SKIP_WEIGHT_SETTING", "false").lower() == "true"
+
+    # Skip Endpoint Validation - Allow HTTP endpoints in non-LOCAL_MODE (for E2E testing with Docker)
+    SKIP_ENDPOINT_VALIDATION: bool = os.getenv("SKIP_ENDPOINT_VALIDATION", "false").lower() == "true"
 
     # Simulated Block Height (for LOCAL_MODE testing)
     SIMULATED_BLOCK_START: int = int(os.getenv("SIMULATED_BLOCK_START", "10000"))
@@ -285,6 +320,40 @@ class Config:
     MINER_BURN_ENABLED: bool = os.getenv("MINER_BURN_ENABLED", "true").lower() == "true"
     MINER_BURN_PERCENTAGE: float = float(os.getenv("MINER_BURN_PERCENTAGE", "0.9"))  # 90% default
     BURN_UID: int = int(os.getenv("BURN_UID", "200"))
+
+    # Moral Reasoning Judge Model Configuration
+    MORAL_JUDGE_MODEL: str = os.getenv("MORAL_JUDGE_MODEL", "")  # Falls back to DEFAULT_MODEL if empty
+    MORAL_JUDGE_VENDOR: str = os.getenv("MORAL_JUDGE_VENDOR", "")  # Falls back to DEFAULT_VENDOR if empty
+    MORAL_JUDGE_API_KEY: str = os.getenv("MORAL_JUDGE_API_KEY", "")  # Falls back to OPENAI_API_KEY if empty
+    MORAL_JUDGE_TEMPERATURE: float = float(os.getenv("MORAL_JUDGE_TEMPERATURE", "0.0"))
+    MORAL_JUDGE_MAX_TOKENS: int = int(os.getenv("MORAL_JUDGE_MAX_TOKENS", "1024"))
+    MORAL_JUDGE_TEMPERATURE_JITTER: float = float(os.getenv("MORAL_JUDGE_TEMPERATURE_JITTER", "0.15"))
+
+    # Novelty default when service is completely down (embedding/novelty client
+    # unavailable). Fail-closed: unknown novelty = zero multiplier, same as
+    # the prompt experiment. Scores recover when the novelty API comes back.
+    MORAL_NOVELTY_UNAVAILABLE_DEFAULT: float = float(os.getenv("MORAL_NOVELTY_UNAVAILABLE_DEFAULT", "0.0"))
+
+    # Novelty default when service was reachable but returned no score.
+    # Lower than the "service down" default so miners cannot exploit service
+    # quirks to avoid a real (potentially lower) novelty score.
+    MORAL_NOVELTY_CHECKED_NO_SCORE_DEFAULT: float = float(
+        os.getenv("MORAL_NOVELTY_CHECKED_NO_SCORE_DEFAULT", "0.3")
+    )
+
+    # Strictness mode for moral reasoning: "low", "medium", or "high".
+    MORAL_STRICTNESS_MODE: str = os.getenv("MORAL_STRICTNESS_MODE", "low")
+
+    # Experiment Sync Configuration
+    # Interval for syncing experiment definitions from central API (seconds)
+    EXPERIMENT_SYNC_INTERVAL: int = int(os.getenv("EXPERIMENT_SYNC_INTERVAL", "300"))  # 5 minutes
+    # Path to local cache file for experiment definitions
+    EXPERIMENT_CACHE_PATH: str = os.getenv("EXPERIMENT_CACHE_PATH", "./experiments_cache.json")
+    # Base endpoint for experiment API (derived from CENTRAL_API_ENDPOINT base)
+    EXPERIMENT_API_ENDPOINT: str = os.getenv(
+        "EXPERIMENT_API_ENDPOINT",
+        "https://collector.aureliusaligned.ai/api/experiments"
+    )
 
     # Local Multi-Validator Testing - Comma-separated list of other validators
     # Format: "host1:port1,host2:port2,host3:port3"
@@ -672,7 +741,7 @@ class Config:
             bt.logging.debug(f"No network defaults defined for netuid {netuid}")
             return
 
-        network_name = "mainnet" if netuid == 37 else "testnet" if netuid == 290 else f"subnet {netuid}"
+        network_name = "mainnet" if netuid == 37 else "testnet" if netuid == 290 else "local" if netuid == 1 else f"subnet {netuid}"
 
         if cls.ADVANCED_MODE:
             # Advanced mode: respect user's explicit env vars
@@ -727,6 +796,10 @@ class Config:
 
         if cls.LOCAL_MODE:
             # Allow HTTP in local mode
+            return
+
+        if cls.SKIP_ENDPOINT_VALIDATION:
+            bt.logging.warning("SKIP_ENDPOINT_VALIDATION=true: Allowing HTTP endpoints for E2E testing")
             return
 
         endpoints = {
@@ -850,21 +923,21 @@ class Config:
     @classmethod
     def truncate_sensitive_data(cls, text: str) -> str:
         """
-        Truncate sensitive data for logging if LOG_SENSITIVE_DATA is False.
+        Hash sensitive data for logging if LOG_SENSITIVE_DATA is False.
 
         Args:
-            text: The text to potentially truncate
+            text: The text to potentially hash
 
         Returns:
-            str: Original text if logging enabled, truncated text otherwise
+            str: Original text if logging enabled, sha256 hash summary otherwise
         """
         if cls.LOG_SENSITIVE_DATA:
             return text
 
-        if len(text) <= cls.MAX_LOG_LENGTH:
-            return text
+        import hashlib
 
-        return text[: cls.MAX_LOG_LENGTH] + "... [TRUNCATED]"
+        h = hashlib.sha256(text.encode()).hexdigest()[:8]
+        return f"[sha256:{h}… len={len(text)}]"
 
     @classmethod
     def warn_default_endpoints(cls) -> None:

@@ -1,10 +1,16 @@
 """Validator implementation - processes prompts using configurable chat providers."""
 
 import argparse
+import contextlib
+import hashlib
+import os
+import signal
 import socket
 import sys
 import threading
 import time
+import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Tuple
@@ -21,10 +27,13 @@ from aurelius.shared.dataset_logger import DatasetLogger
 from aurelius.shared.embedding_client import get_embedding_client
 from aurelius.shared.moderation import create_moderation_provider
 from aurelius.shared.novelty_client import get_novelty_client
-from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse
-from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimitConfig
+from aurelius.shared.protocol import ConsensusVerificationSynapse, PromptSynapse, SubmissionStatusSynapse
+from aurelius.shared.submission_client import SubmissionClient
+from aurelius.shared.rate_limiter import PerMinerRateLimiter, RateLimiter, RateLimitConfig
+from aurelius.shared.remote_config_client import get_remote_config_client
 from aurelius.shared.scoring import ScoringSystem
 from aurelius.shared.telemetry.otel_setup import get_tracer, register_with_telemetry_api, setup_opentelemetry
+from aurelius.validator.experiments.manager import ExperimentManager
 
 
 def check_port_available(host: str, port: int, timeout: float = 2.0) -> tuple[bool, str]:
@@ -186,8 +195,17 @@ class Validator:
             max_requests=Config.RATE_LIMIT_REQUESTS, window_hours=Config.RATE_LIMIT_WINDOW_HOURS
         )
         self.rate_limiter = PerMinerRateLimiter(rate_limit_config)
+        self._rate_limiter_state_path = Config.MINER_SCORES_PATH + ".ratelimit"
+        self.rate_limiter.load_state(self._rate_limiter_state_path)
 
-        # Initialize dataset logger
+        # Global rate limiter — caps total requests across all miners
+        global_rate_config = RateLimitConfig(
+            max_requests=Config.GLOBAL_RATE_LIMIT_REQUESTS,
+            window_hours=Config.RATE_LIMIT_WINDOW_HOURS,
+        )
+        self.global_rate_limiter = RateLimiter(global_rate_config)
+
+        # Initialize dataset logger (wallet passed later after wallet init for signing)
         self.dataset_logger = DatasetLogger(
             local_path=Config.LOCAL_DATASET_PATH,
             central_api_endpoint=Config.CENTRAL_API_ENDPOINT,
@@ -222,6 +240,10 @@ class Validator:
 
         # Thread lock for subtensor operations to prevent websocket concurrency errors
         self.subtensor_lock = threading.RLock()
+
+        # Cached metagraph for blacklist checks (refreshed in weight update loop)
+        self._cached_metagraph = None
+        self._metagraph_lock = threading.RLock()
 
         # Thread pool for background tasks (prevents DoS via thread explosion)
         # Limits concurrent background operations to prevent resource exhaustion
@@ -260,6 +282,9 @@ class Validator:
 
             # Load subnet hyperparameters from chain (network-level consensus on config values)
             Config.load_subnet_hyperparameters(self.subtensor)
+
+        # Now that wallet is initialized, attach it to dataset logger for signed submissions
+        self.dataset_logger.wallet = self.wallet
 
         # Initialize axon (server for receiving requests)
         # Use configured host (may auto-detect external IP if enabled)
@@ -311,6 +336,34 @@ class Validator:
         else:
             bt.logging.info("OpenTelemetry tracing disabled")
 
+        # Initialize remote configuration client for dynamic config updates
+        self.remote_config_client = get_remote_config_client()
+        self._remote_config_stop_event = threading.Event()
+        self._remote_config_thread: threading.Thread | None = None
+
+        # Initialize experiment client and manager for multi-experiment routing
+        from aurelius.shared.experiment_client import get_experiment_client
+
+        self.experiment_client = get_experiment_client()
+        self.experiment_manager = ExperimentManager(self)
+        self._register_default_experiment()
+
+        # Async submission tracking — in-memory cache + collector API client
+        self._submission_results: dict[str, dict] = {}
+        self._submission_results_lock = threading.Lock()
+        self._submission_max_cache_size = 1000
+        self.submission_client = SubmissionClient(wallet=self.wallet, api_key=Config.CENTRAL_API_KEY)
+
+        # Perform initial remote config fetch (non-blocking, don't fail startup)
+        if self.remote_config_client.is_available():
+            try:
+                self._fetch_and_apply_remote_config(log_on_success=True)
+                bt.logging.info("Remote config client initialized and initial config fetched")
+            except Exception as e:
+                bt.logging.warning(f"Initial remote config fetch failed (will retry): {e}")
+        else:
+            bt.logging.info("Remote config client disabled (no endpoint configured)")
+
         bt.logging.info("=" * 80)
         bt.logging.info("🚀 VALIDATOR INITIALIZATION COMPLETE")
         bt.logging.info("=" * 80)
@@ -330,12 +383,175 @@ class Validator:
             bt.logging.info(f"  Hotkey: {self.wallet.hotkey.ss58_address if hasattr(self.wallet.hotkey, 'ss58_address') else 'N/A'}")
         bt.logging.info("=" * 80)
 
+    def _register_default_experiment(self):
+        """Register the default 'prompt' experiment for backward compatibility.
+
+        This creates a simple experiment wrapper that enables routing to work
+        while maintaining the existing forward handler behavior. The actual
+        scoring and processing logic remains in the main validator.
+        """
+        from aurelius.validator.experiments.base import ExperimentConfig, ExperimentScores, ExperimentType
+
+        # Create a simple wrapper experiment that represents the existing prompt processing
+        class PromptExperimentWrapper:
+            """Minimal experiment wrapper for routing compatibility.
+
+            This wrapper allows the ExperimentManager.route_submission() to work
+            while the actual processing logic remains in the validator's forward handler.
+            It delegates scoring to the validator's existing ScoringSystem.
+            """
+
+            def __init__(self, name: str, scoring_system, enabled: bool = True):
+                self.name = name
+                self._enabled = enabled
+                self._scoring_system = scoring_system
+                self.config = ExperimentConfig(
+                    name=name,
+                    experiment_type=ExperimentType.PUSH,
+                    weight_allocation=0.0,
+                    enabled=enabled,
+                )
+
+            @property
+            def is_enabled(self) -> bool:
+                return self._enabled
+
+            @property
+            def weight_allocation(self) -> float:
+                return self.config.weight_allocation
+
+            def calculate_scores(self, current_block: int) -> ExperimentScores:
+                normalized = self._scoring_system.calculate_normalized_scores(
+                    current_block=current_block,
+                    min_submissions=Config.MIN_SAMPLES_FOR_WEIGHTS,
+                )
+                return ExperimentScores(
+                    scores=normalized,
+                    experiment_name=self.name,
+                    block_height=current_block,
+                )
+
+            def get_stats(self) -> dict:
+                return self._scoring_system.get_stats()
+
+        # Register the prompt experiment
+        prompt_experiment = PromptExperimentWrapper("prompt", scoring_system=self.scoring_system, enabled=False)
+        self.experiment_manager.experiments["prompt"] = prompt_experiment
+        bt.logging.info("Registered default 'prompt' experiment for multi-experiment routing")
+
+        # Register the moral reasoning experiment
+        self._register_moral_reasoning_experiment()
+
+    def _register_moral_reasoning_experiment(self):
+        """Register the moral reasoning experiment for multi-experiment routing."""
+        from aurelius.validator.experiments.base import ExperimentConfig, ExperimentType
+
+        try:
+            from aurelius.validator.experiments.moral_reasoning.experiment import (
+                MoralReasoningExperiment,
+            )
+
+            config = ExperimentConfig(
+                name="moral-reasoning",
+                experiment_type=ExperimentType.PUSH,
+                weight_allocation=1.0,  # 100% allocation — sole active experiment
+                enabled=True,
+                settings={},
+            )
+            experiment = MoralReasoningExperiment(core=self, config=config)
+            self._moral_reasoning_experiment = experiment
+            self.experiment_manager.experiments["moral-reasoning"] = experiment
+            bt.logging.info("Registered 'moral-reasoning' experiment")
+        except Exception as e:
+            bt.logging.warning(f"Could not register moral reasoning experiment: {e}")
+
+    @contextlib.contextmanager
+    def _timed_lock(self, lock, name="lock", timeout=None):
+        """Acquire a lock with a timeout to prevent deadlocks.
+
+        Args:
+            lock: The threading lock to acquire
+            name: Human-readable name for logging
+            timeout: Maximum seconds to wait for lock acquisition
+
+        Raises:
+            TimeoutError: If the lock cannot be acquired within the timeout
+        """
+        if timeout is None:
+            timeout = Config.SUBTENSOR_LOCK_TIMEOUT
+        acquired = lock.acquire(timeout=timeout)
+        if not acquired:
+            raise TimeoutError(f"{name} acquisition timed out after {timeout}s")
+        try:
+            yield
+        finally:
+            lock.release()
+
     def _get_current_block(self):
         """Safely get current block number with thread locking."""
         if not self.subtensor:
             return None
-        with self.subtensor_lock:
+        with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
             return self.subtensor.block
+
+    def _fetch_and_apply_remote_config(self, log_on_success: bool = False) -> bool:
+        """
+        Fetch remote configuration and apply it to Config.
+
+        Args:
+            log_on_success: Whether to log when config is fetched successfully
+
+        Returns:
+            True if config was fetched and applied successfully
+        """
+        result = self.remote_config_client.fetch_config()
+
+        if not result.success:
+            bt.logging.warning(f"Remote config fetch failed: {result.error}")
+            return False
+
+        if not result.config:
+            if log_on_success:
+                bt.logging.debug("No remote config available for this network")
+            return True
+
+        # Apply the config
+        updated_fields = self.remote_config_client.apply_to_config(result.config)
+
+        if updated_fields:
+            bt.logging.info(
+                f"Remote config v{result.version} applied: {len(updated_fields)} field(s) updated"
+            )
+        elif log_on_success:
+            bt.logging.debug(f"Remote config v{result.version} fetched (no changes)")
+
+        return True
+
+    def _remote_config_loop(self):
+        """
+        Background loop to periodically fetch and apply remote configuration.
+
+        This runs in a daemon thread and polls the remote config API at the
+        configured interval. On errors, it continues using cached values.
+        """
+        bt.logging.info(
+            f"Remote config polling started (interval: {self.remote_config_client.poll_interval}s)"
+        )
+
+        while not self._remote_config_stop_event.is_set():
+            # Wait for the poll interval, but check stop event periodically
+            # Using Event.wait() allows clean shutdown
+            if self._remote_config_stop_event.wait(timeout=self.remote_config_client.poll_interval):
+                # Stop event was set
+                break
+
+            try:
+                self._fetch_and_apply_remote_config(log_on_success=False)
+            except Exception as e:
+                # Never crash the loop - log and continue
+                bt.logging.error(f"Remote config polling error (will retry): {e}")
+
+        bt.logging.info("Remote config polling stopped")
 
     def _resolve_model_preferences(self, vendor: str, model: str) -> tuple[str, str]:
         """
@@ -382,9 +598,13 @@ class Validator:
             max_val: Maximum allowed value
 
         Returns:
-            Clamped value or None if input was None
+            Clamped value or None if input was None or invalid
         """
         if value is None:
+            return None
+        import math
+        if math.isnan(value) or math.isinf(value):
+            bt.logging.warning(f"Parameter rejected: {value} (NaN/Infinity)")
             return None
         clamped = max(min_val, min(max_val, value))
         if clamped != value:
@@ -393,34 +613,30 @@ class Validator:
 
     def forward(self, synapse: PromptSynapse) -> PromptSynapse:
         """
-        Process an incoming prompt request with moderation and scoring.
+        Process an incoming prompt request asynchronously.
 
         Flow:
-        1. Check rate limits
-        2. Get OpenAI response to prompt
-        3. Moderate the OpenAI response (not the prompt)
-        4. Calculate danger score
-        5. Determine if accepted based on threshold
-        6. Log to dataset and update scores
-        7. Return enriched synapse
+        1. Validate input (prompt length, parameter sanity)
+        2. Route to correct experiment via ExperimentManager
+        3. Check rate limits
+        4. Generate a submission token
+        5. Return token to miner immediately
+        6. Process in background (LLM call, moderation/judge, scoring)
+        7. Update local cache + collector API when done
 
         Args:
             synapse: The PromptSynapse containing the prompt
 
         Returns:
-            The synapse with response and moderation data filled in
+            The synapse with submission_token set (result fields populated later via polling)
         """
         import time
 
-        # Start timing the entire processing
         start_time = time.time()
-
         prompt = synapse.prompt
-
-        # Get miner hotkey for tracking
         miner_hotkey = synapse.dendrite.hotkey if hasattr(synapse, "dendrite") and synapse.dendrite else None
 
-        # Create OpenTelemetry span for the entire forward operation
+        # Create OpenTelemetry span for the submit phase
         span_context = None
         if self._tracer:
             span_context = self._tracer.start_as_current_span(
@@ -435,12 +651,11 @@ class Validator:
             span_context.__enter__()
 
         try:
-            result = self._forward_internal(synapse, miner_hotkey, prompt, start_time)
+            result = self._handle_submit(synapse, miner_hotkey, prompt, start_time)
             if span_context:
                 current_span = trace.get_current_span()
                 current_span.set_status(Status(StatusCode.OK))
-                current_span.set_attribute("response.accepted", result.accepted)
-                current_span.set_attribute("response.danger_score", result.danger_score or 0.0)
+                current_span.set_attribute("submission.token", result.submission_token or "")
             return result
         except Exception as e:
             if span_context:
@@ -452,6 +667,407 @@ class Validator:
             if span_context:
                 span_context.__exit__(None, None, None)
 
+    def _handle_submit(
+        self,
+        synapse: PromptSynapse,
+        miner_hotkey: str | None,
+        prompt: str,
+        start_time: float,
+    ) -> PromptSynapse:
+        """Handle submission: validate, generate token, dispatch background processing."""
+        import time
+
+        bt.logging.info("=" * 80)
+        bt.logging.info("FORWARD METHOD CALLED - ASYNC TOKEN FLOW")
+        bt.logging.info(f"   Prompt: {Config.truncate_sensitive_data(prompt)}")
+        bt.logging.info("=" * 80)
+
+        # Input validation
+        import math
+
+        if len(prompt) > Config.MAX_PROMPT_LENGTH:
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = f"Prompt exceeds maximum length ({Config.MAX_PROMPT_LENGTH} chars)"
+            synapse.rejection_code = "PROMPT_TOO_LONG"
+            return synapse
+
+        miner_max_chars = synapse.max_chars
+        if miner_max_chars and miner_max_chars > Config.MAX_RESPONSE_CHARS_LIMIT:
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = f"max_chars exceeds limit ({Config.MAX_RESPONSE_CHARS_LIMIT})"
+            synapse.rejection_code = "MAX_CHARS_EXCEEDED"
+            return synapse
+
+        miner_min_chars = synapse.min_chars
+        if miner_min_chars and miner_max_chars and miner_min_chars > miner_max_chars:
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = "min_chars cannot be greater than max_chars"
+            synapse.rejection_code = "INVALID_PARAMS"
+            return synapse
+
+        # NaN/Infinity parameter validation
+        for param_name, param_val in [
+            ("temperature", synapse.temperature),
+            ("top_p", synapse.top_p),
+            ("frequency_penalty", synapse.frequency_penalty),
+            ("presence_penalty", synapse.presence_penalty),
+        ]:
+            if param_val is not None and (math.isnan(param_val) or math.isinf(param_val)):
+                synapse.response = None
+                synapse.danger_score = 0.0
+                synapse.accepted = False
+                synapse.rejection_reason = f"Invalid {param_name}: NaN/Infinity not allowed"
+                synapse.rejection_code = "INVALID_PARAMS"
+                return synapse
+
+        # Experiment routing
+        synapse.miner_hotkey = miner_hotkey
+        routing_result = self.experiment_manager.route_submission(synapse)
+
+        if routing_result.experiment is None:
+            bt.logging.info(
+                f"Experiment routing rejected: {routing_result.rejection_reason} "
+                f"(miner: {miner_hotkey[:8] if miner_hotkey else 'unknown'}...)"
+            )
+            self.experiment_manager.apply_routing_rejection(synapse, routing_result)
+            synapse.response = None
+            synapse.danger_score = 0.0
+            return synapse
+
+        effective_experiment = synapse.experiment_id or "moral-reasoning"
+
+        # Global rate limit check
+        global_allowed, global_reason, _ = self.global_rate_limiter.check_rate_limit()
+        if not global_allowed:
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = global_reason
+            synapse.rejection_code = "RATE_LIMITED"
+            return synapse
+        self.global_rate_limiter.record_request()
+
+        # Per-miner rate limit check
+        allowed, reason, remaining = self.rate_limiter.check_rate_limit(hotkey=miner_hotkey)
+        if not allowed:
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = reason
+            synapse.rejection_code = "RATE_LIMITED"
+            return synapse
+        self.rate_limiter.record_request(hotkey=miner_hotkey)
+
+        # Generate submission token
+        submission_token = str(uuid.uuid4())
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        # Store in local cache
+        self._set_submission_cache(submission_token, {
+            "status": "PENDING",
+            "experiment_id": effective_experiment,
+            "created_at": now_iso,
+            "result": None,
+            "error_message": None,
+            "completed_at": None,
+            "miner_hotkey": miner_hotkey,
+        })
+
+        # Register token on collector API (fire-and-forget)
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+        self.background_executor.submit(
+            self.submission_client.register_submission,
+            submission_token,
+            miner_hotkey or "unknown",
+            effective_experiment,
+            prompt_hash,
+        )
+
+        # Set token on synapse for immediate return
+        synapse.submission_token = submission_token
+
+        # Submit the actual processing to background
+        self.background_executor.submit(
+            self._process_submission_background,
+            submission_token,
+            synapse.prompt,
+            miner_hotkey,
+            effective_experiment,
+            synapse.vendor,
+            synapse.model_requested,
+            synapse.temperature,
+            synapse.top_p,
+            synapse.frequency_penalty,
+            synapse.presence_penalty,
+            synapse.min_chars,
+            synapse.max_chars,
+        )
+
+        bt.logging.info(
+            f"Submission accepted: token={submission_token[:8]}... "
+            f"experiment={effective_experiment} miner={miner_hotkey[:8] if miner_hotkey else '?'}..."
+        )
+
+        return synapse
+
+    def _set_submission_cache(self, token: str, data: dict) -> None:
+        """Set a submission in the local cache with LRU eviction."""
+        with self._submission_results_lock:
+            # Evict oldest entries if cache is full
+            while len(self._submission_results) >= self._submission_max_cache_size:
+                oldest_key = next(iter(self._submission_results))
+                del self._submission_results[oldest_key]
+            self._submission_results[token] = data
+
+    def _process_submission_background(
+        self,
+        token: str,
+        prompt: str,
+        miner_hotkey: str | None,
+        experiment_id: str,
+        vendor: str | None,
+        model_requested: str | None,
+        temperature: float | None,
+        top_p: float | None,
+        frequency_penalty: float | None,
+        presence_penalty: float | None,
+        min_chars: int | None,
+        max_chars: int | None,
+    ) -> None:
+        """Process a submission in the background thread and update cache + API."""
+        import time
+
+        # Update status to PROCESSING
+        self._update_submission_status(token, "PROCESSING")
+
+        try:
+            if experiment_id == "moral-reasoning" and hasattr(self, "_moral_reasoning_experiment"):
+                result_dict = self._process_moral_reasoning_background(
+                    token, prompt, miner_hotkey,
+                )
+            else:
+                result_dict = self._process_prompt_experiment_background(
+                    token, prompt, miner_hotkey,
+                    vendor, model_requested, temperature, top_p,
+                    frequency_penalty, presence_penalty, min_chars, max_chars,
+                    experiment_id,
+                )
+
+            # Update cache and collector API with COMPLETED
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with self._submission_results_lock:
+                if token in self._submission_results:
+                    self._submission_results[token].update({
+                        "status": "COMPLETED",
+                        "result": result_dict,
+                        "completed_at": now_iso,
+                    })
+
+            self.submission_client.update_submission(
+                token, "COMPLETED", result=result_dict,
+            )
+
+        except Exception as e:
+            bt.logging.error(f"Background processing failed for {token[:8]}...: {e}")
+            error_msg = str(e)[:500]
+            now_iso = datetime.now(timezone.utc).isoformat()
+            with self._submission_results_lock:
+                if token in self._submission_results:
+                    self._submission_results[token].update({
+                        "status": "FAILED",
+                        "error_message": error_msg,
+                        "completed_at": now_iso,
+                    })
+
+            self.submission_client.update_submission(
+                token, "FAILED", error=error_msg,
+            )
+        finally:
+            # Release concurrency slot (V4 fix)
+            self.experiment_manager.release_concurrency_slot(experiment_id)
+
+    def _update_submission_status(self, token: str, status: str) -> None:
+        """Update submission status in local cache and collector API."""
+        with self._submission_results_lock:
+            if token in self._submission_results:
+                self._submission_results[token]["status"] = status
+
+        self.submission_client.update_submission(token, status)
+
+    def _process_moral_reasoning_background(
+        self,
+        token: str,
+        prompt: str,
+        miner_hotkey: str | None,
+    ) -> dict:
+        """Process a moral reasoning submission in the background."""
+        # Build a minimal synapse for the experiment handler
+        synapse = PromptSynapse(prompt=prompt)
+        # Attach miner hotkey info via TerminalInfo
+        if miner_hotkey:
+            synapse.miner_hotkey = miner_hotkey
+            synapse.dendrite = bt.TerminalInfo(hotkey=miner_hotkey)
+
+        _, result_dict = self._moral_reasoning_experiment._handle_scenario_with_result(synapse)
+
+        if result_dict is None:
+            # Processing failed (validation, model unavailable, etc.)
+            raise RuntimeError(synapse.rejection_reason or "Moral reasoning processing failed")
+
+        return result_dict
+
+    def _process_prompt_experiment_background(
+        self,
+        token: str,
+        prompt: str,
+        miner_hotkey: str | None,
+        vendor: str | None,
+        model_requested: str | None,
+        temperature: float | None,
+        top_p: float | None,
+        frequency_penalty: float | None,
+        presence_penalty: float | None,
+        min_chars: int | None,
+        max_chars: int | None,
+        experiment_id: str = "prompt",
+    ) -> dict:
+        """Process a prompt experiment submission in the background."""
+        import time
+
+        start_time = time.time()
+
+        # Resolve model preferences
+        actual_vendor, actual_model = self._resolve_model_preferences(
+            vendor or Config.DEFAULT_VENDOR, model_requested or Config.DEFAULT_MODEL
+        )
+        actual_temperature = self._clamp_parameter(temperature, Config.MIN_TEMPERATURE, Config.MAX_TEMPERATURE)
+        actual_top_p = self._clamp_parameter(top_p, Config.MIN_TOP_P, Config.MAX_TOP_P)
+        actual_freq_penalty = self._clamp_parameter(frequency_penalty, Config.MIN_FREQUENCY_PENALTY, Config.MAX_FREQUENCY_PENALTY)
+        actual_pres_penalty = self._clamp_parameter(presence_penalty, Config.MIN_PRESENCE_PENALTY, Config.MAX_PRESENCE_PENALTY)
+
+        # Build API call params
+        api_params = {
+            "model": actual_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": Config.OPENAI_MAX_TOKENS,
+        }
+        if actual_temperature is not None:
+            api_params["temperature"] = actual_temperature
+        if actual_top_p is not None:
+            api_params["top_p"] = actual_top_p
+        if actual_freq_penalty is not None:
+            api_params["frequency_penalty"] = actual_freq_penalty
+        if actual_pres_penalty is not None:
+            api_params["presence_penalty"] = actual_pres_penalty
+
+        # Call LLM
+        response, actual_model = call_chat_api_with_fallback(
+            self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+        )
+        completion_text = response.choices[0].message.content.strip()
+
+        # Enforce max_chars
+        if max_chars is not None and len(completion_text) > max_chars:
+            completion_text = completion_text[:max_chars]
+
+        # Moderate response
+        moderation_result = self.moderation_provider.moderate(completion_text)
+        danger_score = moderation_result.combined_score
+        category_scores = moderation_result.category_scores
+
+        # Determine acceptance
+        high_category_triggered = moderation_result.high_category_triggered
+        aggregate_threshold_met = danger_score >= Config.DANGER_THRESHOLD
+        accepted = high_category_triggered or aggregate_threshold_met
+
+        # Record submission in scoring system
+        self.scoring_system.record_submission(
+            hotkey=miner_hotkey or "unknown",
+            danger_score=danger_score,
+            accepted=accepted,
+            block=self._get_current_block(),
+            novelty_score=None,
+        )
+
+        # Get miner stats
+        miner_stats = {}
+        miner_score = self.scoring_system.get_miner_score(miner_hotkey or "unknown")
+        if miner_score:
+            miner_stats = {
+                "novelty_avg": miner_score.average_novelty_score,
+                "hit_rate": miner_score.acceptance_rate / 100.0,
+                "submission_count": miner_score.total_submissions,
+            }
+
+        total_ms = round((time.time() - start_time) * 1000, 2)
+
+        # Background logging (don't block result)
+        model_config = {
+            "model": actual_model,
+            "vendor": actual_vendor,
+            "temperature": actual_temperature,
+        }
+        self.background_executor.submit(
+            self._log_dataset_entry_background,
+            prompt, completion_text, danger_score, category_scores,
+            accepted, miner_hotkey, {"total_ms": total_ms}, model_config, experiment_id,
+        )
+
+        return {
+            "danger_score": danger_score,
+            "category_scores": category_scores,
+            "accepted": accepted,
+            "response": completion_text,
+            "model_used": actual_model,
+            "miner_stats": miner_stats,
+            "timing_ms": total_ms,
+        }
+
+    def _handle_status(self, synapse: SubmissionStatusSynapse) -> SubmissionStatusSynapse:
+        """Handle a submission status poll request."""
+        token = synapse.submission_token
+
+        # Check local cache first
+        with self._submission_results_lock:
+            cached = self._submission_results.get(token)
+
+        if cached:
+            # Verify the polling hotkey matches the original submitter
+            polling_hotkey = synapse.dendrite.hotkey if synapse.dendrite else None
+            cached_hotkey = cached.get("miner_hotkey")
+            if polling_hotkey and cached_hotkey and polling_hotkey != cached_hotkey:
+                synapse.error_message = "Unknown submission token"
+                return synapse
+
+            synapse.status = cached["status"]
+            synapse.result = cached.get("result")
+            synapse.error_message = cached.get("error_message")
+            synapse.experiment_id = cached.get("experiment_id")
+            synapse.created_at = cached.get("created_at")
+            synapse.completed_at = cached.get("completed_at")
+            return synapse
+
+        # Fallback: check collector API (e.g., after validator restart)
+        remote = self.submission_client.get_submission(token)
+        if remote:
+            synapse.status = remote.get("status")
+            synapse.result = remote.get("result")
+            synapse.error_message = remote.get("error_message")
+            synapse.experiment_id = remote.get("experiment_id")
+            synapse.created_at = remote.get("created_at")
+            synapse.completed_at = remote.get("completed_at")
+            return synapse
+
+        # Unknown token
+        synapse.error_message = "Unknown submission token"
+        return synapse
+
     def _forward_internal(
         self,
         synapse: PromptSynapse,
@@ -459,11 +1075,11 @@ class Validator:
         prompt: str,
         start_time: float
     ) -> PromptSynapse:
-        """Internal forward logic (separated for tracing)."""
+        """Internal forward logic (legacy synchronous path, kept for reference)."""
         import time
 
         bt.logging.info("=" * 80)
-        bt.logging.info("🚀 FORWARD METHOD CALLED - REQUEST REACHED HANDLER!")
+        bt.logging.info("FORWARD METHOD CALLED - LEGACY SYNC PATH")
         bt.logging.info(f"   Synapse name: {synapse.name}")
         bt.logging.info(f"   Prompt: {Config.truncate_sensitive_data(prompt)}")
         bt.logging.info("=" * 80)
@@ -507,7 +1123,38 @@ class Validator:
             synapse.rejection_reason = "min_chars cannot be greater than max_chars"
             return synapse
 
-        # Step 1: Check rate limits
+        # Step 0.5: Experiment routing validation (FR-001, FR-002, FR-021, FR-022)
+        # Route submission to appropriate experiment, check experiment exists and miner registration
+        synapse.miner_hotkey = miner_hotkey  # Ensure miner_hotkey is set for routing
+        routing_result = self.experiment_manager.route_submission(synapse)
+
+        if routing_result.experiment is None:
+            # Routing rejected - apply rejection details to synapse
+            bt.logging.info(
+                f"Experiment routing rejected: {routing_result.rejection_reason} "
+                f"(miner: {miner_hotkey[:8] if miner_hotkey else 'unknown'}...)"
+            )
+            self.experiment_manager.apply_routing_rejection(synapse, routing_result)
+            synapse.response = None
+            synapse.danger_score = 0.0
+            return synapse
+
+        # Log successful routing
+        effective_experiment = synapse.experiment_id or "moral-reasoning"
+        bt.logging.debug(f"Experiment routing success: {effective_experiment}")
+
+        # Step 1: Check global rate limit first
+        global_allowed, global_reason, _ = self.global_rate_limiter.check_rate_limit()
+        if not global_allowed:
+            bt.logging.warning(f"Global rate limit exceeded: {global_reason}")
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = global_reason
+            return synapse
+        self.global_rate_limiter.record_request()
+
+        # Step 1b: Check per-miner rate limits
         allowed, reason, remaining = self.rate_limiter.check_rate_limit(hotkey=miner_hotkey)
         if not allowed:
             bt.logging.warning(f"Rate limit exceeded: {reason}")
@@ -520,6 +1167,19 @@ class Validator:
         # Record the request
         self.rate_limiter.record_request(hotkey=miner_hotkey)
         bt.logging.info(f"Rate limit check passed. Remaining: {remaining}")
+
+        # Delegate to moral reasoning experiment if applicable
+        # (placed AFTER rate limit checks to prevent bypass)
+        if effective_experiment == "moral-reasoning":
+            if hasattr(self, "_moral_reasoning_experiment"):
+                return self._moral_reasoning_experiment._handle_scenario(synapse)
+            else:
+                bt.logging.warning("Moral reasoning experiment requested but not initialized")
+                synapse.response = None
+                synapse.danger_score = 0.0
+                synapse.accepted = False
+                synapse.rejection_reason = "Moral reasoning experiment unavailable"
+                return synapse
 
         # Initialize timing metrics
         timing_metrics = {}
@@ -600,7 +1260,7 @@ class Validator:
                 bt.logging.info(f"Truncating response from {len(completion_text)} to {miner_max_chars} chars")
                 completion_text = completion_text[:miner_max_chars]
 
-            bt.logging.success(f"OpenAI response: {completion_text}")
+            bt.logging.success(f"OpenAI response: {Config.truncate_sensitive_data(completion_text)}")
 
             # Fill in basic response fields
             synapse.response = completion_text
@@ -721,17 +1381,21 @@ class Validator:
                 # Initiate consensus verification in background - miner gets response immediately
                 # Network context will be collected in the background thread
                 # Uses ThreadPoolExecutor to prevent DoS via thread explosion
+                # T085/T087: Pass experiment_id for per-experiment tracking
+                experiment_id = synapse.experiment_id or "prompt"
                 self.background_executor.submit(
                     self._run_consensus_verification,
-                    prompt, completion_text, danger_score, category_scores, miner_hotkey, timing_metrics, model_config
+                    prompt, completion_text, danger_score, category_scores, miner_hotkey, timing_metrics, model_config, experiment_id
                 )
             else:
                 # For non-consensus requests, log in background to avoid blocking response
                 # This includes both accepted and rejected submissions
                 # Uses ThreadPoolExecutor to prevent DoS via thread explosion
+                # T085/T087: Pass experiment_id to background logging
+                experiment_id = synapse.experiment_id or "prompt"
                 self.background_executor.submit(
                     self._log_dataset_entry_background,
-                    prompt, completion_text, danger_score, category_scores, accepted, miner_hotkey, timing_metrics, model_config
+                    prompt, completion_text, danger_score, category_scores, accepted, miner_hotkey, timing_metrics, model_config, experiment_id
                 )
 
             # Log immediate response return
@@ -771,11 +1435,12 @@ class Validator:
         miner_hotkey: str,
         timing_metrics: dict,
         model_config: dict,
+        experiment_id: str = "prompt",
     ):
         """
         Log dataset entry in background thread to avoid blocking response.
         Collects network context here since it makes blocking blockchain calls.
-        Also checks novelty for accepted prompts.
+        Also checks novelty for accepted prompts (T085/T087).
 
         Args:
             prompt: The prompt text
@@ -786,6 +1451,7 @@ class Validator:
             miner_hotkey: Miner's hotkey
             timing_metrics: Timing metrics
             model_config: Model configuration
+            experiment_id: Experiment ID for per-experiment novelty pools (T085)
         """
         try:
             bt.logging.debug("Background logging started")
@@ -802,18 +1468,20 @@ class Validator:
                 if prompt_embedding:
                     bt.logging.debug(f"Generated embedding: {len(prompt_embedding)} dimensions")
 
-                    # Check novelty using the embedding we just generated
+                    # Check novelty using the embedding we just generated (T085)
                     if self.novelty_client.is_available():
                         novelty_result = self.novelty_client.check_novelty(
                             prompt=prompt,
                             prompt_embedding=prompt_embedding,
+                            experiment_id=experiment_id,  # T085: Per-experiment novelty
                         )
                         if novelty_result:
                             novelty_score = novelty_result.novelty_score
                             bt.logging.info(
                                 f"Novelty check: score={novelty_score:.3f}, "
                                 f"max_similarity={novelty_result.max_similarity:.3f}, "
-                                f"similar_count={novelty_result.similar_count}"
+                                f"similar_count={novelty_result.similar_count}, "
+                                f"experiment={experiment_id}"
                             )
                 else:
                     bt.logging.warning("Failed to generate embedding for prompt")
@@ -821,7 +1489,7 @@ class Validator:
             # Resolve miner UID and coldkey from hotkey
             miner_uid, miner_coldkey = self._get_miner_info(miner_hotkey)
 
-            # Log to dataset (includes embedding for storage in central API)
+            # Log to dataset (includes embedding for storage in central API) (T087)
             self.dataset_logger.log_entry(
                 prompt=prompt,
                 response=response,
@@ -841,6 +1509,7 @@ class Validator:
                 timing_metrics=timing_metrics,
                 network_context=network_context,
                 prompt_embedding=prompt_embedding,
+                experiment_id=experiment_id,  # T087: Per-experiment tracking
             )
 
             # Update novelty score (submission already recorded in main thread)
@@ -864,9 +1533,10 @@ class Validator:
         miner_hotkey: str,
         timing_metrics: dict,
         model_config: dict,
+        experiment_id: str = "prompt",
     ):
         """
-        Run consensus verification in background (Phase 2).
+        Run consensus verification in background (Phase 2) (T085/T087).
 
         This method runs in a separate thread after the miner has received
         their response. It runs the prompt multiple times and coordinates
@@ -880,6 +1550,7 @@ class Validator:
             miner_hotkey: Miner's hotkey
             timing_metrics: Timing information from initial execution
             model_config: Model configuration used
+            experiment_id: Experiment ID for per-experiment tracking
         """
         bt.logging.info(f"Starting consensus verification for prompt: {Config.truncate_sensitive_data(prompt)}")
 
@@ -985,13 +1656,15 @@ class Validator:
                         novelty_result = self.novelty_client.check_novelty(
                             prompt=prompt,
                             prompt_embedding=prompt_embedding,
+                            experiment_id=experiment_id,  # T085: Per-experiment novelty
                         )
                         if novelty_result:
                             novelty_score = novelty_result.novelty_score
                             bt.logging.info(
                                 f"Novelty check: score={novelty_score:.3f}, "
                                 f"max_similarity={novelty_result.max_similarity:.3f}, "
-                                f"similar_count={novelty_result.similar_count}"
+                                f"similar_count={novelty_result.similar_count}, "
+                                f"experiment={experiment_id}"
                             )
 
             # Step 5: If consensus reached, log to dataset
@@ -1043,6 +1716,7 @@ class Validator:
                     timing_metrics=timing_metrics,
                     network_context=network_context,
                     prompt_embedding=prompt_embedding,
+                    experiment_id=experiment_id,  # T087: Per-experiment tracking
                 )
 
                 # Update scoring (accepted) with novelty
@@ -1103,6 +1777,7 @@ class Validator:
                     model_config=model_config,
                     timing_metrics=timing_metrics,
                     network_context=network_context,
+                    experiment_id=experiment_id,  # T087: Per-experiment tracking
                 )
 
                 self.scoring_system.record_submission(
@@ -1121,15 +1796,23 @@ class Validator:
 
             traceback.print_exc()
 
+    def _get_cached_metagraph(self):
+        """Get cached metagraph, fetching if not yet available."""
+        with self._timed_lock(self._metagraph_lock, "metagraph_lock"):
+            if self._cached_metagraph is None and not Config.LOCAL_MODE:
+                try:
+                    with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                        self._cached_metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+                except Exception as e:
+                    bt.logging.warning(f"Failed to fetch metagraph for blacklist: {e}")
+            return self._cached_metagraph
+
     def blacklist(self, synapse: PromptSynapse) -> Tuple[bool, str]:
         """
         Blacklist check for incoming requests.
 
-        For this simple example, we accept all requests.
-        In production, you might check:
-        - Stake amounts
-        - Rate limiting
-        - Request validity
+        Validates that the requesting hotkey is registered on the subnet metagraph.
+        Unregistered hotkeys are rejected to prevent unauthorized API credit consumption.
 
         Args:
             synapse: The incoming synapse
@@ -1137,27 +1820,31 @@ class Validator:
         Returns:
             Tuple of (should_blacklist, reason)
         """
-        if Config.LOG_CONNECTION_DETAILS:
-            bt.logging.info("=" * 80)
-            bt.logging.info("🔍 BLACKLIST CHECK - INCOMING CONNECTION")
-            bt.logging.info(f"   Synapse name: {synapse.name}")
-            bt.logging.info(f"   Synapse type: {type(synapse).__name__}")
-            if hasattr(synapse, 'dendrite') and synapse.dendrite:
-                bt.logging.info(f"   Miner hotkey: {synapse.dendrite.hotkey}")
-                bt.logging.info(f"   Miner IP: {synapse.dendrite.ip}")
-                bt.logging.info(f"   Miner port: {getattr(synapse.dendrite, 'port', 'N/A')}")
-                bt.logging.info(f"   Miner version: {getattr(synapse.dendrite, 'version', 'N/A')}")
-            else:
-                bt.logging.info("   Dendrite: None (direct connection or missing info)")
-            if hasattr(synapse, 'axon') and synapse.axon:
-                bt.logging.info(f"   Axon IP: {synapse.axon.ip}")
-                bt.logging.info(f"   Axon port: {synapse.axon.port}")
-            bt.logging.info("   Result: ACCEPTED (not blacklisted)")
-            bt.logging.info("=" * 80)
-        else:
-            bt.logging.info(f"🔍 Blacklist check: synapse={synapse.name}, accepted=True")
+        hotkey = synapse.dendrite.hotkey if hasattr(synapse, 'dendrite') and synapse.dendrite else None
+        if not hotkey:
+            bt.logging.warning("Blacklist: rejected request with no hotkey")
+            return True, "No hotkey provided"
 
-        # For hello world, accept all requests
+        # In LOCAL_MODE, accept all (no chain to verify against)
+        if Config.LOCAL_MODE:
+            if Config.LOG_CONNECTION_DETAILS:
+                bt.logging.info(f"Blacklist check: LOCAL_MODE, accepting hotkey {hotkey[:16]}...")
+            return False, ""
+
+        # Check metagraph registration
+        metagraph = self._get_cached_metagraph()
+        if metagraph is not None and hotkey not in metagraph.hotkeys:
+            bt.logging.info(f"Blacklist: rejected unregistered hotkey {hotkey[:16]}...")
+            return True, f"Hotkey not registered on subnet {Config.BT_NETUID}"
+
+        # If no metagraph available yet (still syncing), reject (fail-closed)
+        if metagraph is None:
+            bt.logging.warning("Blacklist: no cached metagraph yet, rejecting request (fail-closed)")
+            return True, "Validator starting up — metagraph not yet available. Please retry."
+
+        if Config.LOG_CONNECTION_DETAILS:
+            bt.logging.info(f"Blacklist check: accepted hotkey {hotkey[:16]}...")
+
         return False, ""
 
     def priority(self, synapse: PromptSynapse) -> float:
@@ -1200,7 +1887,7 @@ class Validator:
         """
         bt.logging.info(
             f"Received consensus verification request from {synapse.primary_validator_hotkey[:8]}... "
-            f"for prompt: {synapse.prompt[:50]}..."
+            f"for prompt: {Config.truncate_sensitive_data(synapse.prompt)}"
         )
 
         try:
@@ -1350,6 +2037,155 @@ class Validator:
             if hotkey not in metagraph.hotkeys:
                 metagraph.register_miner(hotkey, uid=None, stake=0.0)
 
+    def _calculate_experiment_weights(
+        self,
+        uids: list[int],
+        hotkeys: list[str],
+        current_block: int,
+    ) -> list[float]:
+        """Calculate weights using multi-experiment framework (T033).
+
+        If multiple experiments are registered with allocations, uses
+        calculate_merged_weights() to combine scores. Otherwise falls back
+        to single-experiment calculation for backward compatibility.
+
+        Args:
+            uids: List of neuron UIDs
+            hotkeys: List of hotkeys corresponding to UIDs
+            current_block: Current block height
+
+        Returns:
+            List of weights corresponding to UIDs
+        """
+        # Check if we have multiple experiments with allocations
+        enabled_experiments = self.experiment_manager.get_enabled_experiments()
+        has_multi_experiment = len(enabled_experiments) >= 1
+
+        if has_multi_experiment:
+            # Multi-experiment path: collect scores from all experiments
+            bt.logging.info(
+                f"Using multi-experiment weight calculation "
+                f"({len(enabled_experiments)} experiments)"
+            )
+
+            # Collect scores from all enabled experiments
+            experiment_scores = self.experiment_manager.collect_scores(current_block)
+
+            if not experiment_scores:
+                bt.logging.info("No experiment scores collected, using fallback calculation")
+                return self._calculate_single_experiment_weights(uids, hotkeys, current_block)
+
+            # Get burn percentage from config
+            burn_percentage = (Config.MINER_BURN_PERCENTAGE * 100) if Config.MINER_BURN_ENABLED else 0.0
+
+            # Build allocations from experiment configurations
+            allocations = {}
+            total_allocation = 0.0
+            for exp in enabled_experiments:
+                alloc = exp.weight_allocation * 100  # Convert to percentage
+                if alloc > 0:
+                    allocations[exp.name] = alloc
+                    total_allocation += alloc
+
+            # If no allocations configured, use equal distribution
+            if total_allocation == 0:
+                equal_share = 100.0 / len(enabled_experiments)
+                allocations = {exp.name: equal_share for exp in enabled_experiments}
+                total_allocation = 100.0
+
+            # Scale allocations so that allocations + burn = 100%
+            non_burn_share = 100.0 - burn_percentage
+            if non_burn_share > 0 and total_allocation > 0:
+                scale = non_burn_share / total_allocation
+                allocations = {k: v * scale for k, v in allocations.items()}
+
+            try:
+                # Calculate merged weights
+                merged = self.experiment_manager.calculate_merged_weights(
+                    experiment_scores=experiment_scores,
+                    allocations=allocations,
+                    burn_percentage=burn_percentage,
+                    redistribute_unused=True,
+                )
+
+                # Convert merged hotkey->weight to uid->weight list
+                weights = [0.0] * len(uids)
+                burn_weight = merged.pop("burn", 0.0)
+
+                for i, (uid, hotkey) in enumerate(zip(uids, hotkeys)):
+                    weights[i] = merged.get(hotkey, 0.0) / 100.0
+
+                # Assign burn weight to BURN_UID
+                if burn_weight > 0 and Config.BURN_UID < len(weights):
+                    weights[Config.BURN_UID] = burn_weight / 100.0
+
+                # Normalize to sum to 1.0
+                total = sum(weights)
+                if total > 0:
+                    weights = [w / total for w in weights]
+
+                return weights
+
+            except Exception as e:
+                bt.logging.warning(f"Multi-experiment weight calc failed: {e}, using experiment fallback")
+                try:
+                    # Try direct score extraction from active experiments
+                    for exp in enabled_experiments:
+                        if hasattr(exp, "calculate_scores"):
+                            scores = exp.calculate_scores(current_block)
+                            if scores and scores.scores:
+                                weights = [0.0] * len(uids)
+                                for i, hotkey in enumerate(hotkeys):
+                                    weights[i] = scores.scores.get(hotkey, 0.0)
+                                # Apply burn
+                                if Config.MINER_BURN_ENABLED and Config.BURN_UID < len(weights):
+                                    burn = Config.MINER_BURN_PERCENTAGE
+                                    non_burn = [w * (1 - burn) for w in weights]
+                                    non_burn[Config.BURN_UID] = burn
+                                    weights = non_burn
+                                total = sum(weights)
+                                if total > 0:
+                                    weights = [w / total for w in weights]
+                                    bt.logging.info(
+                                        f"Fallback: using scores from experiment '{exp.name}'"
+                                    )
+                                    return weights
+                except Exception as e2:
+                    bt.logging.error(f"Experiment fallback also failed: {e2}")
+                # Last resort: zero weights (safer than wrong weights from prompt scoring)
+                bt.logging.warning("All weight calculation methods failed, returning zero weights")
+                return [0.0] * len(uids)
+
+        else:
+            # Single experiment path: use existing windowed calculation
+            return self._calculate_single_experiment_weights(uids, hotkeys, current_block)
+
+    def _calculate_single_experiment_weights(
+        self,
+        uids: list[int],
+        hotkeys: list[str],
+        current_block: int,
+    ) -> list[float]:
+        """Calculate weights using single-experiment method (legacy).
+
+        This is the original weight calculation method for the default
+        "prompt" experiment.
+
+        Args:
+            uids: List of neuron UIDs
+            hotkeys: List of hotkeys corresponding to UIDs
+            current_block: Current block height
+
+        Returns:
+            List of weights corresponding to UIDs
+        """
+        return self.scoring_system.calculate_weights_windowed(
+            uids=uids,
+            hotkeys=hotkeys,
+            current_block=current_block,
+            min_submissions=Config.MIN_SAMPLES_FOR_WEIGHTS,
+        )
+
     def _diagnose_weight_setting_failure(self, metagraph):
         """
         Diagnose common reasons for weight-setting failures.
@@ -1498,7 +2334,7 @@ class Validator:
         if not miner_hotkey or not self.subtensor:
             return None, None
         try:
-            with self.subtensor_lock:
+            with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
                 metagraph = self.subtensor.metagraph(Config.BT_NETUID)
             for uid, hotkey in enumerate(metagraph.hotkeys):
                 if hotkey == miner_hotkey:
@@ -1530,7 +2366,7 @@ class Validator:
             # Validator stake
             if self.wallet and self.subtensor:
                 try:
-                    with self.subtensor_lock:
+                    with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
                         validator_stake = self.subtensor.get_stake_for_coldkey_and_hotkey(
                             hotkey_ss58=self.wallet.hotkey.ss58_address,
                             coldkey_ss58=self.wallet.coldkeypub.ss58_address
@@ -1543,7 +2379,7 @@ class Validator:
             if miner_hotkey and self.subtensor:
                 try:
                     # Get metagraph to find miner's coldkey
-                    with self.subtensor_lock:
+                    with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
                         metagraph = self.subtensor.metagraph(Config.BT_NETUID)
                     for uid, hotkey in enumerate(metagraph.hotkeys):
                         if hotkey == miner_hotkey:
@@ -1580,7 +2416,7 @@ class Validator:
                     continue
 
                 # Get current block (with thread safety)
-                with self.subtensor_lock:
+                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
                     current_block = self.subtensor.block
 
                 # Check if it's time to update weights
@@ -1593,10 +2429,17 @@ class Validator:
                 bt.logging.info(f"   Blocks since last update: {blocks_since_update}")
                 bt.logging.info("=" * 60)
 
+                # Persist rate limiter state to disk on each weight cycle
+                self.rate_limiter.save_state(self._rate_limiter_state_path)
+
                 # Sync metagraph to get current miners (with thread safety)
                 bt.logging.info("🔄 Syncing metagraph...")
-                with self.subtensor_lock:
+                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
                     metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+
+                # Update cached metagraph for blacklist checks
+                with self._timed_lock(self._metagraph_lock, "metagraph_lock"):
+                    self._cached_metagraph = metagraph
 
                 # In LOCAL_MODE with simulated subtensor, register miners from scoring system
                 if Config.LOCAL_MODE:
@@ -1623,12 +2466,11 @@ class Validator:
 
                 bt.logging.info(f"🔢 Calculating weights for {len(uids)} neurons...")
 
-                # Calculate weights using windowed method
-                weights = self.scoring_system.calculate_weights_windowed(
+                # T033: Use multi-experiment weight calculation if available
+                weights = self._calculate_experiment_weights(
                     uids=uids,
                     hotkeys=hotkeys,
                     current_block=current_block,
-                    min_submissions=Config.MIN_SAMPLES_FOR_WEIGHTS,
                 )
 
                 # Log weight calculation results
@@ -1651,7 +2493,7 @@ class Validator:
                 else:
                     try:
                         # Set weights with thread safety
-                        with self.subtensor_lock:
+                        with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
                             # Log what we're about to set
                             non_zero_uids = [uid for uid, w in zip(uids, weights) if w > 0]
                             non_zero_weights = [w for w in weights if w > 0]
@@ -1659,16 +2501,21 @@ class Validator:
                             bt.logging.info(f"Total UIDs: {len(uids)}, sum of weights: {sum(weights):.6f}")
 
                             # Use default parameters which handle commit-reveal properly
-                            success = self.subtensor.set_weights(
+                            result = self.subtensor.set_weights(
                                 netuid=Config.BT_NETUID,
                                 wallet=self.wallet,
                                 uids=uids,
                                 weights=weights,
                                 wait_for_inclusion=True,
                                 wait_for_finalization=True,
-                                wait_for_revealed_execution=True,
-                                raise_error=True,
                             )
+                            # set_weights returns (bool, str) tuple in bittensor 9.x
+                            if isinstance(result, tuple):
+                                success, msg = result
+                                if not success:
+                                    bt.logging.error(f"set_weights failed: {msg}")
+                            else:
+                                success = bool(result)
 
                         if success:
                             bt.logging.success(f"✓ Weights successfully set on chain at block {current_block}")
@@ -1714,12 +2561,39 @@ class Validator:
             return self.verify(synapse)
 
         # Attach the forward function and middleware for miner requests
-        self.axon.attach(
+        # In LOCAL_MODE, use custom verify (no real wallets for signature verification)
+        # In production, omit verify_fn so Bittensor's default_verify handles SR25519 signatures
+        attach_kwargs = dict(
             forward_fn=forward_wrapper,
             blacklist_fn=blacklist_wrapper,
             priority_fn=priority_wrapper,
-            verify_fn=verify_wrapper,
         )
+        if Config.LOCAL_MODE:
+            attach_kwargs["verify_fn"] = verify_wrapper
+        self.axon.attach(**attach_kwargs)
+
+        # Attach SubmissionStatusSynapse handler for async result polling
+        def status_wrapper(synapse: SubmissionStatusSynapse) -> SubmissionStatusSynapse:
+            return self._handle_status(synapse)
+
+        def status_blacklist_wrapper(synapse: SubmissionStatusSynapse) -> Tuple[bool, str]:
+            # Allow any registered miner to poll (same as PromptSynapse blacklist)
+            return self.blacklist(synapse)
+
+        def status_priority_wrapper(synapse: SubmissionStatusSynapse) -> float:
+            return 0.5  # Lower priority than prompt submissions
+
+        def status_verify_wrapper(synapse: SubmissionStatusSynapse) -> None:
+            return self.verify(synapse)
+
+        status_attach_kwargs = dict(
+            forward_fn=status_wrapper,
+            blacklist_fn=status_blacklist_wrapper,
+            priority_fn=status_priority_wrapper,
+        )
+        if Config.LOCAL_MODE:
+            status_attach_kwargs["verify_fn"] = status_verify_wrapper
+        self.axon.attach(**status_attach_kwargs)
 
         # Attach consensus verification handler for validator requests
         if Config.ENABLE_CONSENSUS and self.consensus_coordinator:
@@ -1728,8 +2602,27 @@ class Validator:
                 return self.verify_for_consensus(synapse)
 
             def consensus_blacklist_wrapper(synapse: ConsensusVerificationSynapse) -> Tuple[bool, str]:
-                # For consensus verification from other validators, be permissive
-                # Only blacklist if obvious spam/attack
+                hotkey = synapse.dendrite.hotkey if hasattr(synapse, 'dendrite') and synapse.dendrite else None
+                if not hotkey:
+                    return True, "No hotkey provided"
+
+                if Config.LOCAL_MODE:
+                    return False, ""
+
+                metagraph = self._get_cached_metagraph()
+                if metagraph is not None:
+                    if hotkey not in metagraph.hotkeys:
+                        bt.logging.info(f"Consensus blacklist: rejected unregistered hotkey {hotkey[:16]}...")
+                        return True, f"Hotkey not registered on subnet {Config.BT_NETUID}"
+                    # Consensus requests should come from validators (with stake)
+                    uid = metagraph.hotkeys.index(hotkey)
+                    if hasattr(metagraph, 'S') and metagraph.S[uid] < Config.MIN_VALIDATOR_STAKE:
+                        bt.logging.info(
+                            f"Consensus blacklist: rejected low-stake hotkey {hotkey[:16]}... "
+                            f"(stake={metagraph.S[uid]:.1f})"
+                        )
+                        return True, "Insufficient stake for consensus verification"
+
                 return False, ""
 
             def consensus_priority_wrapper(synapse: ConsensusVerificationSynapse) -> float:
@@ -1739,21 +2632,22 @@ class Validator:
             def consensus_verify_wrapper(synapse: ConsensusVerificationSynapse) -> None:
                 return self.verify_consensus(synapse)
 
-            self.axon.attach(
+            # In LOCAL_MODE, use custom verify (no real wallets)
+            # In production, omit verify_fn so Bittensor's default_verify handles signatures
+            consensus_attach_kwargs = dict(
                 forward_fn=verify_consensus_wrapper,
                 blacklist_fn=consensus_blacklist_wrapper,
                 priority_fn=consensus_priority_wrapper,
-                verify_fn=consensus_verify_wrapper,
             )
+            if Config.LOCAL_MODE:
+                consensus_attach_kwargs["verify_fn"] = consensus_verify_wrapper
+            self.axon.attach(**consensus_attach_kwargs)
 
         # Diagnostic: Verify handlers are registered correctly
         bt.logging.info("=" * 80)
-        bt.logging.info("📋 HANDLER REGISTRATION DIAGNOSTIC")
-        bt.logging.info(f"   PromptSynapse in forward_class_types: {'PromptSynapse' in self.axon.forward_class_types}")
-        bt.logging.info(f"   PromptSynapse in blacklist_fns: {'PromptSynapse' in self.axon.blacklist_fns}")
-        bt.logging.info(f"   PromptSynapse in priority_fns: {'PromptSynapse' in self.axon.priority_fns}")
-        bt.logging.info(f"   PromptSynapse in verify_fns: {'PromptSynapse' in self.axon.verify_fns}")
-        bt.logging.info(f"   PromptSynapse in forward_fns: {'PromptSynapse' in self.axon.forward_fns}")
+        bt.logging.info("HANDLER REGISTRATION DIAGNOSTIC")
+        bt.logging.info(f"   PromptSynapse registered: {'PromptSynapse' in self.axon.forward_class_types}")
+        bt.logging.info(f"   SubmissionStatusSynapse registered: {'SubmissionStatusSynapse' in self.axon.forward_class_types}")
         bt.logging.info(f"   All registered handlers: {list(self.axon.forward_class_types.keys())}")
         bt.logging.info("=" * 80)
 
@@ -1770,6 +2664,37 @@ class Validator:
             bt.logging.info("  Connection method: Direct IP:PORT")
             bt.logging.info("  Miners should connect to this address directly")
             bt.logging.info("=" * 60)
+
+            # In LOCAL_MODE, auto-register the validator in the simulated metagraph for telemetry
+            try:
+                bt.logging.info("🔍 Setting up validator UID in simulated metagraph...")
+                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                    metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+                validator_hotkey = self.wallet.hotkey.ss58_address
+
+                if validator_hotkey not in metagraph.hotkeys:
+                    bt.logging.info("LOCAL_MODE: Auto-registering validator in simulated metagraph...")
+                    metagraph.register_miner(validator_hotkey, uid=0, stake=1000.0)
+
+                self.uid = metagraph.hotkeys.index(validator_hotkey)
+                bt.logging.success(f"✅ Validator UID: {self.uid} (simulated)")
+                bt.logging.info(f"   Hotkey: {validator_hotkey}")
+
+                # Register with telemetry API now that we have the UID
+                if Config.TELEMETRY_ENABLED and self.wallet:
+                    try:
+                        register_with_telemetry_api(
+                            wallet=self.wallet,
+                            validator_uid=self.uid,
+                            netuid=Config.BT_NETUID,
+                            network=Config.BT_NETWORK,
+                            heartbeat_interval_s=Config.TELEMETRY_HEARTBEAT_INTERVAL_S,
+                        )
+                    except Exception as e:
+                        bt.logging.warning(f"Failed to register with telemetry API: {e}")
+            except Exception as e:
+                bt.logging.error(f"❌ Failed to setup validator UID: {e}")
+                self.uid = None
         else:
             # Normal mode: Register axon on the blockchain
             bt.logging.info("=" * 60)
@@ -1786,9 +2711,10 @@ class Validator:
             # Determine our UID from the metagraph
             try:
                 bt.logging.info("🔍 Looking up validator UID in metagraph...")
-                with self.subtensor_lock:
+                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
                     metagraph = self.subtensor.metagraph(Config.BT_NETUID)
                 validator_hotkey = self.wallet.hotkey.ss58_address
+
                 if validator_hotkey in metagraph.hotkeys:
                     self.uid = metagraph.hotkeys.index(validator_hotkey)
                     bt.logging.success(f"✅ Validator UID: {self.uid}")
@@ -1838,6 +2764,21 @@ class Validator:
         else:
             bt.logging.info("Weight updates disabled (no subtensor)")
 
+        # Start remote config polling loop in background (if client is available)
+        if self.remote_config_client.is_available():
+            self._remote_config_thread = threading.Thread(
+                target=self._remote_config_loop, daemon=True, name="RemoteConfigLoop"
+            )
+            self._remote_config_thread.start()
+            bt.logging.success("Remote config polling started in background")
+
+        # Start experiment sync loop in background (if API endpoint configured)
+        if self.experiment_client.api_endpoint:
+            self.experiment_client.start_sync_loop()
+            bt.logging.success("Experiment sync loop started in background")
+        else:
+            bt.logging.info("Experiment sync disabled (no API endpoint configured)")
+
         # Keep the validator running (axon.start() doesn't block)
         keep_alive = threading.Event()
         try:
@@ -1847,29 +2788,79 @@ class Validator:
             self.stop()  # Properly cleanup and flush dataset logger queue
 
     def stop(self):
-        """Stop the validator server."""
-        bt.logging.info("Stopping validator")
+        """Stop the validator server gracefully."""
+        bt.logging.info("=" * 60)
+        bt.logging.info("🛑 INITIATING GRACEFUL SHUTDOWN")
+        bt.logging.info("=" * 60)
 
-        # Stop weight update loop
+        # Stop weight update loop first (it depends on other components)
+        bt.logging.info("Stopping weight update loop...")
         self.running = False
+        if hasattr(self, "weight_update_thread") and self.weight_update_thread.is_alive():
+            bt.logging.info("Waiting for weight update thread to stop...")
+            self.weight_update_thread.join(timeout=10.0)
+            if self.weight_update_thread.is_alive():
+                bt.logging.warning("Weight update thread did not stop cleanly (timeout)")
+            else:
+                bt.logging.info("Weight update thread stopped")
+
+        # Stop remote config polling loop
+        if hasattr(self, "_remote_config_stop_event"):
+            bt.logging.info("Stopping remote config polling...")
+            self._remote_config_stop_event.set()
+            if self._remote_config_thread and self._remote_config_thread.is_alive():
+                self._remote_config_thread.join(timeout=5.0)
+                if self._remote_config_thread.is_alive():
+                    bt.logging.warning("Remote config thread did not stop cleanly (timeout)")
+                else:
+                    bt.logging.info("Remote config thread stopped")
+
+        # Stop experiment sync loop
+        if hasattr(self, "experiment_client") and self.experiment_client:
+            bt.logging.info("Stopping experiment sync loop...")
+            if self.experiment_client.stop_sync_loop():
+                bt.logging.info("Experiment sync loop stopped")
+            else:
+                bt.logging.warning("Experiment sync loop did not stop cleanly (timeout)")
 
         # Stop axon
+        bt.logging.info("Stopping axon server...")
         self.axon.stop()
+        bt.logging.info("Axon server stopped")
 
         # Shutdown background thread pool (wait for pending tasks to complete)
         if hasattr(self, "background_executor"):
-            bt.logging.info("Shutting down background executor...")
+            bt.logging.info("Shutting down background executor (waiting for pending tasks)...")
             self.background_executor.shutdown(wait=True, cancel_futures=False)
             bt.logging.info("Background executor shutdown complete")
 
         # Stop dataset logger to flush any pending submissions
         if hasattr(self, "dataset_logger"):
+            bt.logging.info("Flushing dataset logger queue...")
             self.dataset_logger.stop()
+            bt.logging.info("Dataset logger stopped")
+
+        # Close HTTP sessions to release connection pool resources
+        if hasattr(self, "novelty_client"):
+            self.novelty_client.close()
+        if hasattr(self, "embedding_client"):
+            self.embedding_client.close()
+
+        # Save rate limiter state
+        if hasattr(self, "rate_limiter") and hasattr(self, "_rate_limiter_state_path"):
+            bt.logging.info("Saving rate limiter state...")
+            self.rate_limiter.save_state(self._rate_limiter_state_path)
+            bt.logging.info("Rate limiter state saved")
 
         # Save final scoring data
         if hasattr(self, "scoring_system"):
+            bt.logging.info("Saving final scoring data...")
             self.scoring_system._save()
             bt.logging.info("Final scoring data saved")
+
+        bt.logging.info("=" * 60)
+        bt.logging.info("✅ GRACEFUL SHUTDOWN COMPLETE")
+        bt.logging.info("=" * 60)
 
 
 def main():
@@ -1898,15 +2889,52 @@ def main():
     # Create and start validator
     validator = Validator()
 
-    try:
-        validator.start()
-    except KeyboardInterrupt:
-        bt.logging.info("Received keyboard interrupt")
+    # Setup signal handlers for graceful shutdown
+    shutdown_event = threading.Event()
+
+    def signal_handler(signum, frame):
+        """Handle SIGTERM and SIGINT for graceful shutdown."""
+        signal_name = signal.Signals(signum).name
+        bt.logging.info(f"Received {signal_name}, initiating graceful shutdown...")
+        shutdown_event.set()
         validator.stop()
-    except Exception as e:
-        bt.logging.error(f"Error running validator: {e}")
-        validator.stop()
-        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    max_retries = Config.VALIDATOR_MAX_RESTART_RETRIES
+    max_backoff = Config.VALIDATOR_MAX_RESTART_BACKOFF
+    attempt = 0
+
+    while True:
+        try:
+            validator.start()
+            break  # Clean exit from start()
+        except KeyboardInterrupt:
+            if not shutdown_event.is_set():
+                bt.logging.info("Received keyboard interrupt")
+                validator.stop()
+            break
+        except Exception as e:
+            attempt += 1
+            if attempt > max_retries:
+                bt.logging.error(
+                    f"Error running validator (attempt {attempt}/{max_retries}): {e}"
+                )
+                bt.logging.error("Max retries exhausted, exiting")
+                validator.stop()
+                sys.exit(1)
+
+            backoff = min(2**attempt, max_backoff)
+            bt.logging.error(
+                f"Error running validator (attempt {attempt}/{max_retries}): {e}. "
+                f"Restarting in {backoff}s..."
+            )
+            if shutdown_event.wait(timeout=backoff):
+                # Shutdown was requested during backoff
+                bt.logging.info("Shutdown requested during restart backoff")
+                validator.stop()
+                break
 
 
 if __name__ == "__main__":

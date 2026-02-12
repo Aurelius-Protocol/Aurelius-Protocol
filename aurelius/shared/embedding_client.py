@@ -35,12 +35,17 @@ class EmbeddingClient:
         self.model = EMBEDDING_MODEL
         self.dimensions = EMBEDDING_DIMENSIONS
         self.embeddings_url = OPENAI_EMBEDDINGS_URL
+        self._session = requests.Session()
         self._tracer = get_tracer("aurelius.embedding") if Config.TELEMETRY_ENABLED else None
 
         if self.api_key:
             bt.logging.info(f"Embedding client initialized: {self.embeddings_url} (model: {self.model})")
         else:
             bt.logging.warning("Embedding client: Missing OpenAI API key")
+
+    def close(self):
+        """Close the HTTP session to release connection pool resources."""
+        self._session.close()
 
     def is_available(self) -> bool:
         """Check if embedding generation is available."""
@@ -89,7 +94,7 @@ class EmbeddingClient:
     def _do_get_embedding(self, text: str) -> list[float] | None:
         """Internal method to perform the embedding API call."""
         try:
-            response = requests.post(
+            response = self._session.post(
                 self.embeddings_url,
                 json={
                     "model": self.model,
@@ -107,7 +112,7 @@ class EmbeddingClient:
                 data = response.json()
                 embedding = data["data"][0]["embedding"]
                 if len(embedding) != self.dimensions:
-                    bt.logging.warning(
+                    raise ValueError(
                         f"Embedding dimension mismatch: got {len(embedding)}, expected {self.dimensions}"
                     )
                 return embedding
@@ -145,7 +150,7 @@ class EmbeddingClient:
             return []
 
         try:
-            response = requests.post(
+            response = self._session.post(
                 self.embeddings_url,
                 json={
                     "model": self.model,

@@ -1,7 +1,10 @@
 """Miner implementation - submits prompts to validators."""
 
 import argparse
+import os
+import signal
 import sys
+import threading
 import time
 from dataclasses import dataclass
 
@@ -14,9 +17,14 @@ from aurelius.miner.errors import (
     create_error,
 )
 from aurelius.miner.health import ValidatorHealthChecker
+from aurelius.miner.registration import (
+    list_registrations,
+    register_for_experiment,
+    withdraw_from_experiment,
+)
 from aurelius.miner.retry import RetryConfig, RetryHandler
 from aurelius.shared.config import Config, ConfigurationError
-from aurelius.shared.protocol import PromptSynapse
+from aurelius.shared.protocol import PromptSynapse, SubmissionStatusSynapse
 
 
 @dataclass
@@ -163,9 +171,16 @@ def send_prompt(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
+    experiment_id: str | None = None,
+    poll_interval: int = 5,
+    max_poll_time: int = 300,
+    submit_only: bool = False,
 ) -> str:
     """
-    Send a prompt to a validator and return the response.
+    Send a prompt to a validator using the async token-based flow.
+
+    Phase 1: Submit prompt and receive a submission token instantly.
+    Phase 2: Poll the validator for results using the token.
 
     Args:
         prompt: The prompt text to send
@@ -182,6 +197,9 @@ def send_prompt(
         max_retries: Maximum retry attempts (default: from config)
         skip_preflight: Skip pre-flight health check
         use_colors: Use colored output for diagnostics (default: from config)
+        poll_interval: Seconds between status polls (default: 5)
+        max_poll_time: Max seconds to poll before giving up (default: 300)
+        submit_only: Submit and print token, don't poll for result
 
     Returns:
         The response from the validator (OpenAI completion)
@@ -259,11 +277,29 @@ def send_prompt(
         print(formatter.format_error(error, context))
         return ""
 
-    bt.logging.info(f"Prompt: {prompt}")
+    bt.logging.info(f"Prompt: {Config.truncate_sensitive_data(prompt)}")
     if vendor or model_requested:
         bt.logging.info(f"Model specs: vendor={vendor}, model={model_requested}")
     if temperature is not None:
         bt.logging.info(f"Temperature: {temperature}")
+
+    # Validate and clamp parameters before synapse construction
+    import math
+
+    def _validate_param(
+        name: str, value: float | None, lo: float, hi: float
+    ) -> float | None:
+        if value is None:
+            return None
+        if math.isnan(value) or math.isinf(value):
+            bt.logging.warning(f"Parameter {name}={value} is NaN/Infinity, ignoring")
+            return None
+        return max(lo, min(hi, value))
+
+    temperature = _validate_param("temperature", temperature, 0.0, 2.0)
+    top_p = _validate_param("top_p", top_p, 0.0, 1.0)
+    frequency_penalty = _validate_param("frequency_penalty", frequency_penalty, -2.0, 2.0)
+    presence_penalty = _validate_param("presence_penalty", presence_penalty, -2.0, 2.0)
 
     # Create the synapse with the prompt and model specifications
     synapse = PromptSynapse(
@@ -276,7 +312,11 @@ def send_prompt(
         presence_penalty=presence_penalty,
         min_chars=min_chars,
         max_chars=max_chars,
+        experiment_id=experiment_id,
     )
+
+    if experiment_id:
+        bt.logging.info(f"Experiment: {experiment_id}")
 
     # Determine target axon based on mode
     target_axon = None
@@ -298,13 +338,17 @@ def send_prompt(
         )
 
         # Create a custom axon info for the local validator
+        # Use real validator hotkey if available (env VALIDATOR_HOTKEY_SS58)
+        # so that Bittensor's signature verification passes
+        local_hotkey = os.environ.get("VALIDATOR_HOTKEY_SS58", "local_validator")
+        local_coldkey = os.environ.get("VALIDATOR_COLDKEY_SS58", "local_coldkey")
         target_axon = bt.AxonInfo(
             version=1,
             ip=Config.VALIDATOR_HOST,
             port=Config.BT_PORT_VALIDATOR,
             ip_type=4,
-            hotkey="local_validator",  # Dummy hotkey for local mode
-            coldkey="local_coldkey",
+            hotkey=local_hotkey,
+            coldkey=local_coldkey,
         )
     else:
         # Normal mode: Query metagraph for validator UID
@@ -358,18 +402,17 @@ def send_prompt(
         if not health_result.is_healthy:
             return ""
 
-    # Define the query operation for retry
-    def do_query():
+    # --- Phase 1: Submit prompt and get token ---
+    def do_submit():
         return dendrite.query(
             axons=target_axon,
             synapse=synapse,
-            timeout=effective_timeout,
-            deserialize=False,  # Get full synapse back, not just deserialized string
+            timeout=10,  # Submit should be fast
+            deserialize=False,
         )
 
-    # Execute with retry
     result = retry_handler.execute_with_retry(
-        operation=do_query,
+        operation=do_submit,
         context=context,
         on_retry=lambda attempt, error, delay: print(
             formatter.format_retry_progress(attempt, effective_retries, delay, error, context)
@@ -380,119 +423,215 @@ def send_prompt(
         print(formatter.format_error(result.last_error, context))
         return ""
 
-    # Process response
     responses = result.result
-
-    # dendrite.query can return different types:
-    # - Sometimes the deserialized response (string from synapse.deserialize())
-    # - Sometimes the synapse object itself
-    # - Sometimes a list
-
-    # Extract the synapse from response
     result_synapse = None
-
-    # dendrite.query returns the synapse itself when querying a single axon
-    # For lists, it returns a list of synapses
     if isinstance(responses, PromptSynapse):
         result_synapse = responses
     elif isinstance(responses, list) and len(responses) > 0:
         result_synapse = responses[0]
-    elif isinstance(responses, str):
-        # Shouldn't happen with single axon query, but handle it
-        # Create a dummy synapse with the response
-        result_synapse = PromptSynapse(prompt=prompt)
-        result_synapse.response = responses
     else:
         result_synapse = responses if responses else synapse
 
-    # Check for validator-side errors
+    # Check for rejection (rate limit, validation errors)
     if result_synapse and hasattr(result_synapse, "rejection_reason") and result_synapse.rejection_reason:
+        code = getattr(result_synapse, "rejection_code", None) or ""
         rejection = result_synapse.rejection_reason.lower()
-
-        if "rate limit" in rejection:
+        if code == "RATE_LIMITED" or (not code and "rate limit" in rejection):
             error = create_error(ErrorCategory.RATE_LIMITED, context)
             context["reason"] = result_synapse.rejection_reason
             print(formatter.format_error(error, context))
-            # Still show the rejection reason
-            print(f"Rejection: {result_synapse.rejection_reason}")
             return ""
-        elif "error" in rejection:
+        elif code.startswith("INVALID") or (not code and "error" in rejection):
             error = create_error(ErrorCategory.API_ERROR, context)
             context["reason"] = result_synapse.rejection_reason
             print(formatter.format_error(error, context))
             return ""
 
-    # Check for response with Error prefix
-    if (
-        result_synapse
-        and hasattr(result_synapse, "response")
-        and result_synapse.response
-        and result_synapse.response.startswith("Error:")
-    ):
-        error = create_error(ErrorCategory.API_ERROR, context)
-        print(formatter.format_error(error, context))
-        print(f"Validator response: {result_synapse.response}")
-        return ""
+    # Extract submission token
+    token = getattr(result_synapse, "submission_token", None) if result_synapse else None
 
-    if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
-        # Display results
-        print("\n" + "=" * 60)
-        print("RESPONSE FROM VALIDATOR")
-        print("=" * 60)
-        print(f"Prompt:   {result_synapse.prompt}")
-        print(f"Response: {result_synapse.response}")
-        print(f"Model:    {result_synapse.model_used or 'unknown'}")
+    if not token:
+        # Fallback: validator may still use legacy sync flow — check for response
+        if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
+            _display_legacy_response(result_synapse, effective_colors)
+            return result_synapse.response
 
-        # Display moderation results if available
-        if result_synapse.danger_score is not None:
-            print("\n--- Moderation Results ---")
-            print(f"Danger Score:  {result_synapse.danger_score:.4f}")
-            print(f"Accepted:      {'✓ YES' if result_synapse.accepted else '✗ NO'}")
-
-            if result_synapse.rejection_reason:
-                print(f"Rejection:     {result_synapse.rejection_reason}")
-
-            if result_synapse.category_scores:
-                print("\nTop Category Scores:")
-                sorted_cats = sorted(
-                    result_synapse.category_scores.items(), key=lambda x: x[1], reverse=True
-                )[:5]
-                for category, score in sorted_cats:
-                    if score > 0.01:
-                        print(f"  {category:25s}: {score:.4f}")
-
-        # Display miner statistics if available
-        if result_synapse.miner_submission_count is not None:
-            print("\n--- Your Statistics ---")
-            print(f"Submissions:   {result_synapse.miner_submission_count}")
-            if result_synapse.miner_hit_rate is not None:
-                print(f"Hit Rate:      {result_synapse.miner_hit_rate:.1%}")
-            if result_synapse.miner_novelty_avg is not None:
-                print(f"Avg Novelty:   {result_synapse.miner_novelty_avg:.3f}")
-
-        print("=" * 60 + "\n")
-        return result_synapse.response
-    else:
-        # No response received - create appropriate error
-        error = create_error(
-            ErrorCategory.VALIDATOR_BUSY,
-            context,
-        )
-        # Customize for no response case
-        error.message = "No response received from validator"
-        error.cause = (
-            "The validator did not return a response. "
-            "This could indicate the validator is overloaded, misconfigured, "
-            "or the request was silently dropped."
-        )
+        error = create_error(ErrorCategory.VALIDATOR_BUSY, context)
+        error.message = "No submission token or response received"
         error.suggestions = [
-            "Check validator logs for errors",
+            "Validator may be running an older version without async support",
             "Try a different validator: --validator-uid <other_uid>",
-            "Verify the validator is running and accepting requests",
-            "Increase timeout: --timeout 60",
         ]
         print(formatter.format_error(error, context))
         return ""
+
+    GREEN = "\033[92m" if effective_colors else ""
+    CYAN = "\033[96m" if effective_colors else ""
+    YELLOW = "\033[93m" if effective_colors else ""
+    BOLD = "\033[1m" if effective_colors else ""
+    RESET = "\033[0m" if effective_colors else ""
+
+    print(f"\n{GREEN}Submission accepted{RESET}")
+    print(f"  Token: {BOLD}{token}{RESET}")
+
+    if submit_only:
+        print(f"\n{CYAN}Submit-only mode. Use --poll-token {token} to check results later.{RESET}")
+        return token
+
+    # --- Phase 2: Poll for results ---
+    MAX_POLL_COUNT = 60
+    print(f"\n{CYAN}Polling for results (interval={poll_interval}s, max={max_poll_time}s)...{RESET}")
+
+    poll_start = time.time()
+    last_status = None
+    poll_count = 0
+    current_interval = poll_interval
+
+    while (time.time() - poll_start) < max_poll_time and poll_count < MAX_POLL_COUNT:
+        poll_count += 1
+        elapsed = int(time.time() - poll_start)
+
+        status_synapse = SubmissionStatusSynapse(submission_token=token)
+        try:
+            status_response = dendrite.query(
+                axons=target_axon,
+                synapse=status_synapse,
+                timeout=10,
+                deserialize=False,
+            )
+        except Exception as e:
+            bt.logging.warning(f"Poll failed: {e}")
+            time.sleep(current_interval)
+            current_interval = min(current_interval * 1.5, 30.0)
+            continue
+
+        # Extract status synapse
+        status_result = None
+        if isinstance(status_response, SubmissionStatusSynapse):
+            status_result = status_response
+        elif isinstance(status_response, list) and len(status_response) > 0:
+            status_result = status_response[0]
+
+        status = getattr(status_result, "status", None) if status_result else None
+
+        if status and status != last_status:
+            print(f"  Status: {BOLD}{status}{RESET} ({elapsed}s elapsed)")
+            last_status = status
+
+        if status in ("COMPLETED", "FAILED", "TIMEOUT"):
+            break
+
+        time.sleep(current_interval)
+        current_interval = min(current_interval * 1.5, 30.0)
+
+    if poll_count >= MAX_POLL_COUNT:
+        bt.logging.warning(f"Max poll count ({MAX_POLL_COUNT}) reached for token {token}")
+
+    if not status_result or not status:
+        print(f"\n{YELLOW}Polling timed out after {max_poll_time}s. Token: {token}{RESET}")
+        return ""
+
+    # Display results
+    if status == "COMPLETED" and status_result.result:
+        _display_async_result(status_result, effective_colors)
+        return status_result.result.get("response", "")
+    elif status == "FAILED":
+        print(f"\n{YELLOW}Processing failed: {status_result.error_message or 'Unknown error'}{RESET}")
+        return ""
+    elif status == "TIMEOUT":
+        print(f"\n{YELLOW}Processing timed out on validator side{RESET}")
+        return ""
+    else:
+        print(f"\n{YELLOW}Final status: {status}. Token: {token}{RESET}")
+        return ""
+
+
+def _display_legacy_response(synapse: PromptSynapse, use_colors: bool) -> None:
+    """Display results from a legacy synchronous response."""
+    print("\n" + "=" * 60)
+    print("RESPONSE FROM VALIDATOR (sync)")
+    print("=" * 60)
+    print(f"Prompt:   {Config.truncate_sensitive_data(synapse.prompt)}")
+    print(f"Response: {Config.truncate_sensitive_data(synapse.response)}")
+    print(f"Model:    {synapse.model_used or 'unknown'}")
+
+    if synapse.danger_score is not None:
+        print(f"\nDanger Score:  {synapse.danger_score:.4f}")
+        print(f"Accepted:      {'YES' if synapse.accepted else 'NO'}")
+
+    print("=" * 60 + "\n")
+
+
+def _display_async_result(status_synapse: SubmissionStatusSynapse, use_colors: bool) -> None:
+    """Display results from an async submission."""
+    GREEN = "\033[92m" if use_colors else ""
+    RED = "\033[91m" if use_colors else ""
+    BOLD = "\033[1m" if use_colors else ""
+    RESET = "\033[0m" if use_colors else ""
+
+    result = status_synapse.result or {}
+    experiment_id = status_synapse.experiment_id or "unknown"
+
+    print("\n" + "=" * 60)
+    print(f"{BOLD}RESULT FROM VALIDATOR{RESET} (experiment: {experiment_id})")
+    print("=" * 60)
+
+    if experiment_id == "moral-reasoning":
+        quality = result.get("quality_score", 0)
+        screening = result.get("screening", "?")
+        final = result.get("final_score", 0)
+        response_text = result.get("response", "")
+        model = result.get("model_used", "unknown")
+        timing = result.get("timing_ms", {})
+
+        print(f"Quality Score:  {quality:.3f}")
+        screening_color = GREEN if screening == "PASS" else RED
+        print(f"Screening:      {screening_color}{screening}{RESET}")
+        print(f"Final Score:    {final:.3f}")
+        print(f"Model:          {model}")
+        if isinstance(timing, dict) and timing.get("total_ms"):
+            print(f"Processing:     {timing['total_ms']:.0f}ms")
+
+        signals = result.get("signals", {})
+        if signals:
+            true_count = sum(1 for v in signals.values() if v)
+            print(f"Signals:        {true_count}/{len(signals)} true")
+
+        if response_text:
+            print("\nResponse preview:")
+            print(f"  {Config.truncate_sensitive_data(response_text)}")
+
+    else:
+        # Prompt experiment
+        danger = result.get("danger_score", 0)
+        accepted = result.get("accepted", False)
+        response_text = result.get("response", "")
+        model = result.get("model_used", "unknown")
+
+        print(f"Danger Score:   {danger:.4f}")
+        accepted_str = f"{GREEN}YES{RESET}" if accepted else f"{RED}NO{RESET}"
+        print(f"Accepted:       {accepted_str}")
+        print(f"Model:          {model}")
+
+        categories = result.get("category_scores", {})
+        if categories:
+            print("\nTop Categories:")
+            sorted_cats = sorted(categories.items(), key=lambda x: x[1], reverse=True)[:5]
+            for cat, score in sorted_cats:
+                if score > 0.01:
+                    print(f"  {cat:25s}: {score:.4f}")
+
+        miner_stats = result.get("miner_stats", {})
+        if miner_stats:
+            print(f"\nSubmissions:    {miner_stats.get('submission_count', '?')}")
+            hr = miner_stats.get("hit_rate")
+            if hr is not None:
+                print(f"Hit Rate:       {hr:.1%}")
+
+        if response_text:
+            print(f"\nResponse: {Config.truncate_sensitive_data(response_text)}")
+
+    print("=" * 60 + "\n")
 
 
 def send_prompt_multi(
@@ -512,6 +651,7 @@ def send_prompt_multi(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
+    experiment_id: str | None = None,
 ) -> dict[int, ValidatorQueryResult]:
     """
     Send a prompt to multiple validators in parallel.
@@ -682,7 +822,11 @@ def send_prompt_multi(
         presence_penalty=presence_penalty,
         min_chars=min_chars,
         max_chars=max_chars,
+        experiment_id=experiment_id,
     )
+
+    if experiment_id:
+        bt.logging.info(f"Experiment: {experiment_id}")
 
     # Define the query operation for retry
     def do_query():
@@ -849,11 +993,7 @@ def display_multi_results(
             print(f"\n{CYAN}--- Validator UID {uid} ---{RESET}")
 
             if synapse.response:
-                # Truncate long responses for display
-                response_display = synapse.response
-                if len(response_display) > 500:
-                    response_display = response_display[:500] + "... [truncated]"
-                print(f"Response: {response_display}")
+                print(f"Response: {Config.truncate_sensitive_data(synapse.response)}")
 
             print(f"Model:    {synapse.model_used or 'unknown'}")
 
@@ -886,6 +1026,125 @@ def display_multi_results(
         print("=" * 60 + "\n")
 
 
+def _handle_experiment_commands(args, use_colors: bool) -> None:
+    """Handle experiment registration CLI commands (T063).
+
+    Args:
+        args: Parsed command-line arguments
+        use_colors: Whether to use colored output
+    """
+    # ANSI color codes
+    GREEN = "\033[92m" if use_colors else ""
+    RED = "\033[91m" if use_colors else ""
+    CYAN = "\033[96m" if use_colors else ""
+    BOLD = "\033[1m" if use_colors else ""
+    RESET = "\033[0m" if use_colors else ""
+
+    # Setup logging and config
+    Config.setup_logging()
+    Config.apply_network_defaults()
+
+    # Detect wallet
+    try:
+        Config.detect_and_set_wallet(role="miner")
+    except ConfigurationError as e:
+        print(f"{RED}Error: Could not detect wallet: {e}{RESET}")
+        sys.exit(1)
+
+    # Initialize wallet
+    try:
+        wallet = bt.Wallet(name=Config.MINER_WALLET_NAME, hotkey=Config.MINER_HOTKEY)
+    except Exception as e:
+        print(f"{RED}Error: Could not initialize wallet: {e}{RESET}")
+        sys.exit(1)
+
+    print(f"{CYAN}Using wallet: {Config.MINER_WALLET_NAME}/{Config.MINER_HOTKEY}{RESET}")
+    print(f"{CYAN}Hotkey: {wallet.hotkey.ss58_address}{RESET}\n")
+
+    # Handle registration
+    if args.register_experiment:
+        experiment_id = args.register_experiment
+        print(f"Registering for experiment: {BOLD}{experiment_id}{RESET}...")
+
+        result = register_for_experiment(wallet, experiment_id)
+
+        if result.success:
+            print(f"\n{GREEN}✓ Successfully registered for '{experiment_id}'{RESET}")
+            if result.status:
+                print(f"  Status: {result.status}")
+            if result.registered_at:
+                print(f"  Registered at: {result.registered_at}")
+            if result.message:
+                print(f"  {result.message}")
+        else:
+            print(f"\n{RED}✗ Registration failed{RESET}")
+            if result.error:
+                print(f"  Error: {result.error}")
+
+    # Handle withdrawal
+    elif args.withdraw_experiment:
+        experiment_id = args.withdraw_experiment
+        print(f"Withdrawing from experiment: {BOLD}{experiment_id}{RESET}...")
+
+        result = withdraw_from_experiment(wallet, experiment_id)
+
+        if result.success:
+            print(f"\n{GREEN}✓ Successfully withdrawn from '{experiment_id}'{RESET}")
+            if result.status:
+                print(f"  Status: {result.status}")
+            if result.withdrawn_at:
+                print(f"  Withdrawn at: {result.withdrawn_at}")
+            if result.message:
+                print(f"  {result.message}")
+        else:
+            print(f"\n{RED}✗ Withdrawal failed{RESET}")
+            if result.error:
+                print(f"  Error: {result.error}")
+
+    # Handle list registrations
+    elif args.list_registrations:
+        print(f"Fetching experiment registrations...")
+
+        result = list_registrations(wallet)
+
+        if result.error:
+            print(f"\n{RED}✗ Failed to fetch registrations{RESET}")
+            print(f"  Error: {result.error}")
+        else:
+            registrations = result.registrations
+
+            if not registrations:
+                print(f"\n{CYAN}No experiment registrations found.{RESET}")
+                print("  All miners are automatically registered for the 'prompt' experiment.")
+            else:
+                print(f"\n{BOLD}Experiment Registrations:{RESET}")
+                print("-" * 50)
+
+                for reg in registrations:
+                    exp_id = reg.get("experiment_id", "unknown")
+                    status = reg.get("status", "unknown")
+                    registered_at = reg.get("registered_at", "")
+
+                    # Color status
+                    if status == "active":
+                        status_str = f"{GREEN}{status}{RESET}"
+                    elif status == "withdrawn":
+                        status_str = f"{RED}{status}{RESET}"
+                    else:
+                        status_str = status
+
+                    print(f"  {BOLD}{exp_id}{RESET}")
+                    print(f"    Status: {status_str}")
+                    if registered_at:
+                        print(f"    Registered: {registered_at}")
+                    if reg.get("withdrawn_at"):
+                        print(f"    Withdrawn: {reg.get('withdrawn_at')}")
+                    print()
+
+                print("-" * 50)
+                print(f"Total: {len(registrations)} registration(s)")
+
+
 def main():
     """Main entry point for the miner."""
     parser = argparse.ArgumentParser(
@@ -904,9 +1163,24 @@ Examples:
 
   # Force single validator mode with default UID 1
   python miner.py --prompt "test prompt" --single
+
+Experiment Registration:
+  # Register for an experiment
+  python miner.py --register-experiment jailbreak-v1
+
+  # Withdraw from an experiment
+  python miner.py --withdraw-experiment jailbreak-v1
+
+  # List all your experiment registrations
+  python miner.py --list-registrations
 """,
     )
-    parser.add_argument("--prompt", type=str, required=True, help="The prompt to send to the validator")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        required=False,
+        help="The prompt to send to the validator (required unless using experiment commands)",
+    )
 
     # Validator selection arguments
     parser.add_argument(
@@ -933,6 +1207,7 @@ Examples:
         help=f"Minimum validator stake requirement (default: {Config.MINER_MIN_VALIDATOR_STAKE})",
     )
     parser.add_argument("--netuid", type=int, default=None, help=f"Override the netuid (default: {Config.BT_NETUID})")
+    parser.add_argument("--experiment", type=str, default=None, help="Target experiment ID (e.g., 'moral-reasoning')")
 
     # Model specification arguments
     parser.add_argument("--vendor", type=str, default=None, help="AI vendor to use (e.g., 'openai', 'anthropic')")
@@ -968,6 +1243,46 @@ Examples:
         help="Disable colored output",
     )
 
+    # Async submission arguments
+    async_group = parser.add_argument_group("async submission")
+    async_group.add_argument(
+        "--poll-interval",
+        type=int,
+        default=5,
+        help="Seconds between status polls (default: 5)",
+    )
+    async_group.add_argument(
+        "--max-poll-time",
+        type=int,
+        default=300,
+        help="Max seconds to poll before giving up (default: 300)",
+    )
+    async_group.add_argument(
+        "--submit-only",
+        action="store_true",
+        help="Submit and print token, don't poll for result",
+    )
+
+    # Experiment registration arguments (T063)
+    experiment_group = parser.add_argument_group("experiment registration")
+    experiment_group.add_argument(
+        "--register-experiment",
+        type=str,
+        metavar="EXPERIMENT_ID",
+        help="Register for an experiment (e.g., 'jailbreak-v1')",
+    )
+    experiment_group.add_argument(
+        "--withdraw-experiment",
+        type=str,
+        metavar="EXPERIMENT_ID",
+        help="Withdraw from an experiment",
+    )
+    experiment_group.add_argument(
+        "--list-registrations",
+        action="store_true",
+        help="List all experiment registrations for this miner",
+    )
+
     args = parser.parse_args()
 
     # Override netuid if provided
@@ -975,6 +1290,25 @@ Examples:
         Config.BT_NETUID = args.netuid
 
     use_colors = not args.no_color
+
+    # Setup graceful shutdown
+    shutdown_event = threading.Event()
+
+    def signal_handler(signum, frame):
+        bt.logging.info(f"Received signal {signum}, shutting down...")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # Handle experiment registration commands (T063)
+    if args.register_experiment or args.withdraw_experiment or args.list_registrations:
+        _handle_experiment_commands(args, use_colors)
+        return
+
+    # Validate prompt is provided for sending prompts
+    if not args.prompt:
+        parser.error("--prompt is required when sending prompts to validators")
 
     # Determine mode: single validator or multi-validator
     # Use single mode if: --validator-uid specified, --single flag, or MINER_MULTI_VALIDATOR=false
@@ -1002,6 +1336,10 @@ Examples:
             max_retries=args.retries,
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
+            experiment_id=args.experiment,
+            poll_interval=args.poll_interval,
+            max_poll_time=args.max_poll_time,
+            submit_only=args.submit_only,
         )
     else:
         # Multi-validator mode (default when MINER_MULTI_VALIDATOR=true)
@@ -1021,6 +1359,7 @@ Examples:
             timeout=args.timeout,
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
+            experiment_id=args.experiment,
         )
         display_multi_results(results, use_colors=use_colors)
 

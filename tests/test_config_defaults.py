@@ -26,9 +26,77 @@ class TestNetworkDefaults:
         assert 290 in NETWORK_DEFAULTS
         defaults = NETWORK_DEFAULTS[290]
         assert defaults["DANGER_THRESHOLD"] == 0.2
+        assert defaults["SINGLE_CATEGORY_THRESHOLD"] == 0.8
         assert defaults["MIN_HIT_RATE_THRESHOLD"] == 0.3
-        assert defaults["MIN_VALIDATOR_STAKE"] == 100.0
+        assert defaults["MIN_VALIDATOR_STAKE"] == 5.0
         assert defaults["MIN_NOVELTY_THRESHOLD"] == 0.3
+
+    def test_local_defaults_defined(self):
+        """Local mode (netuid 1) should have defaults defined."""
+        assert 1 in NETWORK_DEFAULTS
+        defaults = NETWORK_DEFAULTS[1]
+        assert defaults["DANGER_THRESHOLD"] == 0.1
+        assert defaults["SINGLE_CATEGORY_THRESHOLD"] == 0.5
+        assert defaults["MIN_HIT_RATE_THRESHOLD"] == 0.0
+        assert defaults["MIN_VALIDATOR_STAKE"] == 0.0
+        assert defaults["MIN_NOVELTY_THRESHOLD"] == 0.0
+        assert defaults["CENTRAL_API_ENDPOINT"] == "http://localhost:3000/api/collections"
+        assert defaults["NOVELTY_API_ENDPOINT"] == "http://localhost:3000/api/novelty"
+        assert defaults["EXPERIMENT_API_ENDPOINT"] == "http://localhost:3000/api/experiments"
+        assert defaults["MINER_BURN_ENABLED"] is False
+        assert defaults["MINER_BURN_PERCENTAGE"] == 0.0
+
+
+class TestApplyLocalDefaults:
+    """Tests for local-mode (netuid 1) defaults application."""
+
+    def test_applies_local_defaults(self):
+        """Netuid 1 should apply local-mode defaults with localhost endpoints."""
+        original_danger = Config.DANGER_THRESHOLD
+        original_stake = Config.MIN_VALIDATOR_STAKE
+        original_burn = Config.MINER_BURN_ENABLED
+        original_central = Config.CENTRAL_API_ENDPOINT
+        original_novelty_ep = Config.NOVELTY_API_ENDPOINT
+
+        try:
+            Config.BT_NETUID = 1
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("bittensor.logging") as mock_logging:
+                    mock_logging.info = MagicMock()
+                    mock_logging.debug = MagicMock()
+                    Config.apply_network_defaults()
+
+            assert Config.DANGER_THRESHOLD == 0.1
+            assert Config.MIN_VALIDATOR_STAKE == 0.0
+            assert Config.MINER_BURN_ENABLED is False
+            assert Config.MINER_BURN_PERCENTAGE == 0.0
+            assert Config.CENTRAL_API_ENDPOINT == "http://localhost:3000/api/collections"
+            assert Config.NOVELTY_API_ENDPOINT == "http://localhost:3000/api/novelty"
+            assert Config.EXPERIMENT_API_ENDPOINT == "http://localhost:3000/api/experiments"
+        finally:
+            Config.DANGER_THRESHOLD = original_danger
+            Config.MIN_VALIDATOR_STAKE = original_stake
+            Config.MINER_BURN_ENABLED = original_burn
+            Config.CENTRAL_API_ENDPOINT = original_central
+            Config.NOVELTY_API_ENDPOINT = original_novelty_ep
+
+    def test_local_network_name(self):
+        """Netuid 1 should use 'local' as network name in logs."""
+        original_danger = Config.DANGER_THRESHOLD
+
+        try:
+            Config.BT_NETUID = 1
+            with patch.dict(os.environ, {}, clear=True):
+                with patch("bittensor.logging") as mock_logging:
+                    mock_logging.info = MagicMock()
+                    mock_logging.debug = MagicMock()
+                    Config.apply_network_defaults()
+
+            # Check that 'local' appears in the log messages
+            info_calls = [str(call) for call in mock_logging.info.call_args_list]
+            assert any("local" in str(call) for call in info_calls)
+        finally:
+            Config.DANGER_THRESHOLD = original_danger
 
 
 class TestApplyNetworkDefaults:
@@ -71,7 +139,7 @@ class TestApplyNetworkDefaults:
                     Config.apply_network_defaults()
 
             assert Config.DANGER_THRESHOLD == 0.2
-            assert Config.MIN_VALIDATOR_STAKE == 100.0
+            assert Config.MIN_VALIDATOR_STAKE == 5.0
         finally:
             Config.DANGER_THRESHOLD = original_danger
             Config.MIN_VALIDATOR_STAKE = original_stake
@@ -208,7 +276,8 @@ class TestValidateAPIKeys:
             Config.CHUTES_API_KEY = original_chutes
             Config.CHAT_PROVIDER = original_provider
 
-    def test_valid_keys_pass_validation(self):
+    @patch("os.path.exists", side_effect=lambda p: False if p == ".env" else os.path.exists(p))
+    def test_valid_keys_pass_validation(self, mock_exists):
         """Valid API keys should pass validation."""
         original_key = Config.OPENAI_API_KEY
         original_chutes = Config.CHUTES_API_KEY
@@ -399,7 +468,7 @@ class TestAdvancedMode:
             # All testnet defaults should be applied
             assert Config.DANGER_THRESHOLD == 0.2
             assert Config.MIN_HIT_RATE_THRESHOLD == 0.3
-            assert Config.MIN_VALIDATOR_STAKE == 100.0
+            assert Config.MIN_VALIDATOR_STAKE == 5.0
             assert Config.MIN_NOVELTY_THRESHOLD == 0.3
         finally:
             Config.DANGER_THRESHOLD = original_danger
@@ -637,7 +706,8 @@ class TestProductionValidationNetworkWarnings:
 class TestFallbackModelValidation:
     """Tests for FALLBACK_MODELS validation."""
 
-    def test_invalid_fallback_model_raises_error(self):
+    @patch("os.path.exists", side_effect=lambda p: False if p == ".env" else os.path.exists(p))
+    def test_invalid_fallback_model_raises_error(self, mock_exists):
         """FALLBACK_MODELS with invalid model should fail validation."""
         original_fallback = Config.FALLBACK_MODELS
         original_openai_key = Config.OPENAI_API_KEY
@@ -661,7 +731,8 @@ class TestFallbackModelValidation:
             Config.CHAT_PROVIDER = original_provider
             Config.LOCAL_MODE = original_local
 
-    def test_valid_fallback_model_passes_validation(self):
+    @patch("os.path.exists", side_effect=lambda p: False if p == ".env" else os.path.exists(p))
+    def test_valid_fallback_model_passes_validation(self, mock_exists):
         """FALLBACK_MODELS with valid model should pass validation."""
         original_fallback = Config.FALLBACK_MODELS
         original_openai_key = Config.OPENAI_API_KEY
@@ -686,7 +757,8 @@ class TestFallbackModelValidation:
             Config.CHAT_PROVIDER = original_provider
             Config.LOCAL_MODE = original_local
 
-    def test_empty_fallback_models_passes_validation(self):
+    @patch("os.path.exists", side_effect=lambda p: False if p == ".env" else os.path.exists(p))
+    def test_empty_fallback_models_passes_validation(self, mock_exists):
         """Empty FALLBACK_MODELS should pass validation."""
         original_fallback = Config.FALLBACK_MODELS
         original_openai_key = Config.OPENAI_API_KEY
@@ -710,7 +782,8 @@ class TestFallbackModelValidation:
             Config.CHAT_PROVIDER = original_provider
             Config.LOCAL_MODE = original_local
 
-    def test_multiple_invalid_fallback_models_lists_first_bad_one(self):
+    @patch("os.path.exists", side_effect=lambda p: False if p == ".env" else os.path.exists(p))
+    def test_multiple_invalid_fallback_models_lists_first_bad_one(self, mock_exists):
         """With multiple invalid models, error should identify the first one."""
         original_fallback = Config.FALLBACK_MODELS
         original_openai_key = Config.OPENAI_API_KEY

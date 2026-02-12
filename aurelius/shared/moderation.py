@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import bittensor as bt
 from openai import OpenAI
 
+from aurelius.shared.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpen, get_circuit_breaker
+
 
 @dataclass
 class ModerationResult:
@@ -74,6 +76,7 @@ class OpenAIModerationProvider(ModerationProvider):
         category_weights: dict[str, float] | None = None,
         single_category_threshold: float = 0.8,
         timeout: float | None = None,
+        circuit_breaker_config: CircuitBreakerConfig | None = None,
     ):
         """
         Initialize OpenAI moderation provider.
@@ -84,12 +87,22 @@ class OpenAIModerationProvider(ModerationProvider):
                             If not provided, uses DEFAULT_CATEGORY_WEIGHTS.
             single_category_threshold: Threshold for individual category scores (default 0.8)
             timeout: API request timeout in seconds (default 30s)
+            circuit_breaker_config: Optional circuit breaker configuration
         """
         self.timeout = timeout or self.DEFAULT_API_TIMEOUT
         # SECURITY: Configure client with timeout to prevent indefinite blocking
         self.client = OpenAI(api_key=api_key, timeout=self.timeout)
         self.category_weights = category_weights or self.DEFAULT_CATEGORY_WEIGHTS
         self.single_category_threshold = single_category_threshold
+
+        # Initialize circuit breaker for API resilience
+        cb_config = circuit_breaker_config or CircuitBreakerConfig(
+            failure_threshold=5,
+            recovery_timeout=60.0,
+            half_open_max_calls=1,
+            success_threshold=2,
+        )
+        self._circuit_breaker = get_circuit_breaker("openai-moderation", cb_config)
 
     def moderate(self, text: str) -> ModerationResult:
         """
@@ -101,9 +114,20 @@ class OpenAIModerationProvider(ModerationProvider):
         Returns:
             ModerationResult with scores and flags
         """
+        # Check if circuit breaker allows the request
+        if not self._circuit_breaker.can_execute():
+            bt.logging.warning(
+                f"Moderation circuit breaker OPEN - failing closed "
+                f"(retry in {self._circuit_breaker.get_time_until_retry():.1f}s)"
+            )
+            return self._fail_closed_result("circuit_breaker_open")
+
         try:
             response = self.client.moderations.create(input=text)
             result = response.results[0]
+
+            # Record success with circuit breaker
+            self._circuit_breaker.record_success()
 
             # Extract category scores and flags
             category_scores = result.category_scores.model_dump()
@@ -126,6 +150,9 @@ class OpenAIModerationProvider(ModerationProvider):
             )
 
         except Exception as e:
+            # Record failure with circuit breaker
+            self._circuit_breaker.record_failure()
+
             bt.logging.error(f"CRITICAL: OpenAI moderation API failure: {e}")
 
             # SECURITY: Always fail-closed on API errors
@@ -134,15 +161,19 @@ class OpenAIModerationProvider(ModerationProvider):
             bt.logging.error(
                 "Rejecting content due to API error (fail-closed security behavior)"
             )
-            return ModerationResult(
-                flagged=True,
-                category_scores={},
-                categories={},
-                combined_score=1.0,
-                high_category_triggered=True,
-                high_category_name="api_error",
-                high_category_score=1.0,
-            )
+            return self._fail_closed_result("api_error")
+
+    def _fail_closed_result(self, reason: str) -> ModerationResult:
+        """Return a fail-closed moderation result for security."""
+        return ModerationResult(
+            flagged=True,
+            category_scores={},
+            categories={},
+            combined_score=1.0,
+            high_category_triggered=True,
+            high_category_name=reason,
+            high_category_score=1.0,
+        )
 
     def _calculate_combined_score(self, category_scores: dict[str, float]) -> float:
         """
@@ -164,7 +195,10 @@ class OpenAIModerationProvider(ModerationProvider):
         total_weight = 0.0
 
         for category, score in category_scores.items():
-            weight = self.category_weights.get(category, 1.0)
+            weight = self.category_weights.get(category)
+            if weight is None:
+                bt.logging.warning(f"Unknown moderation category '{category}' — skipping (no default weight)")
+                continue
             weighted_sum += score * weight
             total_weight += weight
 

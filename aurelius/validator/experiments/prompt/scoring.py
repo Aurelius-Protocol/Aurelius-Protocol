@@ -295,12 +295,11 @@ class PromptScoringSystem:
                     avg_novelty = 1.0
 
                 # Calculate raw score using formula:
-                # score = danger_sum x severity_avg x novelty_avg^NOVELTY_WEIGHT
-                danger_sum = sum(sub["danger_score"] for sub in submissions_in_window)
-                severity_avg = danger_sum / len(submissions_in_window) if submissions_in_window else 0.0
+                # score = severity_avg x novelty_avg^NOVELTY_WEIGHT
+                severity_avg = sum(sub["danger_score"] for sub in submissions_in_window) / len(submissions_in_window) if submissions_in_window else 0.0
                 novelty_multiplier = avg_novelty ** Config.NOVELTY_WEIGHT
 
-                raw_score = danger_sum * severity_avg * novelty_multiplier
+                raw_score = severity_avg * novelty_multiplier
                 raw_scores[hotkey] = raw_score
 
             # Normalize scores to 0-1 range

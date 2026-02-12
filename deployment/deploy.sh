@@ -11,7 +11,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VALIDATOR_SOURCE_DIR="/home/volker/code/aurelius/Aurelius-Protocol"
+VALIDATOR_SOURCE_DIR="/home/volker/Code/aurelius/Aurelius-Protocol"
 REMOTE_DEPLOY_DIR="/opt/aurelius-validator"
 REMOTE_DATA_DIR="/var/lib/aurelius"
 WALLET_SOURCE_DIR="$HOME/.bittensor"

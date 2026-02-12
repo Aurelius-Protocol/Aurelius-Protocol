@@ -24,6 +24,7 @@ from aurelius.shared.telemetry.otel_exporter import (
     AureliusLogExporter,
     PROTOCOL_VERSION,
 )
+from aurelius.shared.telemetry.http_client import get_telemetry_session, get_circuit_breaker
 
 
 # Global providers (for cleanup on shutdown)
@@ -289,6 +290,12 @@ def register_with_telemetry_api(
     """
     from aurelius.shared.config import Config
 
+    # Check circuit breaker before attempting registration
+    circuit_breaker = get_circuit_breaker()
+    if not circuit_breaker.allow_request():
+        bt.logging.warning("Circuit breaker open, skipping telemetry registration")
+        return False
+
     endpoint = registry_endpoint or f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/register"
     hotkey = wallet.hotkey.ss58_address
     coldkey = wallet.coldkeypub.ss58_address if wallet.coldkeypub else None
@@ -304,6 +311,9 @@ def register_with_telemetry_api(
         "heartbeat_interval_s": heartbeat_interval_s,
     }
 
+    # Use shared session with connection pooling
+    session = get_telemetry_session()
+
     # Fix 7: Retry with exponential backoff
     for attempt in range(max_retries):
         try:
@@ -313,7 +323,7 @@ def register_with_telemetry_api(
             signature = wallet.hotkey.sign(message.encode()).hex()
 
             # Send registration with signature headers
-            response = requests.post(
+            response = session.post(
                 endpoint,
                 json=payload,
                 headers={
@@ -327,6 +337,7 @@ def register_with_telemetry_api(
             )
 
             if response.status_code in (200, 201):
+                circuit_breaker.record_success()
                 bt.logging.info(f"Registered with telemetry API: {hotkey[:16]}... (uid={validator_uid})")
                 return True
             else:
@@ -334,9 +345,11 @@ def register_with_telemetry_api(
                     f"Telemetry registration attempt {attempt + 1}/{max_retries} failed: "
                     f"HTTP {response.status_code} - {response.text[:200]}"
                 )
+                circuit_breaker.record_failure()
 
         except requests.RequestException as e:
             bt.logging.warning(f"Telemetry registration attempt {attempt + 1}/{max_retries} failed: {e}")
+            circuit_breaker.record_failure()
         except Exception as e:
             bt.logging.error(f"Telemetry registration error: {e}")
             return False  # Non-retryable error
@@ -368,8 +381,16 @@ def send_heartbeat(
     """
     from aurelius.shared.config import Config
 
+    # Check circuit breaker before attempting heartbeat
+    circuit_breaker = get_circuit_breaker()
+    if not circuit_breaker.allow_request():
+        return False
+
     endpoint = registry_endpoint or f"{Config.TELEMETRY_REGISTRY_ENDPOINT}/heartbeat"
     hotkey = wallet.hotkey.ss58_address
+
+    # Use shared session with connection pooling
+    session = get_telemetry_session()
 
     try:
         # Create signed message
@@ -378,7 +399,7 @@ def send_heartbeat(
         signature = wallet.hotkey.sign(message.encode()).hex()
 
         # Send heartbeat
-        response = requests.post(
+        response = session.post(
             endpoint,
             json={"hotkey": hotkey},
             headers={
@@ -391,9 +412,15 @@ def send_heartbeat(
             timeout=timeout,
         )
 
-        return response.status_code in (200, 201)
+        if response.status_code in (200, 201):
+            circuit_breaker.record_success()
+            return True
+        else:
+            circuit_breaker.record_failure()
+            return False
 
     except requests.RequestException:
+        circuit_breaker.record_failure()
         return False
     except Exception as e:
         bt.logging.debug(f"Heartbeat error: {e}")
