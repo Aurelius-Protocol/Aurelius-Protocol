@@ -11,7 +11,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Tuple
 
@@ -780,9 +780,9 @@ class Validator:
             "miner_hotkey": miner_hotkey,
         })
 
-        # Register token on collector API (fire-and-forget)
+        # Register token on collector API (background, but capture Future)
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-        self.background_executor.submit(
+        reg_future = self.background_executor.submit(
             self.submission_client.register_submission,
             submission_token,
             miner_hotkey or "unknown",
@@ -793,9 +793,10 @@ class Validator:
         # Set token on synapse for immediate return
         synapse.submission_token = submission_token
 
-        # Submit the actual processing to background
+        # Submit the actual processing to background (waits for registration first)
         self.background_executor.submit(
             self._process_submission_background,
+            reg_future,
             submission_token,
             synapse.prompt,
             miner_hotkey,
@@ -828,6 +829,7 @@ class Validator:
 
     def _process_submission_background(
         self,
+        reg_future: Future[bool],
         token: str,
         prompt: str,
         miner_hotkey: str | None,
@@ -843,6 +845,14 @@ class Validator:
     ) -> None:
         """Process a submission in the background thread and update cache + API."""
         import time
+
+        # Wait for registration to complete before any updates
+        try:
+            registered = reg_future.result(timeout=15)
+            if not registered:
+                bt.logging.warning(f"Submission {token[:8]} registration failed, updates may 404")
+        except Exception as e:
+            bt.logging.warning(f"Submission {token[:8]} registration error: {e}")
 
         # Update status to PROCESSING
         self._update_submission_status(token, "PROCESSING")

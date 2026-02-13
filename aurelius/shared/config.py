@@ -161,9 +161,9 @@ class Config:
     MODERATION_CATEGORY_WEIGHTS: dict[str, float] = json.loads(_category_weights_str)
 
     # Rate Limiting Configuration
-    RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))
+    RATE_LIMIT_REQUESTS: int = int(os.getenv("RATE_LIMIT_REQUESTS", "10"))
     RATE_LIMIT_WINDOW_HOURS: float = float(os.getenv("RATE_LIMIT_WINDOW_HOURS", "1.0"))
-    GLOBAL_RATE_LIMIT_REQUESTS: int = int(os.getenv("GLOBAL_RATE_LIMIT_REQUESTS", "500"))
+    GLOBAL_RATE_LIMIT_REQUESTS: int = int(os.getenv("GLOBAL_RATE_LIMIT_REQUESTS", "200"))
 
     # Dataset Logger Queue Configuration
     DATASET_LOGGER_QUEUE_MAXSIZE: int = int(os.getenv("DATASET_LOGGER_QUEUE_MAXSIZE", "1000"))
