@@ -446,6 +446,11 @@ def send_prompt(
             context["reason"] = result_synapse.rejection_reason
             print(formatter.format_error(error, context))
             return ""
+        else:
+            error = create_error(ErrorCategory.API_ERROR, context)
+            context["reason"] = f"[{code}] {result_synapse.rejection_reason}" if code else result_synapse.rejection_reason
+            print(formatter.format_error(error, context))
+            return ""
 
     # Extract submission token
     token = getattr(result_synapse, "submission_token", None) if result_synapse else None

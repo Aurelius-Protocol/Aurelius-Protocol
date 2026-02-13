@@ -727,7 +727,27 @@ class Validator:
                 synapse.rejection_code = "INVALID_PARAMS"
                 return synapse
 
-        # Experiment routing
+        # Global rate limit check (before routing to avoid concurrency slot leak)
+        global_allowed, global_reason, _ = self.global_rate_limiter.check_rate_limit()
+        if not global_allowed:
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = global_reason
+            synapse.rejection_code = "RATE_LIMITED"
+            return synapse
+
+        # Per-miner rate limit check (before routing to avoid concurrency slot leak)
+        allowed, reason, remaining = self.rate_limiter.check_rate_limit(hotkey=miner_hotkey)
+        if not allowed:
+            synapse.response = None
+            synapse.danger_score = 0.0
+            synapse.accepted = False
+            synapse.rejection_reason = reason
+            synapse.rejection_code = "RATE_LIMITED"
+            return synapse
+
+        # Experiment routing (acquires concurrency slot on success)
         synapse.miner_hotkey = miner_hotkey
         routing_result = self.experiment_manager.route_submission(synapse)
 
@@ -741,82 +761,81 @@ class Validator:
             synapse.danger_score = 0.0
             return synapse
 
-        effective_experiment = synapse.experiment_id or "moral-reasoning"
+        effective_experiment = routing_result.experiment_id
+        slot_owned = True
 
-        # Global rate limit check
-        global_allowed, global_reason, _ = self.global_rate_limiter.check_rate_limit()
-        if not global_allowed:
-            synapse.response = None
-            synapse.danger_score = 0.0
-            synapse.accepted = False
-            synapse.rejection_reason = global_reason
-            synapse.rejection_code = "RATE_LIMITED"
+        try:
+            # Record rate limit only after routing succeeds (avoid wasting tokens on rejected requests)
+            self.global_rate_limiter.record_request()
+            self.rate_limiter.record_request(hotkey=miner_hotkey)
+
+            # Generate submission token
+            submission_token = str(uuid.uuid4())
+            now_iso = datetime.now(timezone.utc).isoformat()
+
+            # Store in local cache
+            self._set_submission_cache(submission_token, {
+                "status": "PENDING",
+                "experiment_id": effective_experiment,
+                "created_at": now_iso,
+                "result": None,
+                "error_message": None,
+                "completed_at": None,
+                "miner_hotkey": miner_hotkey,
+            })
+
+            # Register token on collector API (background, but capture Future)
+            prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+            reg_future = self.background_executor.submit(
+                self.submission_client.register_submission,
+                submission_token,
+                miner_hotkey or "unknown",
+                effective_experiment,
+                prompt_hash,
+            )
+
+            # Set token on synapse for immediate return
+            synapse.submission_token = submission_token
+
+            # Submit the actual processing to background (waits for registration first)
+            self.background_executor.submit(
+                self._process_submission_background,
+                reg_future,
+                submission_token,
+                synapse.prompt,
+                miner_hotkey,
+                effective_experiment,
+                synapse.vendor,
+                synapse.model_requested,
+                synapse.temperature,
+                synapse.top_p,
+                synapse.frequency_penalty,
+                synapse.presence_penalty,
+                synapse.min_chars,
+                synapse.max_chars,
+            )
+            slot_owned = False  # Background task now owns the slot
+
+            bt.logging.info(
+                f"Submission accepted: token={submission_token[:8]}... "
+                f"experiment={effective_experiment} miner={miner_hotkey[:8] if miner_hotkey else '?'}..."
+            )
+
             return synapse
-        self.global_rate_limiter.record_request()
-
-        # Per-miner rate limit check
-        allowed, reason, remaining = self.rate_limiter.check_rate_limit(hotkey=miner_hotkey)
-        if not allowed:
+        except Exception as e:
+            bt.logging.error(f"Failed to dispatch submission for '{effective_experiment}': {e}")
             synapse.response = None
-            synapse.danger_score = 0.0
             synapse.accepted = False
-            synapse.rejection_reason = reason
-            synapse.rejection_code = "RATE_LIMITED"
+            synapse.rejection_reason = "Validator internal error"
+            synapse.rejection_code = "INTERNAL_ERROR"
             return synapse
-        self.rate_limiter.record_request(hotkey=miner_hotkey)
-
-        # Generate submission token
-        submission_token = str(uuid.uuid4())
-        now_iso = datetime.now(timezone.utc).isoformat()
-
-        # Store in local cache
-        self._set_submission_cache(submission_token, {
-            "status": "PENDING",
-            "experiment_id": effective_experiment,
-            "created_at": now_iso,
-            "result": None,
-            "error_message": None,
-            "completed_at": None,
-            "miner_hotkey": miner_hotkey,
-        })
-
-        # Register token on collector API (background, but capture Future)
-        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
-        reg_future = self.background_executor.submit(
-            self.submission_client.register_submission,
-            submission_token,
-            miner_hotkey or "unknown",
-            effective_experiment,
-            prompt_hash,
-        )
-
-        # Set token on synapse for immediate return
-        synapse.submission_token = submission_token
-
-        # Submit the actual processing to background (waits for registration first)
-        self.background_executor.submit(
-            self._process_submission_background,
-            reg_future,
-            submission_token,
-            synapse.prompt,
-            miner_hotkey,
-            effective_experiment,
-            synapse.vendor,
-            synapse.model_requested,
-            synapse.temperature,
-            synapse.top_p,
-            synapse.frequency_penalty,
-            synapse.presence_penalty,
-            synapse.min_chars,
-            synapse.max_chars,
-        )
-
-        bt.logging.info(
-            f"Submission accepted: token={submission_token[:8]}... "
-            f"experiment={effective_experiment} miner={miner_hotkey[:8] if miner_hotkey else '?'}..."
-        )
-
-        return synapse
+        finally:
+            if slot_owned:
+                bt.logging.warning(
+                    f"Releasing orphaned concurrency slot for '{effective_experiment}' "
+                    f"(miner: {miner_hotkey[:8] if miner_hotkey else 'unknown'}...)"
+                )
+                self.experiment_manager.release_concurrency_slot(effective_experiment)
 
     def _set_submission_cache(self, token: str, data: dict) -> None:
         """Set a submission in the local cache with LRU eviction."""
@@ -1151,7 +1170,7 @@ class Validator:
             return synapse
 
         # Log successful routing
-        effective_experiment = synapse.experiment_id or "moral-reasoning"
+        effective_experiment = routing_result.experiment_id
         bt.logging.debug(f"Experiment routing success: {effective_experiment}")
 
         # Step 1: Check global rate limit first

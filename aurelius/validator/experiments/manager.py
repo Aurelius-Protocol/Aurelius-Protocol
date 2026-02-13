@@ -22,12 +22,14 @@ class RoutingResult:
 
     Attributes:
         experiment: The experiment to route to, or None if rejected
+        experiment_id: The resolved experiment ID used for slot tracking
         rejection_reason: Reason for rejection if experiment is None
         available_experiments: List of available experiment IDs (on rejection)
         registration_required: True if miner needs to register
     """
 
     experiment: Experiment | None
+    experiment_id: str | None = None
     rejection_reason: str | None = None
     available_experiments: list[str] | None = None
     registration_required: bool | None = None
@@ -668,7 +670,7 @@ class ExperimentManager:
             miner_hotkey=synapse.miner_hotkey,
         )
 
-        return RoutingResult(experiment=experiment)
+        return RoutingResult(experiment=experiment, experiment_id=experiment_id)
 
     def _get_available_experiment_ids(self) -> list[str]:
         """Get list of available (enabled) experiment IDs.
