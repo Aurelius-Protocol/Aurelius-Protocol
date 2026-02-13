@@ -547,9 +547,10 @@ class ExperimentManager:
                 available_experiments=available,
             )
 
-        # Check miner registration (skip for "prompt" - all miners auto-registered)
+        # Check miner registration (skip for default experiments - all miners auto-registered)
         # On testnet, skip registration check (no central API registration endpoint yet)
-        if experiment_id != "prompt" and Config.BT_NETWORK != "test":
+        skip_registration = experiment_id in ("prompt", "moral-reasoning")
+        if not skip_registration and Config.BT_NETWORK != "test":
             miner_hotkey = synapse.miner_hotkey or ""
             if not self.experiment_client.is_miner_registered(experiment_id, miner_hotkey):
                 rejection = (

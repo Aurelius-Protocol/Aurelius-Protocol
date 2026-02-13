@@ -603,8 +603,8 @@ class ExperimentClient:
         Returns:
             True if registered, False otherwise
         """
-        if experiment_id == "prompt":
-            # All miners are auto-registered for the default experiment
+        if experiment_id in ("prompt", "moral-reasoning"):
+            # All miners are auto-registered for default experiments
             return True
 
         with self._lock:
