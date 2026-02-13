@@ -1,5 +1,7 @@
 """Novelty detection client for calculating prompt uniqueness via central API."""
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass
 
@@ -49,7 +51,13 @@ class MinerNoveltyStats:
 class NoveltyClient:
     """Client for novelty detection API calls."""
 
-    def __init__(self, api_endpoint: str | None = None, timeout: int = 10, api_key: str | None = None):
+    def __init__(
+        self,
+        api_endpoint: str | None = None,
+        timeout: int = 10,
+        api_key: str | None = None,
+        wallet: "bt.Wallet | None" = None,
+    ):
         """
         Initialize novelty client.
 
@@ -57,10 +65,12 @@ class NoveltyClient:
             api_endpoint: Base URL for novelty API (e.g., https://api.example.com/api/novelty)
             timeout: Request timeout in seconds
             api_key: API key for authenticated requests
+            wallet: Bittensor wallet for SR25519 header-based signing (set after init if needed)
         """
         self.api_endpoint = api_endpoint or Config.NOVELTY_API_ENDPOINT
         self.timeout = timeout
         self._api_key = api_key or getattr(Config, "CENTRAL_API_KEY", None)
+        self.wallet: bt.Wallet | None = wallet
         self._session = requests.Session()
         self._tracer = get_tracer("aurelius.novelty") if Config.TELEMETRY_ENABLED else None
 
@@ -83,6 +93,35 @@ class NoveltyClient:
     def is_available(self) -> bool:
         """Check if novelty detection is available."""
         return bool(self.api_endpoint)
+
+    def _build_auth_headers(self, body_json: str | None = None) -> dict[str, str]:
+        """Build authentication headers with SR25519 signing or Bearer token fallback.
+
+        Follows the same pattern as SubmissionClient._build_headers().
+        """
+        headers: dict[str, str] = {}
+
+        if self.wallet:
+            try:
+                timestamp = int(time.time())
+                hotkey = self.wallet.hotkey.ss58_address
+                if body_json:
+                    body_hash = hashlib.sha256(body_json.encode()).hexdigest()
+                    message = f"aurelius-submission:{timestamp}:{hotkey}:{body_hash}"
+                else:
+                    message = f"aurelius-submission:{timestamp}:{hotkey}"
+                signature = self.wallet.hotkey.sign(message.encode()).hex()
+                headers["X-Validator-Hotkey"] = hotkey
+                headers["X-Signature"] = signature
+                headers["X-Timestamp"] = str(timestamp)
+                if body_json:
+                    headers["X-Body-Hash"] = body_hash
+            except Exception as e:
+                bt.logging.warning(f"Failed to sign novelty request: {e}")
+        elif self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+
+        return headers
 
     def check_novelty(
         self,
@@ -153,18 +192,19 @@ class NoveltyClient:
             return None
 
         try:
+            body = {
+                "prompt": prompt,
+                "prompt_embedding": prompt_embedding,
+                "include_similar_prompt": include_similar_prompt,
+                "experiment_id": experiment_id,  # T084: Per-experiment novelty pool
+            }
+            body_json = json.dumps(body, separators=(",", ":"), sort_keys=True)
             headers: dict[str, str] = {"Content-Type": "application/json"}
-            if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
+            headers.update(self._build_auth_headers(body_json))
 
             response = self._session.post(
                 f"{self.api_endpoint}/check",
-                json={
-                    "prompt": prompt,
-                    "prompt_embedding": prompt_embedding,
-                    "include_similar_prompt": include_similar_prompt,
-                    "experiment_id": experiment_id,  # T084: Per-experiment novelty pool
-                },
+                data=body_json,
                 headers=headers,
                 timeout=self.timeout,
             )
@@ -232,8 +272,7 @@ class NoveltyClient:
 
         try:
             headers: dict[str, str] = {"Content-Type": "application/json"}
-            if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
+            headers.update(self._build_auth_headers())
 
             response = self._session.get(
                 f"{self.api_endpoint}/miner/{miner_hotkey}",
@@ -282,8 +321,7 @@ class NoveltyClient:
 
         try:
             headers: dict[str, str] = {"Content-Type": "application/json"}
-            if self._api_key:
-                headers["Authorization"] = f"Bearer {self._api_key}"
+            headers.update(self._build_auth_headers())
 
             response = self._session.get(
                 f"{self.api_endpoint}/stats",

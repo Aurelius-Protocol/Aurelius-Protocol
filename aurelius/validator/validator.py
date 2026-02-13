@@ -283,8 +283,9 @@ class Validator:
             # Load subnet hyperparameters from chain (network-level consensus on config values)
             Config.load_subnet_hyperparameters(self.subtensor)
 
-        # Now that wallet is initialized, attach it to dataset logger for signed submissions
+        # Now that wallet is initialized, attach it to dataset logger and novelty client for signed requests
         self.dataset_logger.wallet = self.wallet
+        self.novelty_client.wallet = self.wallet
 
         # Initialize axon (server for receiving requests)
         # Use configured host (may auto-detect external IP if enabled)

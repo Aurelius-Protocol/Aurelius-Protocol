@@ -1,8 +1,18 @@
 """Tests for NoveltyClient per-experiment isolation (T086)."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+
+def _get_request_body(call_args) -> dict:
+    """Extract parsed request body from mock call args (supports both json= and data= kwargs)."""
+    if "json" in call_args.kwargs:
+        return call_args.kwargs["json"]
+    if "data" in call_args.kwargs:
+        return json.loads(call_args.kwargs["data"])
+    raise AssertionError("No json= or data= kwarg found in call_args")
 
 
 class TestNoveltyClientExperimentId:
@@ -35,8 +45,7 @@ class TestNoveltyClientExperimentId:
 
             # Verify API was called with experiment_id
             mock_post.assert_called_once()
-            call_args = mock_post.call_args
-            request_json = call_args.kwargs.get("json") or call_args[1]["json"]
+            request_json = _get_request_body(mock_post.call_args)
             assert request_json["experiment_id"] == "jailbreak-v1"
 
     def test_check_novelty_default_experiment_id(self, novelty_client):
@@ -58,8 +67,7 @@ class TestNoveltyClientExperimentId:
             )
 
             # Should default to "prompt"
-            call_args = mock_post.call_args
-            request_json = call_args.kwargs.get("json") or call_args[1]["json"]
+            request_json = _get_request_body(mock_post.call_args)
             assert request_json["experiment_id"] == "prompt"
 
     def test_experiment_a_novelty_independent_of_b(self, novelty_client):
@@ -69,8 +77,8 @@ class TestNoveltyClientExperimentId:
             def mock_response_for_experiment(*args, **kwargs):
                 response = MagicMock()
                 response.status_code = 200
-                json_data = kwargs.get("json", {})
-                exp_id = json_data.get("experiment_id", "prompt")
+                body = json.loads(kwargs.get("data", "{}")) if "data" in kwargs else kwargs.get("json", {})
+                exp_id = body.get("experiment_id", "prompt")
 
                 if exp_id == "exp-a":
                     response.json.return_value = {
