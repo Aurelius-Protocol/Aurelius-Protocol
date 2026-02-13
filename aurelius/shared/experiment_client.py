@@ -257,6 +257,33 @@ DEFAULT_PROMPT_EXPERIMENT = ExperimentDefinition(
     updated_at="2026-01-01T00:00:00Z",
 )
 
+# Default moral-reasoning experiment definition for backward compatibility
+# Used as fallback when API is unavailable or cache is empty
+DEFAULT_MORAL_REASONING_EXPERIMENT = ExperimentDefinition(
+    id="moral-reasoning",
+    name="Moral Reasoning Evaluation",
+    version=1,
+    experiment_type="push",
+    scoring_type="numeric",
+    status="active",
+    deprecated_at=None,
+    thresholds={},
+    rate_limit_requests=Config.RATE_LIMIT_REQUESTS,
+    rate_limit_window_hours=int(Config.RATE_LIMIT_WINDOW_HOURS),
+    novelty_threshold=Config.MIN_NOVELTY_THRESHOLD,
+    pull_interval_seconds=None,
+    pull_timeout_seconds=None,
+    settings={},
+    created_at="2026-01-01T00:00:00Z",
+    updated_at="2026-01-01T00:00:00Z",
+)
+
+# Core experiment defaults - always available even without central API
+CORE_EXPERIMENT_DEFAULTS: dict[str, ExperimentDefinition] = {
+    DEFAULT_PROMPT_EXPERIMENT.id: DEFAULT_PROMPT_EXPERIMENT,
+    DEFAULT_MORAL_REASONING_EXPERIMENT.id: DEFAULT_MORAL_REASONING_EXPERIMENT,
+}
+
 
 class ExperimentClient:
     """Client for syncing experiment definitions from central API.
@@ -316,6 +343,11 @@ class ExperimentClient:
 
         if self.api_endpoint:
             bt.logging.info(f"Experiment client: API endpoint at {self.api_endpoint}")
+            if not self.api_key:
+                bt.logging.warning(
+                    "Experiment client: CENTRAL_API_KEY not set — experiment sync disabled. "
+                    "Using hardcoded defaults. Set CENTRAL_API_KEY for remote experiment control."
+                )
         else:
             bt.logging.warning("Experiment client: No API endpoint configured")
 
@@ -378,16 +410,16 @@ class ExperimentClient:
     def _apply_defaults(self) -> None:
         """Apply default experiment definition when cache is unavailable."""
         with self._lock:
-            self._cache = {DEFAULT_PROMPT_EXPERIMENT.id: DEFAULT_PROMPT_EXPERIMENT}
-            self._registrations = {}  # Empty - all miners auto-registered for "prompt"
+            self._cache = dict(CORE_EXPERIMENT_DEFAULTS)
+            self._registrations = {}  # Empty - all miners auto-registered for core experiments
             self._reward_allocation = RewardAllocation(
-                allocations={"prompt": 100.0},
+                allocations={"moral-reasoning": 100.0, "prompt": 0.0},
                 burn_percentage=0.0,
                 redistribute_unused=True,
                 version=1,
                 updated_at="",
             )
-        bt.logging.info("Applied default experiment configuration")
+        bt.logging.info("Applied default experiment configuration (moral-reasoning + prompt)")
 
     def _save_cache(self) -> bool:
         """Save experiment definitions to local cache file.
@@ -555,6 +587,9 @@ class ExperimentClient:
     def get_experiment(self, experiment_id: str) -> ExperimentDefinition | None:
         """Get an experiment definition by ID.
 
+        Falls back to CORE_EXPERIMENT_DEFAULTS for core experiments
+        even if the cache was replaced by a sync response without them.
+
         Args:
             experiment_id: The experiment ID to look up
 
@@ -562,7 +597,10 @@ class ExperimentClient:
             ExperimentDefinition if found, None otherwise
         """
         with self._lock:
-            return self._cache.get(experiment_id)
+            result = self._cache.get(experiment_id)
+        if result is None:
+            result = CORE_EXPERIMENT_DEFAULTS.get(experiment_id)
+        return result
 
     def get_active_experiments(self) -> list[ExperimentDefinition]:
         """Get all active experiment definitions.

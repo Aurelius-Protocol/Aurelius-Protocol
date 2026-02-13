@@ -411,14 +411,23 @@ class ExperimentManager:
         # Get rate limit config from experiment definition
         exp_def = self.experiment_client.get_experiment(experiment_id)
         if not exp_def:
-            # Fail-closed: deny when definition unavailable (V5 fix)
-            bt.logging.warning(
-                f"Rate limit check fail-closed: no experiment definition for '{experiment_id}'"
-            )
-            return False
-
-        max_requests = exp_def.rate_limit_requests
-        window_hours = exp_def.rate_limit_window_hours
+            if experiment_id in self.experiments:
+                # Known locally-registered experiment — use config defaults
+                bt.logging.debug(
+                    f"No experiment definition for '{experiment_id}', "
+                    f"using config defaults for rate limiting"
+                )
+                max_requests = Config.RATE_LIMIT_REQUESTS
+                window_hours = Config.RATE_LIMIT_WINDOW_HOURS
+            else:
+                # Fail-closed: deny unknown experiments (V5 security preserved)
+                bt.logging.warning(
+                    f"Rate limit check fail-closed: no experiment definition for '{experiment_id}'"
+                )
+                return False
+        else:
+            max_requests = exp_def.rate_limit_requests
+            window_hours = exp_def.rate_limit_window_hours
 
         if not max_requests or max_requests <= 0:
             return True  # No rate limit configured
