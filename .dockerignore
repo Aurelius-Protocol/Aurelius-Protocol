@@ -89,9 +89,5 @@ docker-compose*.yml
 # Pre-commit hooks
 .pre-commit-config.yaml
 
-# Miner code (validator-only image)
-miner.py
-aurelius/miner/
-
 # Claude/AI assistant files
 CLAUDE.md

@@ -202,6 +202,7 @@ class ExperimentSyncResponse:
         experiments: List of experiment definitions
         registrations: List of miner registrations
         reward_allocation: Reward distribution configuration
+        prompts: Per-experiment prompt overrides {experiment_id: {prompt_key: prompt_text}}
         sync_version: Monotonic version for change detection
         server_time: Server timestamp
     """
@@ -209,6 +210,7 @@ class ExperimentSyncResponse:
     experiments: list[ExperimentDefinition]
     registrations: list[MinerRegistration]
     reward_allocation: RewardAllocation
+    prompts: dict[str, dict[str, str]]
     sync_version: int
     server_time: str
 
@@ -224,10 +226,12 @@ class ExperimentSyncResponse:
         reward_allocation = RewardAllocation.from_dict(
             data.get("reward_allocation", {})
         )
+        prompts = data.get("prompts", {})
         return cls(
             experiments=experiments,
             registrations=registrations,
             reward_allocation=reward_allocation,
+            prompts=prompts,
             sync_version=data.get("sync_version", 0),
             server_time=data.get("server_time", ""),
         )
@@ -298,21 +302,21 @@ class ExperimentClient:
         self,
         api_endpoint: str | None = None,
         cache_path: str | None = None,
-        api_key: str | None = None,
         timeout: int = 30,
+        wallet: bt.Wallet | None = None,
     ):
         """Initialize experiment client.
 
         Args:
             api_endpoint: Base URL for experiment API
             cache_path: Path to local cache file
-            api_key: API key for authentication
             timeout: Request timeout in seconds
+            wallet: Bittensor wallet for SR25519 header-based signing (set after init if needed)
         """
         self.api_endpoint = api_endpoint or Config.EXPERIMENT_API_ENDPOINT
         self.cache_path = cache_path or Config.EXPERIMENT_CACHE_PATH
-        self.api_key = api_key or Config.CENTRAL_API_KEY
         self.timeout = timeout
+        self.wallet: bt.Wallet | None = wallet
         self._tracer = get_tracer("aurelius.experiments") if Config.TELEMETRY_ENABLED else None
 
         # Initialize circuit breaker for API resilience
@@ -330,6 +334,7 @@ class ExperimentClient:
         self._cache: dict[str, ExperimentDefinition] = {}
         self._registrations: dict[str, list[str]] = {}  # experiment_id -> list of hotkeys
         self._reward_allocation: RewardAllocation | None = None
+        self._prompts: dict[str, dict[str, str]] = {}  # experiment_id -> {prompt_key: prompt_text}
         self._sync_version: int = 0
         self._synced_at: str | None = None
         self._lock = threading.Lock()
@@ -343,13 +348,34 @@ class ExperimentClient:
 
         if self.api_endpoint:
             bt.logging.info(f"Experiment client: API endpoint at {self.api_endpoint}")
-            if not self.api_key:
+            if not self.wallet:
                 bt.logging.warning(
-                    "Experiment client: CENTRAL_API_KEY not set — experiment sync disabled. "
-                    "Using hardcoded defaults. Set CENTRAL_API_KEY for remote experiment control."
+                    "Experiment client: No wallet set — experiment sync disabled. "
+                    "Attach a wallet for SR25519-authenticated experiment sync."
                 )
         else:
             bt.logging.warning("Experiment client: No API endpoint configured")
+
+    def _build_auth_headers(self) -> dict[str, str]:
+        """Build authentication headers with SR25519 signing.
+
+        Follows the same pattern as NoveltyClient._build_auth_headers().
+        """
+        headers: dict[str, str] = {}
+
+        if self.wallet:
+            try:
+                timestamp = int(time.time())
+                hotkey = self.wallet.hotkey.ss58_address
+                message = f"aurelius-submission:{timestamp}:{hotkey}"
+                signature = self.wallet.hotkey.sign(message.encode()).hex()
+                headers["X-Validator-Hotkey"] = hotkey
+                headers["X-Signature"] = signature
+                headers["X-Timestamp"] = str(timestamp)
+            except Exception as e:
+                bt.logging.warning(f"Failed to sign experiment sync request: {e}")
+
+        return headers
 
     def _load_cache(self) -> bool:
         """Load experiment definitions from local cache file.
@@ -380,6 +406,9 @@ class ExperimentClient:
                     self._reward_allocation = RewardAllocation.from_dict(
                         data["reward_allocation"]
                     )
+
+                # Load prompts
+                self._prompts = data.get("prompts", {})
 
                 self._sync_version = data.get("sync_version", 0)
                 self._synced_at = data.get("synced_at")
@@ -444,6 +473,7 @@ class ExperimentClient:
                         if self._reward_allocation
                         else None
                     ),
+                    "prompts": self._prompts,
                 }
 
             # Write atomically using temp file
@@ -506,8 +536,7 @@ class ExperimentClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             }
-            if self.api_key:
-                headers["Authorization"] = f"Bearer {self.api_key}"
+            headers.update(self._build_auth_headers())
 
             # Use conditional fetch if we have a sync version
             if self._sync_version > 0:
@@ -541,6 +570,7 @@ class ExperimentClient:
                                 reg.miner_hotkey
                             )
                     self._reward_allocation = sync_response.reward_allocation
+                    self._prompts = sync_response.prompts
                     self._sync_version = sync_response.sync_version
                     self._synced_at = sync_response.server_time
 
@@ -555,7 +585,7 @@ class ExperimentClient:
                 return True
 
             elif response.status_code == 401:
-                bt.logging.warning("Experiment sync: unauthorized (check API key)")
+                bt.logging.warning("Experiment sync: unauthorized (check wallet signing)")
                 return False
 
             elif response.status_code in {502, 503, 504}:
@@ -657,6 +687,24 @@ class ExperimentClient:
         """
         with self._lock:
             return self._reward_allocation
+
+    def get_prompt(
+        self, experiment_id: str, prompt_key: str, default: str | None = None
+    ) -> str | None:
+        """Get a dynamic prompt override for an experiment.
+
+        Returns the override prompt text if it exists, otherwise the default.
+
+        Args:
+            experiment_id: The experiment to get the prompt for.
+            prompt_key: The prompt key (e.g. "response_system_prompt").
+            default: Value to return if no override exists.
+
+        Returns:
+            The prompt text, or default if no override found.
+        """
+        with self._lock:
+            return self._prompts.get(experiment_id, {}).get(prompt_key, default)
 
     def start_sync_loop(self) -> None:
         """Start the background sync loop.

@@ -181,6 +181,16 @@ class Validator:
             self.model = Config.OPENAI_MODEL
             bt.logging.info(f"Using OpenAI chat provider with model: {self.model}")
 
+        # Initialize DeepSeek direct API client (optional fallback when Chutes fails)
+        self.deepseek_client: OpenAI | None = None
+        if Config.DEEPSEEK_API_KEY:
+            self.deepseek_client = OpenAI(
+                api_key=Config.DEEPSEEK_API_KEY,
+                base_url=Config.DEEPSEEK_API_BASE_URL,
+                timeout=chat_api_timeout,
+            )
+            bt.logging.info(f"DeepSeek direct API fallback enabled: {Config.DEEPSEEK_API_BASE_URL}")
+
         # Initialize moderation provider
         bt.logging.info(f"Initializing moderation provider: {Config.MODERATION_PROVIDER}")
         self.moderation_provider = create_moderation_provider(
@@ -209,7 +219,6 @@ class Validator:
         self.dataset_logger = DatasetLogger(
             local_path=Config.LOCAL_DATASET_PATH,
             central_api_endpoint=Config.CENTRAL_API_ENDPOINT,
-            central_api_key=Config.CENTRAL_API_KEY,
             enable_local_backup=Config.ENABLE_LOCAL_BACKUP,
         )
 
@@ -346,6 +355,7 @@ class Validator:
         from aurelius.shared.experiment_client import get_experiment_client
 
         self.experiment_client = get_experiment_client()
+        self.experiment_client.wallet = self.wallet
         self.experiment_manager = ExperimentManager(self)
         self._register_default_experiment()
 
@@ -353,7 +363,7 @@ class Validator:
         self._submission_results: dict[str, dict] = {}
         self._submission_results_lock = threading.Lock()
         self._submission_max_cache_size = 1000
-        self.submission_client = SubmissionClient(wallet=self.wallet, api_key=Config.CENTRAL_API_KEY)
+        self.submission_client = SubmissionClient(wallet=self.wallet)
 
         # Perform initial remote config fetch (non-blocking, don't fail startup)
         if self.remote_config_client.is_available():
@@ -364,6 +374,12 @@ class Validator:
                 bt.logging.warning(f"Initial remote config fetch failed (will retry): {e}")
         else:
             bt.logging.info("Remote config client disabled (no endpoint configured)")
+
+        # Warn if CENTRAL_API_KEY is set — validators should never use it
+        if Config.CENTRAL_API_KEY:
+            bt.logging.warning(
+                "CENTRAL_API_KEY is set but ignored — validators authenticate via wallet signatures, not API keys"
+            )
 
         bt.logging.info("=" * 80)
         bt.logging.info("🚀 VALIDATOR INITIALIZATION COMPLETE")
@@ -998,7 +1014,8 @@ class Validator:
 
         # Call LLM
         response, actual_model = call_chat_api_with_fallback(
-            self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+            self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+            deepseek_client=self.deepseek_client,
         )
         completion_text = response.choices[0].message.content.strip()
 
@@ -1268,14 +1285,16 @@ class Validator:
                     }
                 ) as api_span:
                     response, actual_model = call_chat_api_with_fallback(
-                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+                        deepseek_client=self.deepseek_client,
                     )
                     api_duration = (time.time() - api_start_time) * 1000
                     api_span.set_attribute("duration_ms", round(api_duration, 2))
                     api_span.set_attribute("model_used", actual_model)
             else:
                 response, actual_model = call_chat_api_with_fallback(
-                    self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                    self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+                    deepseek_client=self.deepseek_client,
                 )
                 api_duration = (time.time() - api_start_time) * 1000
             timing_metrics["api_call_duration"] = round(api_duration, 2)
@@ -1613,7 +1632,8 @@ class Validator:
                         "max_tokens": Config.OPENAI_MAX_TOKENS,
                     }
                     response, _ = call_chat_api_with_fallback(
-                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+                        deepseek_client=self.deepseek_client,
                     )
                     completion = response.choices[0].message.content.strip()
 
@@ -1936,7 +1956,8 @@ class Validator:
                         "max_tokens": Config.OPENAI_MAX_TOKENS,
                     }
                     response, _ = call_chat_api_with_fallback(
-                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                        self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+                        deepseek_client=self.deepseek_client,
                     )
                     completion = response.choices[0].message.content.strip()
 

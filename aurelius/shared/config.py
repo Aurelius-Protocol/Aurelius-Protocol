@@ -86,6 +86,10 @@ class Config:
     CHUTES_API_KEY: str = os.getenv("CHUTES_API_KEY", "")
     CHUTES_API_BASE_URL: str = os.getenv("CHUTES_API_BASE_URL", "https://llm.chutes.ai/v1")
 
+    # DeepSeek Direct API (optional fallback when Chutes fails with 502/503/504)
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_API_BASE_URL: str = os.getenv("DEEPSEEK_API_BASE_URL", "https://api.deepseek.com")
+
     # OpenAI Configuration (still required for moderation)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -173,6 +177,8 @@ class Config:
         "CENTRAL_API_ENDPOINT",
         "https://collector.aureliusaligned.ai/api/collections"
     )
+    # Admin only — validators authenticate via wallet signatures, never need this.
+    # Used by admin scripts (manage-prompts.sh) and E2E test fixtures.
     CENTRAL_API_KEY: str | None = os.getenv("CENTRAL_API_KEY")
     LOCAL_DATASET_PATH: str = os.getenv("LOCAL_DATASET_PATH", "./datasets")
     ENABLE_LOCAL_BACKUP: bool = os.getenv("ENABLE_LOCAL_BACKUP", "true").lower() == "true"
@@ -329,6 +335,14 @@ class Config:
     MORAL_JUDGE_MAX_TOKENS: int = int(os.getenv("MORAL_JUDGE_MAX_TOKENS", "1024"))
     MORAL_JUDGE_TEMPERATURE_JITTER: float = float(os.getenv("MORAL_JUDGE_TEMPERATURE_JITTER", "0.15"))
 
+    # Moral Reasoning Gatekeeper Configuration
+    MORAL_GATEKEEPER_MODEL: str = os.getenv(
+        "MORAL_GATEKEEPER_MODEL", "chutesai/Mistral-Small-3.1-24B-Instruct-2503"
+    )
+    MORAL_GATEKEEPER_MAX_TOKENS: int = int(os.getenv("MORAL_GATEKEEPER_MAX_TOKENS", "256"))
+    MORAL_GATEKEEPER_TEMPERATURE: float = float(os.getenv("MORAL_GATEKEEPER_TEMPERATURE", "0.0"))
+    MORAL_GATEKEEPER_TIMEOUT: float = float(os.getenv("MORAL_GATEKEEPER_TIMEOUT", "30"))
+
     # Novelty default when service is completely down (embedding/novelty client
     # unavailable). Fail-closed: unknown novelty = zero multiplier, same as
     # the prompt experiment. Scores recover when the novelty API comes back.
@@ -342,7 +356,7 @@ class Config:
     )
 
     # Strictness mode for moral reasoning: "low", "medium", or "high".
-    MORAL_STRICTNESS_MODE: str = os.getenv("MORAL_STRICTNESS_MODE", "low")
+    MORAL_STRICTNESS_MODE: str = os.getenv("MORAL_STRICTNESS_MODE", "high")
 
     # Experiment Sync Configuration
     # Interval for syncing experiment definitions from central API (seconds)

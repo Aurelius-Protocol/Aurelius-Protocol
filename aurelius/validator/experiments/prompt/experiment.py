@@ -258,7 +258,8 @@ class PromptExperiment(PushExperiment):
             # Call chat API with fallback
             api_start_time = time.time()
             response, actual_model = call_chat_api_with_fallback(
-                self.core.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                self.core.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+                deepseek_client=getattr(self.core, "deepseek_client", None),
             )
             timing_metrics["api_call_duration"] = round((time.time() - api_start_time) * 1000, 2)
 
@@ -549,7 +550,8 @@ class PromptExperiment(PushExperiment):
                         "max_tokens": Config.OPENAI_MAX_TOKENS,
                     }
                     response, _ = call_chat_api_with_fallback(
-                        self.core.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                        self.core.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+                        deepseek_client=getattr(self.core, "deepseek_client", None),
                     )
                     completion = response.choices[0].message.content.strip()
                     moderation_result = self.core.moderation_provider.moderate(completion)
@@ -704,7 +706,8 @@ class PromptExperiment(PushExperiment):
                         "max_tokens": Config.OPENAI_MAX_TOKENS,
                     }
                     response, _ = call_chat_api_with_fallback(
-                        self.core.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT
+                        self.core.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
+                        deepseek_client=getattr(self.core, "deepseek_client", None),
                     )
                     completion = response.choices[0].message.content.strip()
                     moderation_result = self.core.moderation_provider.moderate(completion)

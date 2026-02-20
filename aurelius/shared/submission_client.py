@@ -20,11 +20,9 @@ class SubmissionClient:
         self,
         base_url: str | None = None,
         wallet: "bt.Wallet | None" = None,
-        api_key: str | None = None,
     ):
         self._base_url = (base_url or self._derive_base_url()).rstrip("/")
         self._wallet = wallet
-        self._api_key = api_key
         self._session = requests.Session()
 
     @staticmethod
@@ -41,9 +39,6 @@ class SubmissionClient:
     def _build_headers(self, body_json: str | None = None) -> dict[str, str]:
         """Build request headers with optional SR25519 signing."""
         headers = {"Content-Type": "application/json"}
-
-        if self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
 
         if self._wallet:
             try:
