@@ -55,7 +55,6 @@ class NoveltyClient:
         self,
         api_endpoint: str | None = None,
         timeout: int = 10,
-        api_key: str | None = None,
         wallet: "bt.Wallet | None" = None,
     ):
         """
@@ -64,12 +63,10 @@ class NoveltyClient:
         Args:
             api_endpoint: Base URL for novelty API (e.g., https://api.example.com/api/novelty)
             timeout: Request timeout in seconds
-            api_key: API key for authenticated requests
             wallet: Bittensor wallet for SR25519 header-based signing (set after init if needed)
         """
         self.api_endpoint = api_endpoint or Config.NOVELTY_API_ENDPOINT
         self.timeout = timeout
-        self._api_key = api_key or getattr(Config, "CENTRAL_API_KEY", None)
         self.wallet: bt.Wallet | None = wallet
         self._session = requests.Session()
         self._tracer = get_tracer("aurelius.novelty") if Config.TELEMETRY_ENABLED else None
@@ -118,9 +115,6 @@ class NoveltyClient:
                     headers["X-Body-Hash"] = body_hash
             except Exception as e:
                 bt.logging.warning(f"Failed to sign novelty request: {e}")
-        elif self._api_key:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-
         return headers
 
     def check_novelty(

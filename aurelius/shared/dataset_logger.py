@@ -93,7 +93,6 @@ class DatasetLogger:
         self,
         local_path: str | None = None,
         central_api_endpoint: str | None = None,
-        central_api_key: str | None = None,
         enable_local_backup: bool = True,
         wallet: "bt.Wallet | None" = None,
     ):
@@ -103,13 +102,11 @@ class DatasetLogger:
         Args:
             local_path: Path for local JSON backup files
             central_api_endpoint: URL of central API for data collection
-            central_api_key: API key for authentication
             enable_local_backup: Whether to save local backups
             wallet: Bittensor wallet for signing submissions (optional)
         """
         self.local_path = local_path
         self.central_api_endpoint = central_api_endpoint
-        self.central_api_key = central_api_key
         self.enable_local_backup = enable_local_backup
         self.wallet = wallet
 
@@ -223,9 +220,6 @@ class DatasetLogger:
         headers = {
             "Content-Type": "application/json",
         }
-
-        if self.central_api_key:
-            headers["Authorization"] = f"Bearer {self.central_api_key}"
 
         # Serialize body once — used for both hashing and sending to ensure consistency
         data = asdict(entry)
