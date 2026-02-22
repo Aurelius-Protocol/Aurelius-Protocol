@@ -165,7 +165,7 @@ class Validator:
             sys.exit(1)
 
         # Default timeout for chat API calls (seconds) to prevent indefinite blocking
-        chat_api_timeout = 60.0
+        chat_api_timeout = 600.0
 
         # Initialize chat client based on provider
         if Config.CHAT_PROVIDER == "chutes":
@@ -173,11 +173,12 @@ class Validator:
                 api_key=Config.CHUTES_API_KEY,
                 base_url=Config.CHUTES_API_BASE_URL,
                 timeout=chat_api_timeout,
+                max_retries=0,
             )
             self.model = Config.DEFAULT_MODEL  # "deepseek-ai/DeepSeek-V3"
             bt.logging.info(f"Using Chutes.ai chat provider with model: {self.model}")
         else:
-            self.chat_client = OpenAI(api_key=Config.OPENAI_API_KEY, timeout=chat_api_timeout)
+            self.chat_client = OpenAI(api_key=Config.OPENAI_API_KEY, timeout=chat_api_timeout, max_retries=0)
             self.model = Config.OPENAI_MODEL
             bt.logging.info(f"Using OpenAI chat provider with model: {self.model}")
 
@@ -188,6 +189,7 @@ class Validator:
                 api_key=Config.DEEPSEEK_API_KEY,
                 base_url=Config.DEEPSEEK_API_BASE_URL,
                 timeout=chat_api_timeout,
+                max_retries=0,
             )
             bt.logging.info(f"DeepSeek direct API fallback enabled: {Config.DEEPSEEK_API_BASE_URL}")
 

@@ -3,7 +3,7 @@
 from typing import Any
 
 import bittensor as bt
-from openai import APIStatusError, OpenAI
+from openai import APIStatusError, APITimeoutError, OpenAI
 
 from aurelius.shared.circuit_breaker import CircuitBreakerConfig, CircuitBreakerOpen, get_circuit_breaker
 from aurelius.shared.config import Config
@@ -28,9 +28,7 @@ class ModelUnavailableError(Exception):
         self.fallback_models = fallback_models
         self.errors = errors
         models_tried = [primary_model] + fallback_models
-        super().__init__(
-            f"All models unavailable. Tried: {models_tried}. Errors: {errors}"
-        )
+        super().__init__(f"All models unavailable. Tried: {models_tried}. Errors: {errors}")
 
 
 # Mapping from Chutes model names to DeepSeek native API model names
@@ -94,9 +92,7 @@ def call_chat_api_with_fallback(
     # Check circuit breaker first - fail fast if API is known to be down
     if not _chat_circuit_breaker.can_execute():
         retry_time = _chat_circuit_breaker.get_time_until_retry()
-        bt.logging.warning(
-            f"Chat API circuit breaker OPEN - failing fast (retry in {retry_time:.1f}s)"
-        )
+        bt.logging.warning(f"Chat API circuit breaker OPEN - failing fast (retry in {retry_time:.1f}s)")
         raise CircuitBreakerOpen("chat-api", retry_time)
 
     if fallback_models is None:
@@ -128,6 +124,12 @@ def call_chat_api_with_fallback(
             # Non-availability error (e.g., 400, 401, 429) - don't try fallbacks
             raise
 
+    except APITimeoutError as e:
+        error_msg = f"{primary_model}: timeout - {e}"
+        errors.append(error_msg)
+        bt.logging.warning(f"Model timeout: {error_msg}")
+        # Continue to Phase 2
+
     except Exception:
         _chat_circuit_breaker.record_failure()
         raise
@@ -137,9 +139,7 @@ def call_chat_api_with_fallback(
         deepseek_model = _map_to_deepseek_model(primary_model)
         if deepseek_model is not None:
             try:
-                bt.logging.info(
-                    f"Trying DeepSeek direct API: {deepseek_model} (mapped from {primary_model})"
-                )
+                bt.logging.info(f"Trying DeepSeek direct API: {deepseek_model} (mapped from {primary_model})")
                 params = {**api_params, "model": deepseek_model}
                 if timeout is not None:
                     params["timeout"] = timeout
@@ -162,7 +162,10 @@ def call_chat_api_with_fallback(
                 error_msg = f"deepseek-direct/{deepseek_model}: {type(e).__name__} - {e}"
                 errors.append(error_msg)
                 bt.logging.warning(f"DeepSeek direct error: {error_msg}")
-                # Continue to Phase 3 (don't fail hard on DeepSeek errors)
+                # Intentionally not recording circuit breaker failure here:
+                # DeepSeek direct is a separate API from the primary provider,
+                # so its errors should not trip the primary circuit breaker.
+                # Continue to Phase 3.
 
     # Phase 3: Try fallback models on primary client
     for model in fallback_models:
@@ -185,6 +188,12 @@ def call_chat_api_with_fallback(
                 continue
             else:
                 raise
+
+        except APITimeoutError as e:
+            error_msg = f"{model}: timeout - {e}"
+            errors.append(error_msg)
+            bt.logging.warning(f"Model timeout: {error_msg}")
+            continue
 
         except Exception:
             _chat_circuit_breaker.record_failure()
