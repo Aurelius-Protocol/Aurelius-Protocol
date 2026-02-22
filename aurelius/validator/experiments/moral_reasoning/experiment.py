@@ -26,7 +26,6 @@ from aurelius.validator.experiments.base import (
 from aurelius.validator.experiments.moral_reasoning.judge import (
     JUDGE_SYSTEM_PROMPT,
     JudgeEvaluationFailed,
-    _sanitize_for_xml_fence,
     evaluate_with_judge,
 )
 from aurelius.validator.experiments.moral_reasoning.scoring import MoralReasoningScoringSystem
@@ -383,10 +382,10 @@ class MoralReasoningExperiment(PushExperiment):
         # Do NOT call check_rate_limits() again here; it would consume a second
         # rate-limit slot per request (F2 fix).
 
-        # (2b) Sanitize scenario — strip all XML/HTML tags so that neither the
-        # response-generation LLM nor the judge LLM sees injected role markers,
-        # chat delimiters, or fence-escape tags (F7 fix).
-        scenario = _sanitize_for_xml_fence(scenario)
+        # (2b) Sanitization note: scenario is sanitized inside build_judge_prompt()
+        # (judge.py) which strips XML/HTML tags before embedding in XML fences.
+        # No need to sanitize here; generate_moral_response() does not use XML
+        # fencing, so raw scenario text is safe as a plain user message.
 
         # (3) Gatekeeper screening — lightweight LLM pre-check.
         # Fail-open: if the gatekeeper call fails, the scenario passes through.
@@ -515,12 +514,13 @@ class MoralReasoningExperiment(PushExperiment):
 
         # (7) Calculate final score (FR-007 through FR-013)
         with self._tracer_span("moral_reasoning.scoring"):
+            scoring_start = time.time()
             dim_scores = calculate_dimension_scores(signals)
             quality_score = calculate_quality_score(dim_scores)
             _, passed_screening, final_score = calculate_final_score(
                 signals, threshold=self.strictness.quality_threshold
             )
-            timing_metrics["scoring_ms"] = round((time.time() - judge_start) * 1000, 2)
+            timing_metrics["scoring_ms"] = round((time.time() - scoring_start) * 1000, 2)
 
         # Set synapse fields
         synapse.danger_score = final_score

@@ -162,7 +162,10 @@ def call_chat_api_with_fallback(
                 error_msg = f"deepseek-direct/{deepseek_model}: {type(e).__name__} - {e}"
                 errors.append(error_msg)
                 bt.logging.warning(f"DeepSeek direct error: {error_msg}")
-                # Continue to Phase 3 (don't fail hard on DeepSeek errors)
+                # Intentionally not recording circuit breaker failure here:
+                # DeepSeek direct is a separate API from the primary provider,
+                # so its errors should not trip the primary circuit breaker.
+                # Continue to Phase 3.
 
     # Phase 3: Try fallback models on primary client
     for model in fallback_models:
