@@ -620,8 +620,10 @@ class MoralReasoningExperiment(PushExperiment):
                 return OpenAI(
                     api_key=judge_api_key,
                     base_url=Config.CHUTES_API_BASE_URL,
+                    max_retries=0,
+                    timeout=60.0,
                 )
-            return OpenAI(api_key=judge_api_key)
+            return OpenAI(api_key=judge_api_key, max_retries=0, timeout=60.0)
 
         return self.core.chat_client
 
