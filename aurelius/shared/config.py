@@ -33,7 +33,7 @@ NETWORK_DEFAULTS = {
         "MINER_BURN_ENABLED": True,
         "MINER_BURN_PERCENTAGE": 0.75,
         "BURN_UID": 200,
-        "CHAT_API_TIMEOUT": 120,
+        "CHAT_API_TIMEOUT": 600,
     },
     290: {  # Testnet
         "DANGER_THRESHOLD": 0.2,
@@ -50,7 +50,7 @@ NETWORK_DEFAULTS = {
         "MINER_BURN_ENABLED": True,
         "MINER_BURN_PERCENTAGE": 0.75,
         "BURN_UID": 200,
-        "CHAT_API_TIMEOUT": 120,
+        "CHAT_API_TIMEOUT": 600,
     },
     1: {  # Local development
         "DANGER_THRESHOLD": 0.1,
@@ -206,7 +206,7 @@ class Config:
     TELEMETRY_HEARTBEAT_INTERVAL_S: int = int(os.getenv("TELEMETRY_HEARTBEAT_INTERVAL_S", "300"))  # 5 minutes
 
     # Scoring Configuration
-    WEIGHT_UPDATE_INTERVAL: int = int(os.getenv("WEIGHT_UPDATE_INTERVAL", "100"))
+    WEIGHT_UPDATE_INTERVAL: int = int(os.getenv("WEIGHT_UPDATE_INTERVAL", "300"))
     MIN_SAMPLES_FOR_WEIGHTS: int = int(os.getenv("MIN_SAMPLES_FOR_WEIGHTS", "5"))
 
     # Window-Based Reward Configuration

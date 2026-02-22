@@ -165,7 +165,7 @@ class Validator:
             sys.exit(1)
 
         # Default timeout for chat API calls (seconds) to prevent indefinite blocking
-        chat_api_timeout = 60.0
+        chat_api_timeout = 600.0
 
         # Initialize chat client based on provider
         if Config.CHAT_PROVIDER == "chutes":
