@@ -114,7 +114,10 @@ class NoveltyClient:
                 if body_json:
                     headers["X-Body-Hash"] = body_hash
             except Exception as e:
-                bt.logging.warning(f"Failed to sign novelty request: {e}")
+                bt.logging.error(
+                    f"Failed to sign novelty request: {e} "
+                    f"(wallet path: {self.wallet.path if hasattr(self.wallet, 'path') else 'unknown'})"
+                )
         return headers
 
     def check_novelty(

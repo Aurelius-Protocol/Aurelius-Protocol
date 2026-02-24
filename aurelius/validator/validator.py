@@ -9,6 +9,7 @@ import socket
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -297,6 +298,20 @@ class Validator:
         # Now that wallet is initialized, attach it to dataset logger and novelty client for signed requests
         self.dataset_logger.wallet = self.wallet
         self.novelty_client.wallet = self.wallet
+
+        # Validate wallet can actually sign (fail loud if key files are unreachable)
+        if not Config.LOCAL_MODE:
+            try:
+                test_msg = b"aurelius-signing-check"
+                self.wallet.hotkey.sign(test_msg)
+                bt.logging.info(f"Wallet signing verified (hotkey: {self.wallet.hotkey.ss58_address})")
+            except Exception as e:
+                bt.logging.error(
+                    f"WALLET SIGNING FAILED: {e} — "
+                    f"All central API requests will be sent WITHOUT authentication. "
+                    f"Check BITTENSOR_WALLET_PATH (current: {os.environ.get('BITTENSOR_WALLET_PATH', '<not set>')}) "
+                    f"and ensure wallet key files exist at the expected path."
+                )
 
         # Initialize axon (server for receiving requests)
         # Use configured host (may auto-detect external IP if enabled)
@@ -1062,11 +1077,12 @@ class Validator:
             "vendor": actual_vendor,
             "temperature": actual_temperature,
         }
-        self.background_executor.submit(
+        future = self.background_executor.submit(
             self._log_dataset_entry_background,
             prompt, completion_text, danger_score, category_scores,
             accepted, miner_hotkey, {"total_ms": total_ms}, model_config, experiment_id,
         )
+        future.add_done_callback(self._on_background_task_done)
 
         return {
             "danger_score": danger_score,
@@ -1444,10 +1460,11 @@ class Validator:
                 # Uses ThreadPoolExecutor to prevent DoS via thread explosion
                 # T085/T087: Pass experiment_id to background logging
                 experiment_id = synapse.experiment_id or "prompt"
-                self.background_executor.submit(
+                future = self.background_executor.submit(
                     self._log_dataset_entry_background,
                     prompt, completion_text, danger_score, category_scores, accepted, miner_hotkey, timing_metrics, model_config, experiment_id
                 )
+                future.add_done_callback(self._on_background_task_done)
 
             # Log immediate response return
             bt.logging.info("=" * 80)
@@ -1475,6 +1492,15 @@ class Validator:
             synapse.rejection_reason = f"Error: {str(e)}"
 
         return synapse
+
+    @staticmethod
+    def _on_background_task_done(future):
+        """Log any uncaught exceptions from background tasks."""
+        try:
+            future.result()
+        except Exception as e:
+            bt.logging.error(f"Background logging task failed: {e}")
+            bt.logging.debug(f"Traceback: {traceback.format_exc()}")
 
     def _log_dataset_entry_background(
         self,
@@ -1504,16 +1530,27 @@ class Validator:
             model_config: Model configuration
             experiment_id: Experiment ID for per-experiment novelty pools (T085)
         """
+        bt.logging.debug("Background logging started")
+
+        # Resolve metadata (lock-dependent — may fail during weight updates)
+        network_context: dict = {}
         try:
-            bt.logging.debug("Background logging started")
-
-            # Collect network context (blocking blockchain calls - OK in background)
             network_context = self._get_network_context(miner_hotkey)
+        except Exception as e:
+            bt.logging.warning(f"Could not collect network context (lock contention?): {e}")
 
-            # Generate embedding for accepted prompts (validator pays for this API call)
-            prompt_embedding = None
-            novelty_score = None
+        miner_uid = None
+        miner_coldkey = None
+        try:
+            miner_uid, miner_coldkey = self._get_miner_info(miner_hotkey)
+        except Exception as e:
+            bt.logging.warning(f"Could not resolve miner info (lock contention?): {e}")
 
+        # Generate embedding for accepted prompts (validator pays for this API call)
+        prompt_embedding = None
+        novelty_score = None
+
+        try:
             if accepted and self.embedding_client.is_available():
                 prompt_embedding = self.embedding_client.get_embedding(prompt)
                 if prompt_embedding:
@@ -1536,11 +1573,11 @@ class Validator:
                             )
                 else:
                     bt.logging.warning("Failed to generate embedding for prompt")
+        except Exception as e:
+            bt.logging.error(f"Error in embedding/novelty check: {e}")
 
-            # Resolve miner UID and coldkey from hotkey
-            miner_uid, miner_coldkey = self._get_miner_info(miner_hotkey)
-
-            # Log to dataset (includes embedding for storage in central API) (T087)
+        # Critical: log_entry() separated from lock-dependent calls
+        try:
             self.dataset_logger.log_entry(
                 prompt=prompt,
                 response=response,
@@ -1562,18 +1599,20 @@ class Validator:
                 prompt_embedding=prompt_embedding,
                 experiment_id=experiment_id,  # T087: Per-experiment tracking
             )
+        except Exception as e:
+            bt.logging.error(f"Error in background logging: {e}")
 
-            # Update novelty score (submission already recorded in main thread)
-            if novelty_score is not None:
+        # Update novelty score (submission already recorded in main thread)
+        if novelty_score is not None:
+            try:
                 self.scoring_system.update_novelty(
                     hotkey=miner_hotkey or "unknown",
                     novelty_score=novelty_score,
                 )
+            except Exception as e:
+                bt.logging.error(f"Error updating novelty score: {e}")
 
-            bt.logging.debug("Background logging completed")
-
-        except Exception as e:
-            bt.logging.error(f"Error in background logging: {e}")
+        bt.logging.debug("Background logging completed")
 
     def _run_consensus_verification(
         self,

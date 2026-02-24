@@ -61,7 +61,10 @@ class SubmissionClient:
                 if body_hash:
                     headers["X-Body-Hash"] = body_hash
             except Exception as e:
-                bt.logging.warning(f"Failed to sign submission request: {e}")
+                bt.logging.error(
+                    f"Failed to sign submission request: {e} "
+                    f"(wallet path: {self._wallet.path if hasattr(self._wallet, 'path') else 'unknown'})"
+                )
 
         return headers
 
