@@ -84,6 +84,7 @@ class DatasetEntry:
     network_context: dict | None = None
     prompt_embedding: list[float] | None = None
     experiment_id: str | None = None  # T087: Per-experiment tracking
+    moral_reasoning_data: dict | None = None
 
 
 class DatasetLogger:
@@ -241,7 +242,10 @@ class DatasetLogger:
                     "X-Body-Hash": body_hash,
                 })
             except Exception as e:
-                bt.logging.warning(f"Failed to sign dataset submission: {e}")
+                bt.logging.error(
+                    f"Failed to sign dataset submission: {e} "
+                    f"(wallet path: {self.wallet.path if hasattr(self.wallet, 'path') else 'unknown'})"
+                )
 
         last_status_code = None
 
@@ -365,6 +369,7 @@ class DatasetLogger:
         network_context: dict | None = None,
         prompt_embedding: list[float] | None = None,
         experiment_id: str | None = None,
+        moral_reasoning_data: dict | None = None,
     ) -> None:
         """
         Log a dataset entry.
@@ -431,6 +436,7 @@ class DatasetLogger:
             network_context=network_context,
             prompt_embedding=prompt_embedding,
             experiment_id=experiment_id,  # T087: Per-experiment tracking
+            moral_reasoning_data=moral_reasoning_data,
         )
 
         # Save locally (blocking, fast)

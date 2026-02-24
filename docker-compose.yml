@@ -43,6 +43,10 @@ services:
       - VALIDATOR_HOST=0.0.0.0
       # Auto-detect external IP for Bittensor registration
       - AUTO_DETECT_EXTERNAL_IP=true
+      # Override BITTENSOR_WALLET_PATH for the container filesystem.
+      # The .env value (if set) is used for the volume mount source (host side),
+      # but inside the container wallets are always at this fixed path.
+      - BITTENSOR_WALLET_PATH=/home/aurelius/.bittensor/wallets
 
     # Volume mounts for persistent data and wallet access
     volumes:

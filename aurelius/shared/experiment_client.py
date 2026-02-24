@@ -373,7 +373,10 @@ class ExperimentClient:
                 headers["X-Signature"] = signature
                 headers["X-Timestamp"] = str(timestamp)
             except Exception as e:
-                bt.logging.warning(f"Failed to sign experiment sync request: {e}")
+                bt.logging.error(
+                    f"Failed to sign experiment sync request: {e} "
+                    f"(wallet path: {self.wallet.path if hasattr(self.wallet, 'path') else 'unknown'})"
+                )
 
         return headers
 
