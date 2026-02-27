@@ -38,12 +38,19 @@ class CircuitBreakerConfig:
         recovery_timeout: Seconds to wait before attempting recovery (half-open)
         half_open_max_calls: Max concurrent calls allowed in half-open state
         success_threshold: Successes needed in half-open to close circuit
+        half_open_timeout: Max seconds to stay in half-open before forcing back to open.
+            Prevents getting stuck when the test request hangs indefinitely.
+        max_recovery_timeout: Cap for exponential backoff on recovery timeout
+        backoff_multiplier: Multiplier applied to recovery timeout after each consecutive failure cycle
     """
 
     failure_threshold: int = 5
     recovery_timeout: float = 60.0
     half_open_max_calls: int = 1
     success_threshold: int = 1
+    half_open_timeout: float = 120.0
+    max_recovery_timeout: float = 300.0
+    backoff_multiplier: float = 2.0
 
 
 class CircuitBreakerOpen(Exception):
@@ -93,6 +100,8 @@ class CircuitBreaker:
         self._success_count = 0
         self._last_failure_time: float | None = None
         self._half_open_calls = 0
+        self._half_open_start_time: float | None = None
+        self._consecutive_open_cycles = 0
         self._lock = threading.RLock()
 
     @property
@@ -102,14 +111,35 @@ class CircuitBreaker:
             if self._state == CircuitState.OPEN:
                 if self._should_attempt_reset():
                     self._transition_to_half_open()
+            elif self._state == CircuitState.HALF_OPEN:
+                # Force back to OPEN if stuck in HALF_OPEN too long
+                # (e.g., test request hanging indefinitely)
+                if self._half_open_start_time is not None:
+                    elapsed = time.time() - self._half_open_start_time
+                    if elapsed > self.config.half_open_timeout:
+                        bt.logging.warning(
+                            f"Circuit breaker '{self.name}': HALF_OPEN timed out after "
+                            f"{elapsed:.0f}s (limit {self.config.half_open_timeout}s), "
+                            f"forcing back to OPEN"
+                        )
+                        self._transition_to_open()
             return self._state
+
+    def _effective_recovery_timeout(self) -> float:
+        """Get recovery timeout with exponential backoff for consecutive failures."""
+        if self._consecutive_open_cycles <= 1:
+            return self.config.recovery_timeout
+        backoff = self.config.recovery_timeout * (
+            self.config.backoff_multiplier ** (self._consecutive_open_cycles - 1)
+        )
+        return min(backoff, self.config.max_recovery_timeout)
 
     def _should_attempt_reset(self) -> bool:
         """Check if enough time has passed to try recovery."""
         if self._last_failure_time is None:
             return True
         elapsed = time.time() - self._last_failure_time
-        return elapsed >= self.config.recovery_timeout
+        return elapsed >= self._effective_recovery_timeout()
 
     def _transition_to_half_open(self) -> None:
         """Transition to half-open state for recovery testing."""
@@ -119,15 +149,21 @@ class CircuitBreaker:
         self._state = CircuitState.HALF_OPEN
         self._half_open_calls = 0
         self._success_count = 0
+        self._half_open_start_time = time.time()
 
     def _transition_to_open(self) -> None:
         """Transition to open state after failures."""
+        self._consecutive_open_cycles += 1
+        self._failure_count = 0
+        effective_timeout = self._effective_recovery_timeout()
         bt.logging.warning(
             f"Circuit breaker '{self.name}': -> OPEN "
-            f"(failures: {self._failure_count}, recovery in {self.config.recovery_timeout}s)"
+            f"(failures: {self._failure_count}, recovery in {effective_timeout:.0f}s, "
+            f"cycle {self._consecutive_open_cycles})"
         )
         self._state = CircuitState.OPEN
         self._last_failure_time = time.time()
+        self._half_open_start_time = None
 
     def _transition_to_closed(self) -> None:
         """Transition to closed state after successful recovery."""
@@ -136,6 +172,8 @@ class CircuitBreaker:
         self._failure_count = 0
         self._success_count = 0
         self._half_open_calls = 0
+        self._half_open_start_time = None
+        self._consecutive_open_cycles = 0
 
     def record_success(self) -> None:
         """Record a successful call."""
@@ -149,18 +187,19 @@ class CircuitBreaker:
                 self._failure_count = 0
 
     def record_failure(self) -> None:
-        """Record a failed call."""
+        """Record a failed call.
+
+        Only updates _last_failure_time on state transitions to OPEN,
+        preventing timer resets from stale failures in already-OPEN state.
+        """
         with self._lock:
             self._failure_count += 1
-            self._last_failure_time = time.time()
 
             if self._state == CircuitState.HALF_OPEN:
                 # Any failure in half-open returns to open
-                bt.logging.warning(
-                    f"Circuit breaker '{self.name}': HALF_OPEN -> OPEN (recovery failed)"
-                )
-                self._state = CircuitState.OPEN
+                self._transition_to_open()
             elif self._state == CircuitState.CLOSED:
+                self._last_failure_time = time.time()
                 if self._failure_count >= self.config.failure_threshold:
                     self._transition_to_open()
 
@@ -184,12 +223,20 @@ class CircuitBreaker:
     def get_time_until_retry(self) -> float:
         """Get seconds until circuit might allow retry."""
         with self._lock:
+            if self._state == CircuitState.HALF_OPEN:
+                # In HALF_OPEN, a test request is in flight — report time
+                # until the half-open timeout forces back to OPEN
+                if self._half_open_start_time is not None:
+                    elapsed = time.time() - self._half_open_start_time
+                    remaining = self.config.half_open_timeout - elapsed
+                    return max(0.0, remaining)
+                return 0.0
             if self._state != CircuitState.OPEN:
                 return 0.0
             if self._last_failure_time is None:
                 return 0.0
             elapsed = time.time() - self._last_failure_time
-            remaining = self.config.recovery_timeout - elapsed
+            remaining = self._effective_recovery_timeout() - elapsed
             return max(0.0, remaining)
 
     def call(self, func: Callable[[], T], fallback: Callable[[], T] | None = None) -> T:
@@ -246,6 +293,8 @@ class CircuitBreaker:
             self._success_count = 0
             self._half_open_calls = 0
             self._last_failure_time = None
+            self._half_open_start_time = None
+            self._consecutive_open_cycles = 0
 
     def get_stats(self) -> dict:
         """Get circuit breaker statistics."""
@@ -256,11 +305,15 @@ class CircuitBreaker:
                 "failure_count": self._failure_count,
                 "success_count": self._success_count,
                 "last_failure_time": self._last_failure_time,
+                "consecutive_open_cycles": self._consecutive_open_cycles,
+                "effective_recovery_timeout": self._effective_recovery_timeout(),
                 "config": {
                     "failure_threshold": self.config.failure_threshold,
                     "recovery_timeout": self.config.recovery_timeout,
                     "half_open_max_calls": self.config.half_open_max_calls,
                     "success_threshold": self.config.success_threshold,
+                    "half_open_timeout": self.config.half_open_timeout,
+                    "max_recovery_timeout": self.config.max_recovery_timeout,
                 },
             }
 
