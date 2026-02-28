@@ -144,6 +144,8 @@ def screen_with_gatekeeper(
     gatekeeper_config: dict[str, Any],
     *,
     system_prompt: str = DEFAULT_GATEKEEPER_PROMPT,
+    deepseek_client: Any | None = None,
+    prefer_deepseek: bool = False,
 ) -> tuple[bool, str, list[str]]:
     """Lightweight LLM pre-check to reject unsuitable scenarios early.
 
@@ -159,8 +161,12 @@ def screen_with_gatekeeper(
         from gatekeeper v3 output (empty for v2 or FAIL responses).
         Fails open: ambiguous or empty responses are treated as PASS.
     """
+    model = gatekeeper_config.get("model", Config.MORAL_GATEKEEPER_MODEL)
+    if prefer_deepseek and not model.startswith("deepseek-ai/"):
+        model = "deepseek-ai/DeepSeek-V3.2-TEE"
+
     api_params = {
-        "model": gatekeeper_config.get("model", Config.MORAL_GATEKEEPER_MODEL),
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": scenario},
@@ -174,6 +180,8 @@ def screen_with_gatekeeper(
         api_params,
         timeout=gatekeeper_config.get("timeout", Config.MORAL_GATEKEEPER_TIMEOUT),
         fallback_models=[],
+        deepseek_client=deepseek_client,
+        prefer_deepseek=prefer_deepseek,
     )
 
     raw_text = response.choices[0].message.content.strip()
@@ -413,6 +421,8 @@ class MoralReasoningExperiment(PushExperiment):
                 gatekeeper_passed, gatekeeper_reason, gatekeeper_quality_signals = screen_with_gatekeeper(
                     scenario, self.core.chat_client, self._gatekeeper_config,
                     system_prompt=gatekeeper_system_prompt,
+                    deepseek_client=getattr(self.core, "deepseek_client", None),
+                    prefer_deepseek=Config.PREFER_DEEPSEEK_DIRECT,
                 )
             timing_metrics["gatekeeper_ms"] = round((time.time() - gk_start) * 1000, 2)
 
