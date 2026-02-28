@@ -203,26 +203,29 @@ class TestCallChatApiWithFallback:
         assert mock_client.chat.completions.create.call_count == 1
         assert exc_info.value.status_code == 400
 
-    def test_rate_limit_error_not_retried(self):
-        """429 rate limit errors should not trigger fallback."""
+    def test_rate_limit_triggers_fallback(self):
+        """429 rate limit errors should trigger fallback to avoid losing submissions."""
         mock_client = MagicMock()
+        mock_response = MagicMock()
 
-        mock_client.chat.completions.create.side_effect = APIStatusError(
-            "Rate limit exceeded",
-            response=MagicMock(status_code=429),
-            body={"error": {"message": "Rate limit exceeded"}},
-        )
+        mock_client.chat.completions.create.side_effect = [
+            APIStatusError(
+                "Rate limit exceeded",
+                response=MagicMock(status_code=429),
+                body={"error": {"message": "Rate limit exceeded"}},
+            ),
+            mock_response,
+        ]
 
         api_params = {"model": "primary-model", "messages": [{"role": "user", "content": "Hi"}]}
 
         with patch("bittensor.logging"):
-            with pytest.raises(APIStatusError) as exc_info:
-                call_chat_api_with_fallback(
-                    mock_client, api_params, fallback_models=["fallback-1"]
-                )
+            response, model = call_chat_api_with_fallback(
+                mock_client, api_params, fallback_models=["fallback-1"]
+            )
 
-        assert mock_client.chat.completions.create.call_count == 1
-        assert exc_info.value.status_code == 429
+        assert mock_client.chat.completions.create.call_count == 2
+        assert response == mock_response
 
     def test_auth_error_not_retried(self):
         """401 auth errors should not trigger fallback."""

@@ -102,7 +102,7 @@ def call_chat_api_with_fallback(
     errors: list[str] = []
 
     # HTTP status codes indicating temporary unavailability
-    unavailable_status_codes = {502, 503, 504}
+    unavailable_status_codes = {429, 502, 503, 504}
 
     # Phase 1: Try primary model on primary client
     try:
@@ -121,7 +121,7 @@ def call_chat_api_with_fallback(
             bt.logging.warning(f"Model unavailable: {error_msg}")
             # Continue to Phase 2
         else:
-            # Non-availability error (e.g., 400, 401, 429) - don't try fallbacks
+            # Non-availability error (e.g., 400, 401) - don't try fallbacks
             raise
 
     except APITimeoutError as e:
@@ -187,6 +187,7 @@ def call_chat_api_with_fallback(
                 bt.logging.warning(f"Model unavailable: {error_msg}")
                 continue
             else:
+                # Non-availability error (e.g., 400, 401) - don't try fallbacks
                 raise
 
         except APITimeoutError as e:
