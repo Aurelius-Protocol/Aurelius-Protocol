@@ -1033,6 +1033,7 @@ class Validator:
         response, actual_model = call_chat_api_with_fallback(
             self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
             deepseek_client=self.deepseek_client,
+            prefer_deepseek=Config.PREFER_DEEPSEEK_DIRECT,
         )
         completion_text = response.choices[0].message.content.strip()
 
@@ -1305,6 +1306,7 @@ class Validator:
                     response, actual_model = call_chat_api_with_fallback(
                         self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
                         deepseek_client=self.deepseek_client,
+                        prefer_deepseek=Config.PREFER_DEEPSEEK_DIRECT,
                     )
                     api_duration = (time.time() - api_start_time) * 1000
                     api_span.set_attribute("duration_ms", round(api_duration, 2))
@@ -1313,6 +1315,7 @@ class Validator:
                 response, actual_model = call_chat_api_with_fallback(
                     self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
                     deepseek_client=self.deepseek_client,
+                    prefer_deepseek=Config.PREFER_DEEPSEEK_DIRECT,
                 )
                 api_duration = (time.time() - api_start_time) * 1000
             timing_metrics["api_call_duration"] = round(api_duration, 2)
@@ -1675,6 +1678,7 @@ class Validator:
                     response, _ = call_chat_api_with_fallback(
                         self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
                         deepseek_client=self.deepseek_client,
+                        prefer_deepseek=Config.PREFER_DEEPSEEK_DIRECT,
                     )
                     completion = response.choices[0].message.content.strip()
 
@@ -1999,6 +2003,7 @@ class Validator:
                     response, _ = call_chat_api_with_fallback(
                         self.chat_client, api_params, timeout=Config.CHAT_API_TIMEOUT,
                         deepseek_client=self.deepseek_client,
+                        prefer_deepseek=Config.PREFER_DEEPSEEK_DIRECT,
                     )
                     completion = response.choices[0].message.content.strip()
 

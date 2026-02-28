@@ -60,13 +60,19 @@ def call_chat_api_with_fallback(
     fallback_models: list[str] | None = None,
     timeout: float | None = None,
     deepseek_client: OpenAI | None = None,
+    prefer_deepseek: bool = False,
 ) -> tuple[Any, str]:
     """
     Call chat API with automatic fallback on model unavailability.
 
-    Fallback order:
+    Fallback order (default):
     1. Primary model on primary client (Chutes)
     2. DeepSeek direct API (if deepseek_client provided and model is DeepSeek)
+    3. Fallback models on primary client (Chutes)
+
+    When prefer_deepseek=True, the order becomes:
+    1. DeepSeek direct API (tried first)
+    2. Primary model on primary client (Chutes)
     3. Fallback models on primary client (Chutes)
 
     Includes circuit breaker protection - if the API has failed repeatedly,
@@ -79,6 +85,7 @@ def call_chat_api_with_fallback(
         timeout: Request timeout in seconds. If None, uses client default.
         deepseek_client: Optional OpenAI client configured for DeepSeek direct API.
             When provided, acts as a fallback between primary and fallback models.
+        prefer_deepseek: If True, try DeepSeek direct API before the primary client.
 
     Returns:
         Tuple of (response, actual_model_used) where response is the API response
@@ -100,9 +107,41 @@ def call_chat_api_with_fallback(
 
     primary_model = api_params.get("model", Config.DEFAULT_MODEL)
     errors: list[str] = []
+    deepseek_already_tried = False
 
     # HTTP status codes indicating temporary unavailability
     unavailable_status_codes = {429, 502, 503, 504}
+
+    # Phase 0: When prefer_deepseek is True, try DeepSeek direct API first
+    if prefer_deepseek and deepseek_client is not None:
+        deepseek_model = _map_to_deepseek_model(primary_model)
+        if deepseek_model is not None:
+            deepseek_already_tried = True
+            try:
+                bt.logging.info(f"Trying DeepSeek direct API first (preferred): {deepseek_model}")
+                params = {**api_params, "model": deepseek_model}
+                if timeout is not None:
+                    params["timeout"] = timeout
+
+                response = deepseek_client.chat.completions.create(**params)
+                bt.logging.success(f"DeepSeek direct API succeeded (preferred): {deepseek_model}")
+                _chat_circuit_breaker.record_success()
+                return response, f"deepseek-direct/{deepseek_model}"
+
+            except APIStatusError as e:
+                if e.status_code in unavailable_status_codes:
+                    error_msg = f"deepseek-direct/{deepseek_model}: {e.status_code} - {e.message}"
+                    errors.append(error_msg)
+                    bt.logging.warning(f"DeepSeek direct unavailable (preferred): {error_msg}")
+                    # Fall through to Phase 1 (primary client)
+                else:
+                    raise
+
+            except Exception as e:
+                error_msg = f"deepseek-direct/{deepseek_model}: {type(e).__name__} - {e}"
+                errors.append(error_msg)
+                bt.logging.warning(f"DeepSeek direct error (preferred): {error_msg}")
+                # Fall through to Phase 1 (primary client)
 
     # Phase 1: Try primary model on primary client
     try:
@@ -134,8 +173,8 @@ def call_chat_api_with_fallback(
         _chat_circuit_breaker.record_failure()
         raise
 
-    # Phase 2: Try DeepSeek direct API (if available and model is DeepSeek)
-    if deepseek_client is not None:
+    # Phase 2: Try DeepSeek direct API (if available, model is DeepSeek, and not already tried)
+    if deepseek_client is not None and not deepseek_already_tried:
         deepseek_model = _map_to_deepseek_model(primary_model)
         if deepseek_model is not None:
             try:

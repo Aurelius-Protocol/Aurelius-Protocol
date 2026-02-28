@@ -89,6 +89,7 @@ class Config:
     # DeepSeek Direct API (optional fallback when Chutes fails with 502/503/504)
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
     DEEPSEEK_API_BASE_URL: str = os.getenv("DEEPSEEK_API_BASE_URL", "https://api.deepseek.com")
+    PREFER_DEEPSEEK_DIRECT: bool = os.getenv("PREFER_DEEPSEEK_DIRECT", "false").lower() == "true"
 
     # OpenAI Configuration (still required for moderation)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")

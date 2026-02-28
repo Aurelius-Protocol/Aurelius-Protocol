@@ -382,6 +382,111 @@ class TestCallChatApiWithFallback:
         assert second_call.kwargs["timeout"] == 45.0
 
 
+    def test_prefer_deepseek_tries_deepseek_first(self):
+        """When prefer_deepseek=True, DeepSeek client should be called before primary client."""
+        mock_client = MagicMock()
+        mock_deepseek_client = MagicMock()
+        mock_response = MockResponse("DeepSeek response")
+        mock_deepseek_client.chat.completions.create.return_value = mock_response
+
+        api_params = {
+            "model": "deepseek-ai/DeepSeek-V3",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+
+        with patch("bittensor.logging"):
+            response, model_used = call_chat_api_with_fallback(
+                mock_client,
+                api_params,
+                fallback_models=["fallback-1"],
+                deepseek_client=mock_deepseek_client,
+                prefer_deepseek=True,
+            )
+
+        assert response == mock_response
+        assert model_used == "deepseek-direct/deepseek-chat"
+        # DeepSeek should have been called
+        assert mock_deepseek_client.chat.completions.create.call_count == 1
+        # Primary client should NOT have been called
+        assert mock_client.chat.completions.create.call_count == 0
+
+    def test_prefer_deepseek_falls_back_to_primary_on_failure(self):
+        """When prefer_deepseek=True but DeepSeek fails, should fall back to primary client."""
+        mock_client = MagicMock()
+        mock_deepseek_client = MagicMock()
+        mock_response = MockResponse("Primary response")
+
+        mock_deepseek_client.chat.completions.create.side_effect = APIStatusError(
+            "Rate limited",
+            response=MagicMock(status_code=429),
+            body={"error": {"message": "Rate limited"}},
+        )
+        mock_client.chat.completions.create.return_value = mock_response
+
+        api_params = {
+            "model": "deepseek-ai/DeepSeek-V3",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+
+        with patch("bittensor.logging"):
+            response, model_used = call_chat_api_with_fallback(
+                mock_client,
+                api_params,
+                fallback_models=["fallback-1"],
+                deepseek_client=mock_deepseek_client,
+                prefer_deepseek=True,
+            )
+
+        assert response == mock_response
+        assert model_used == "deepseek-ai/DeepSeek-V3"
+        # DeepSeek was tried first, then primary succeeded
+        assert mock_deepseek_client.chat.completions.create.call_count == 1
+        assert mock_client.chat.completions.create.call_count == 1
+
+    def test_prefer_deepseek_skips_phase2_deepseek(self):
+        """When prefer_deepseek=True and DeepSeek fails, Phase 2 should not retry DeepSeek."""
+        mock_client = MagicMock()
+        mock_deepseek_client = MagicMock()
+        mock_response = MockResponse("Fallback response")
+
+        # DeepSeek fails in Phase 0
+        mock_deepseek_client.chat.completions.create.side_effect = APIStatusError(
+            "Service unavailable",
+            response=MagicMock(status_code=503),
+            body={"error": {"message": "Unavailable"}},
+        )
+        # Primary client also fails, then fallback succeeds
+        mock_client.chat.completions.create.side_effect = [
+            APIStatusError(
+                "Service unavailable",
+                response=MagicMock(status_code=503),
+                body={"error": {"message": "Unavailable"}},
+            ),
+            mock_response,
+        ]
+
+        api_params = {
+            "model": "deepseek-ai/DeepSeek-V3",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+
+        with patch("bittensor.logging"):
+            response, model_used = call_chat_api_with_fallback(
+                mock_client,
+                api_params,
+                fallback_models=["fallback-1"],
+                deepseek_client=mock_deepseek_client,
+                prefer_deepseek=True,
+            )
+
+        assert response == mock_response
+        assert model_used == "fallback-1"
+        # DeepSeek should only have been tried once (Phase 0), not again in Phase 2
+        assert mock_deepseek_client.chat.completions.create.call_count == 1
+        # Primary tried once (Phase 1), fallback tried once (Phase 3)
+        assert mock_client.chat.completions.create.call_count == 2
+
+
 class TestModelUnavailableError:
     """Tests for ModelUnavailableError exception."""
 
