@@ -143,6 +143,15 @@ def call_chat_api_with_fallback(
                 bt.logging.warning(f"DeepSeek direct error (preferred): {error_msg}")
                 # Fall through to Phase 1 (primary client)
 
+    # If DeepSeek direct was preferred and already tried, skip Chutes entirely
+    if prefer_deepseek and deepseek_already_tried:
+        _chat_circuit_breaker.record_failure()
+        raise ModelUnavailableError(
+            primary_model=primary_model,
+            fallback_models=[],
+            errors=errors,
+        )
+
     # Phase 1: Try primary model on primary client
     try:
         params = {**api_params, "model": primary_model}
