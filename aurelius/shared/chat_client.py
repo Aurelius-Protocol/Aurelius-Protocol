@@ -60,7 +60,7 @@ def call_chat_api_with_fallback(
     fallback_models: list[str] | None = None,
     timeout: float | None = None,
     deepseek_client: OpenAI | None = None,
-    prefer_deepseek: bool = False,
+    prefer_deepseek: bool | None = None,
 ) -> tuple[Any, str]:
     """
     Call chat API with automatic fallback on model unavailability.
@@ -86,6 +86,7 @@ def call_chat_api_with_fallback(
         deepseek_client: Optional OpenAI client configured for DeepSeek direct API.
             When provided, acts as a fallback between primary and fallback models.
         prefer_deepseek: If True, try DeepSeek direct API before the primary client.
+            If None (default), reads from Config.PREFER_DEEPSEEK_DIRECT.
 
     Returns:
         Tuple of (response, actual_model_used) where response is the API response
@@ -96,6 +97,10 @@ def call_chat_api_with_fallback(
         CircuitBreakerOpen: If circuit breaker is open due to repeated failures
         Other exceptions: Re-raised if the error is not a service unavailability error
     """
+    # Resolve prefer_deepseek default from config
+    if prefer_deepseek is None:
+        prefer_deepseek = Config.PREFER_DEEPSEEK_DIRECT
+
     # Check circuit breaker first - fail fast if API is known to be down
     if not _chat_circuit_breaker.can_execute():
         retry_time = _chat_circuit_breaker.get_time_until_retry()

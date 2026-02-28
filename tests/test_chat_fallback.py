@@ -477,6 +477,96 @@ class TestCallChatApiWithFallback:
         assert mock_client.chat.completions.create.call_count == 0
 
 
+    def test_config_default_prefer_deepseek_skips_chutes(self):
+        """When Config.PREFER_DEEPSEEK_DIRECT=True and caller omits prefer_deepseek, DeepSeek is tried and Chutes is skipped."""
+        mock_client = MagicMock()
+        mock_deepseek_client = MagicMock()
+        mock_response = MockResponse("DeepSeek response")
+        mock_deepseek_client.chat.completions.create.return_value = mock_response
+
+        api_params = {
+            "model": "deepseek-ai/DeepSeek-V3",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+
+        with patch("bittensor.logging"), patch(
+            "aurelius.shared.chat_client.Config.PREFER_DEEPSEEK_DIRECT", True
+        ):
+            response, model_used = call_chat_api_with_fallback(
+                mock_client,
+                api_params,
+                fallback_models=["fallback-1"],
+                deepseek_client=mock_deepseek_client,
+                # prefer_deepseek NOT passed — should read from Config
+            )
+
+        assert response == mock_response
+        assert model_used == "deepseek-direct/deepseek-chat"
+        # DeepSeek was called
+        assert mock_deepseek_client.chat.completions.create.call_count == 1
+        # Chutes was NOT called
+        assert mock_client.chat.completions.create.call_count == 0
+
+    def test_config_default_prefer_deepseek_raises_on_failure(self):
+        """When Config.PREFER_DEEPSEEK_DIRECT=True and DeepSeek fails, Chutes is still skipped."""
+        mock_client = MagicMock()
+        mock_deepseek_client = MagicMock()
+
+        mock_deepseek_client.chat.completions.create.side_effect = APIStatusError(
+            "Service unavailable",
+            response=MagicMock(status_code=503),
+            body={"error": {"message": "Unavailable"}},
+        )
+
+        api_params = {
+            "model": "deepseek-ai/DeepSeek-V3",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+
+        with patch("bittensor.logging"), patch(
+            "aurelius.shared.chat_client.Config.PREFER_DEEPSEEK_DIRECT", True
+        ):
+            with pytest.raises(ModelUnavailableError):
+                call_chat_api_with_fallback(
+                    mock_client,
+                    api_params,
+                    fallback_models=["fallback-1"],
+                    deepseek_client=mock_deepseek_client,
+                    # prefer_deepseek NOT passed — should read from Config
+                )
+
+        # DeepSeek was tried
+        assert mock_deepseek_client.chat.completions.create.call_count == 1
+        # Chutes was NOT tried
+        assert mock_client.chat.completions.create.call_count == 0
+
+    def test_config_default_false_uses_normal_flow(self):
+        """When Config.PREFER_DEEPSEEK_DIRECT=False (default), normal Chutes-first flow is used."""
+        mock_client = MagicMock()
+        mock_response = MockResponse("Chutes response")
+        mock_client.chat.completions.create.return_value = mock_response
+
+        api_params = {
+            "model": "deepseek-ai/DeepSeek-V3",
+            "messages": [{"role": "user", "content": "Hi"}],
+        }
+
+        with patch(
+            "aurelius.shared.chat_client.Config.PREFER_DEEPSEEK_DIRECT", False
+        ):
+            response, model_used = call_chat_api_with_fallback(
+                mock_client,
+                api_params,
+                fallback_models=["fallback-1"],
+                # prefer_deepseek NOT passed — should read from Config (False)
+            )
+
+        assert response == mock_response
+        assert model_used == "deepseek-ai/DeepSeek-V3"
+        # Chutes primary was called
+        assert mock_client.chat.completions.create.call_count == 1
+
+
 class TestModelUnavailableError:
     """Tests for ModelUnavailableError exception."""
 
