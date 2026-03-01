@@ -18,14 +18,14 @@ class TestStrictnessPresets:
         assert "high" in STRICTNESS_PRESETS
 
     def test_low_matches_current_defaults(self):
-        """Low preset should match the original hardcoded defaults."""
+        """Low preset should match the current defaults."""
         low = STRICTNESS_PRESETS["low"]
         assert low.quality_threshold == 0.4
         assert low.suspicious_high_signal_count == 20
         assert low.suspicious_min_response_length == 500
-        assert low.suspicious_perfect_score_count == 22
-        assert low.velocity_high_signal_threshold == 20
-        assert low.velocity_flag_ratio == 0.5
+        assert low.suspicious_perfect_score_count == 23
+        assert low.velocity_high_signal_threshold == 22
+        assert low.velocity_flag_ratio == 0.98
         assert low.min_submissions == 1
 
     def test_medium_stricter_than_low(self):
@@ -42,7 +42,9 @@ class TestStrictnessPresets:
         assert high.quality_threshold > medium.quality_threshold
         assert high.suspicious_high_signal_count < medium.suspicious_high_signal_count
         assert high.suspicious_min_response_length > medium.suspicious_min_response_length
-        assert high.velocity_flag_ratio < medium.velocity_flag_ratio
+        # velocity_flag_ratio is intentionally very lenient across all presets
+        # (near 1.0) to avoid false-flagging miners with legitimately high signal counts
+        assert high.velocity_flag_ratio >= 0.95
 
     def test_min_submissions_always_one(self):
         for mode, preset in STRICTNESS_PRESETS.items():

@@ -29,8 +29,8 @@ STRICTNESS_PRESETS: dict[str, StrictnessParams] = {
         suspicious_high_signal_count=20,
         suspicious_min_response_length=500,
         suspicious_perfect_score_count=23,
-        velocity_high_signal_threshold=20,
-        velocity_flag_ratio=0.5,
+        velocity_high_signal_threshold=22,
+        velocity_flag_ratio=0.98,
         min_submissions=1,
     ),
     "medium": StrictnessParams(
@@ -38,8 +38,8 @@ STRICTNESS_PRESETS: dict[str, StrictnessParams] = {
         suspicious_high_signal_count=19,
         suspicious_min_response_length=750,
         suspicious_perfect_score_count=23,
-        velocity_high_signal_threshold=18,
-        velocity_flag_ratio=0.35,
+        velocity_high_signal_threshold=22,
+        velocity_flag_ratio=0.95,
         min_submissions=1,
     ),
     "high": StrictnessParams(
@@ -47,8 +47,8 @@ STRICTNESS_PRESETS: dict[str, StrictnessParams] = {
         suspicious_high_signal_count=18,
         suspicious_min_response_length=1000,
         suspicious_perfect_score_count=23,
-        velocity_high_signal_threshold=16,
-        velocity_flag_ratio=0.25,
+        velocity_high_signal_threshold=22,
+        velocity_flag_ratio=0.98,
         min_submissions=1,
     ),
 }

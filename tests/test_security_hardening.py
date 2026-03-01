@@ -975,21 +975,25 @@ class TestVelocitySlidingWindow:
         assert scoring.miner_scores["miner_a"].flag_count == 1
         assert scoring.miner_scores["miner_a"].flag_block == 10000
 
-        # Submit low-signal entries but still within cooldown (1st flag = 1000 blocks)
+        # Submit low-signal entries but still within cooldown (1st flag = 300 blocks)
         for _ in range(5):
-            scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=10500)
+            scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=10150)
 
-        # Still flagged — cooldown hasn't elapsed (only 500 blocks, need 1000)
+        # Still flagged — cooldown hasn't elapsed (only 150 blocks, need 300)
         assert scoring.miner_scores["miner_a"].flagged_for_review is True
 
-        # Now submit after cooldown elapsed (block 11001 = 1001 blocks after flag)
-        scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=11001)
+        # Now submit after cooldown elapsed (block 10301 = 301 blocks after flag)
+        scoring.record_signal_velocity("miner_a", 5, window_size=5, current_block=10301)
 
         # Now unflagged — cooldown elapsed and ratio is below threshold
         assert scoring.miner_scores["miner_a"].flagged_for_review is False
 
-    def test_velocity_permanent_flag_after_third_offense(self):
-        """After 3rd flag, miner is permanently flagged (no auto-unflag)."""
+    def test_velocity_permanent_flag_after_fourth_offense(self):
+        """After 4th flag, miner is permanently flagged (no auto-unflag).
+
+        Cooldowns: [300, 1000, 3000] — 1st/2nd/3rd flags have finite cooldowns,
+        4th+ flag is permanent.
+        """
         tmp_dir = tempfile.mkdtemp(prefix="f4_perm_")
         scoring = MoralReasoningScoringSystem(
             persistence_path=f"{tmp_dir}/scores.json"
@@ -998,14 +1002,14 @@ class TestVelocitySlidingWindow:
         scoring.record_submission("miner_a", 0.8, True, block=9500)
 
         block = 10000
-        for offense in range(3):
+        for offense in range(4):
             # Get flagged
             scoring.miner_scores["miner_a"].signal_velocity_window = []
             for _ in range(4):
                 scoring.record_signal_velocity("miner_a", 22, window_size=5, current_block=block)
             assert scoring.miner_scores["miner_a"].flagged_for_review is True
 
-            if offense < 2:
+            if offense < 3:
                 # Unflag by waiting for cooldown and submitting low-signal
                 cooldown = scoring.flag_cooldowns[offense]
                 block += cooldown + 1
@@ -1015,8 +1019,8 @@ class TestVelocitySlidingWindow:
                 assert scoring.miner_scores["miner_a"].flagged_for_review is False
                 block += 100
 
-        # 3rd flag — permanent, can never auto-unflag
-        assert scoring.miner_scores["miner_a"].flag_count == 3
+        # 4th flag — permanent, can never auto-unflag
+        assert scoring.miner_scores["miner_a"].flag_count == 4
         block += 100000  # Even after very long time
         scoring.miner_scores["miner_a"].signal_velocity_window = []
         for _ in range(5):

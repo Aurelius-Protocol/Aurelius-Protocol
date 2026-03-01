@@ -77,8 +77,8 @@ class MoralReasoningScoringSystem:
         self.miner_scores: dict[str, MinerMoralScore] = {}
         self.score_history: dict[str, list] = defaultdict(list)
 
-        # Escalating cooldown: 1st flag = 1000 blocks (~3.3h), 2nd = 5000 (~16h), 3rd+ = permanent
-        self.flag_cooldowns = [1000, 5000]
+        # Escalating cooldown: 1st flag = 300 blocks (~1h), 2nd = 1000 (~3.3h), 3rd = 3000 (~10h), 4th+ = permanent
+        self.flag_cooldowns = [300, 1000, 3000]
 
         self._load()
         bt.logging.info(f"MoralReasoningScoringSystem initialized (path: {persistence_path})")
