@@ -279,6 +279,7 @@ class Validator:
             block_time = 1.0 if Config.FAST_BLOCK_MODE else Config.SIMULATED_BLOCK_TIME
 
             self.subtensor = SimulatedSubtensor(start_block=Config.SIMULATED_BLOCK_START, block_time=block_time)
+            self._weight_subtensor = None  # Not needed for simulated subtensor
 
             bt.logging.info(
                 f"Simulated block progression enabled: "
@@ -291,6 +292,15 @@ class Validator:
 
             subtensor_config = Config.get_subtensor_config()
             self.subtensor = bt.Subtensor(**subtensor_config)
+
+            # Create dedicated subtensor for weight setting to avoid lock contention
+            # (set_weights holds the connection for 5-30s waiting for inclusion/finalization)
+            try:
+                self._weight_subtensor = bt.Subtensor(**subtensor_config)
+                bt.logging.info("Created dedicated subtensor connection for weight setting")
+            except Exception as e:
+                bt.logging.warning(f"Could not create dedicated weight subtensor, falling back to shared: {e}")
+                self._weight_subtensor = None
 
             # Load subnet hyperparameters from chain (network-level consensus on config values)
             Config.load_subnet_hyperparameters(self.subtensor)
@@ -2420,7 +2430,7 @@ class Validator:
 
     def _get_miner_info(self, miner_hotkey: str | None) -> tuple[int | None, str | None]:
         """
-        Resolve miner UID and coldkey from hotkey using the metagraph.
+        Resolve miner UID and coldkey from hotkey using the cached metagraph.
 
         Args:
             miner_hotkey: The miner's hotkey address
@@ -2428,14 +2438,15 @@ class Validator:
         Returns:
             Tuple of (miner_uid, miner_coldkey) if found, (None, None) otherwise
         """
-        if not miner_hotkey or not self.subtensor:
+        if not miner_hotkey:
             return None, None
         try:
-            with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
-                metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+            metagraph = self._get_cached_metagraph()
+            if metagraph is None:
+                return None, None
             for uid, hotkey in enumerate(metagraph.hotkeys):
                 if hotkey == miner_hotkey:
-                    coldkey = metagraph.coldkeys[uid] if hasattr(metagraph, 'coldkeys') else None
+                    coldkey = metagraph.coldkeys[uid] if hasattr(metagraph, "coldkeys") else None
                     return uid, coldkey
             return None, None
         except Exception:
@@ -2451,41 +2462,38 @@ class Validator:
         Returns:
             Dictionary with network context data
         """
-        context = {}
+        context = {"subnet_uid": Config.BT_NETUID}
 
         try:
-            # Subnet UID
-            context["subnet_uid"] = Config.BT_NETUID
+            if self.subtensor:
+                # Lock only for block height and validator stake (lightweight RPCs)
+                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                    context["block_height"] = self.subtensor.block
 
-            # Current block height
-            context["block_height"] = self._get_current_block()
+                    if self.wallet:
+                        try:
+                            validator_stake = self.subtensor.get_stake_for_coldkey_and_hotkey(
+                                hotkey_ss58=self.wallet.hotkey.ss58_address,
+                                coldkey_ss58=self.wallet.coldkeypub.ss58_address,
+                            )
+                            context["validator_stake"] = float(validator_stake)
+                        except Exception:
+                            pass
 
-            # Validator stake
-            if self.wallet and self.subtensor:
-                try:
-                    with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
-                        validator_stake = self.subtensor.get_stake_for_coldkey_and_hotkey(
-                            hotkey_ss58=self.wallet.hotkey.ss58_address,
-                            coldkey_ss58=self.wallet.coldkeypub.ss58_address
-                        )
-                    context["validator_stake"] = float(validator_stake)
-                except Exception:
-                    pass
-
-            # Miner stake (if available)
-            if miner_hotkey and self.subtensor:
-                try:
-                    # Get metagraph to find miner's coldkey
-                    with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
-                        metagraph = self.subtensor.metagraph(Config.BT_NETUID)
-                    for uid, hotkey in enumerate(metagraph.hotkeys):
-                        if hotkey == miner_hotkey:
-                            miner_stake = metagraph.S[uid]
-                            context["miner_stake"] = float(miner_stake)
-                            break
-                except Exception:
-                    pass
-
+                # Use cached metagraph for miner stake (avoids expensive RPC under lock)
+                if miner_hotkey:
+                    try:
+                        metagraph = self._get_cached_metagraph()
+                        if metagraph is not None:
+                            for uid, hotkey in enumerate(metagraph.hotkeys):
+                                if hotkey == miner_hotkey:
+                                    miner_stake = metagraph.S[uid]
+                                    context["miner_stake"] = float(miner_stake)
+                                    break
+                    except Exception:
+                        pass
+        except TimeoutError:
+            bt.logging.debug("subtensor_lock timeout in _get_network_context, skipping")
         except Exception as e:
             bt.logging.debug(f"Could not collect full network context: {e}")
 
@@ -2512,9 +2520,35 @@ class Validator:
                 if not self.subtensor:
                     continue
 
-                # Get current block (with thread safety)
-                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
-                    current_block = self.subtensor.block
+                # Use dedicated subtensor for ALL weight-loop chain reads
+                # to avoid blocking (and being blocked by) the shared connection
+                weight_sub = self._weight_subtensor or self.subtensor
+                use_shared = weight_sub is self.subtensor
+
+                # Get current block (with reconnect for dedicated connection)
+                if use_shared:
+                    with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                        current_block = self.subtensor.block
+                else:
+                    try:
+                        current_block = weight_sub.block
+                    except Exception:
+                        # Dedicated connection may be dead — try to reconnect once
+                        bt.logging.warning("Dedicated weight subtensor connection lost, reconnecting...")
+                        try:
+                            subtensor_config = Config.get_subtensor_config()
+                            self._weight_subtensor = bt.Subtensor(**subtensor_config)
+                            weight_sub = self._weight_subtensor
+                            current_block = weight_sub.block
+                            use_shared = False
+                            bt.logging.info("Reconnected dedicated weight subtensor")
+                        except Exception as e:
+                            bt.logging.error(f"Reconnect failed, falling back to shared subtensor: {e}")
+                            self._weight_subtensor = None
+                            weight_sub = self.subtensor
+                            use_shared = True
+                            with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                                current_block = self.subtensor.block
 
                 # Check if it's time to update weights
                 blocks_since_update = current_block - last_update_block
@@ -2529,10 +2563,13 @@ class Validator:
                 # Persist rate limiter state to disk on each weight cycle
                 self.rate_limiter.save_state(self._rate_limiter_state_path)
 
-                # Sync metagraph to get current miners (with thread safety)
+                # Sync metagraph to get current miners
                 bt.logging.info("🔄 Syncing metagraph...")
-                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
-                    metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+                if use_shared:
+                    with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                        metagraph = self.subtensor.metagraph(Config.BT_NETUID)
+                else:
+                    metagraph = weight_sub.metagraph(Config.BT_NETUID)
 
                 # Update cached metagraph for blacklist checks
                 with self._timed_lock(self._metagraph_lock, "metagraph_lock"):
@@ -2589,16 +2626,29 @@ class Validator:
                     last_update_block = current_block
                 else:
                     try:
-                        # Set weights with thread safety
-                        with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
-                            # Log what we're about to set
-                            non_zero_uids = [uid for uid, w in zip(uids, weights) if w > 0]
-                            non_zero_weights = [w for w in weights if w > 0]
-                            bt.logging.info(f"Setting weights: UIDs={non_zero_uids}, weights={non_zero_weights}")
-                            bt.logging.info(f"Total UIDs: {len(uids)}, sum of weights: {sum(weights):.6f}")
+                        # Log what we're about to set
+                        non_zero_uids = [uid for uid, w in zip(uids, weights) if w > 0]
+                        non_zero_weights = [w for w in weights if w > 0]
+                        bt.logging.info(f"Setting weights: UIDs={non_zero_uids}, weights={non_zero_weights}")
+                        bt.logging.info(f"Total UIDs: {len(uids)}, sum of weights: {sum(weights):.6f}")
 
-                            # Use default parameters which handle commit-reveal properly
-                            result = self.subtensor.set_weights(
+                        # Use dedicated subtensor (already resolved above) to avoid
+                        # blocking reads on the shared connection.
+                        # set_weights waits for inclusion+finalization (5-30s).
+                        if use_shared:
+                            # Fallback: must use shared subtensor with lock
+                            with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                                result = self.subtensor.set_weights(
+                                    netuid=Config.BT_NETUID,
+                                    wallet=self.wallet,
+                                    uids=uids,
+                                    weights=weights,
+                                    wait_for_inclusion=True,
+                                    wait_for_finalization=True,
+                                )
+                        else:
+                            # Dedicated connection — no lock needed (only this thread uses it)
+                            result = weight_sub.set_weights(
                                 netuid=Config.BT_NETUID,
                                 wallet=self.wallet,
                                 uids=uids,
@@ -2606,13 +2656,14 @@ class Validator:
                                 wait_for_inclusion=True,
                                 wait_for_finalization=True,
                             )
-                            # set_weights returns (bool, str) tuple in bittensor 9.x
-                            if isinstance(result, tuple):
-                                success, msg = result
-                                if not success:
-                                    bt.logging.error(f"set_weights failed: {msg}")
-                            else:
-                                success = bool(result)
+
+                        # set_weights returns (bool, str) tuple in bittensor 9.x
+                        if isinstance(result, tuple):
+                            success, msg = result
+                            if not success:
+                                bt.logging.error(f"set_weights failed: {msg}")
+                        else:
+                            success = bool(result)
 
                         if success:
                             bt.logging.success(f"✓ Weights successfully set on chain at block {current_block}")
@@ -2936,6 +2987,15 @@ class Validator:
             bt.logging.info("Flushing dataset logger queue...")
             self.dataset_logger.stop()
             bt.logging.info("Dataset logger stopped")
+
+        # Close dedicated weight-setting subtensor connection
+        if hasattr(self, "_weight_subtensor") and self._weight_subtensor and self._weight_subtensor is not self.subtensor:
+            try:
+                bt.logging.info("Closing dedicated weight subtensor connection...")
+                self._weight_subtensor.close()
+                bt.logging.info("Dedicated weight subtensor closed")
+            except Exception:
+                pass
 
         # Close HTTP sessions to release connection pool resources
         if hasattr(self, "novelty_client"):
