@@ -352,6 +352,25 @@ def get_circuit_breaker(
         return _circuit_breakers[name]
 
 
+def get_collector_circuit_breaker() -> CircuitBreaker:
+    """Get shared circuit breaker for collector API (dataset logger, submissions, novelty).
+
+    All three clients hit the same collector API host, so sharing a single circuit
+    breaker means that when one client detects the API is down, all clients fail
+    fast immediately instead of each independently timing out.
+    """
+    return get_circuit_breaker(
+        "collector-api",
+        CircuitBreakerConfig(
+            failure_threshold=5,
+            recovery_timeout=60.0,
+            half_open_max_calls=1,
+            success_threshold=2,
+            max_recovery_timeout=300.0,
+        ),
+    )
+
+
 def get_all_circuit_breakers() -> dict[str, CircuitBreaker]:
     """Get all registered circuit breakers for monitoring."""
     with _registry_lock:

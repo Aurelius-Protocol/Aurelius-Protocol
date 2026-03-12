@@ -939,10 +939,10 @@ class Config:
         if level <= logging.INFO:
             bt.logging.enable_info()
 
-        # Also configure root Python logger
-        logging.basicConfig(
-            level=level, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-        )
+        # Set root logger level (for OTel LoggingHandler) without adding a handler.
+        # Don't call logging.basicConfig() — it adds a StreamHandler that duplicates
+        # every log line alongside Bittensor's own QueueListener/BtStreamFormatter.
+        logging.getLogger().setLevel(level)
 
     @classmethod
     def truncate_sensitive_data(cls, text: str) -> str:

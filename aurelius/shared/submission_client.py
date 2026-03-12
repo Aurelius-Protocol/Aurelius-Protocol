@@ -7,6 +7,7 @@ import time
 import bittensor as bt
 import requests
 
+from aurelius.shared.circuit_breaker import get_collector_circuit_breaker
 from aurelius.shared.config import Config
 
 
@@ -14,6 +15,8 @@ class SubmissionClient:
     """HTTP client for the collector API's submissions endpoints.
 
     Follows the same SR25519 signing pattern as dataset_logger.py.
+    Uses a shared collector API circuit breaker so that when any collector
+    client detects the API is down, all clients fail fast.
     """
 
     def __init__(
@@ -24,6 +27,7 @@ class SubmissionClient:
         self._base_url = (base_url or self._derive_base_url()).rstrip("/")
         self._wallet = wallet
         self._session = requests.Session()
+        self._circuit_breaker = get_collector_circuit_breaker()
 
     @staticmethod
     def _derive_base_url() -> str:
@@ -79,6 +83,13 @@ class SubmissionClient:
 
         Returns True if successful, False otherwise.
         """
+        if not self._circuit_breaker.can_execute():
+            bt.logging.debug(
+                f"Collector API circuit breaker OPEN — skipping submission register "
+                f"(retry in {self._circuit_breaker.get_time_until_retry():.0f}s)"
+            )
+            return False
+
         data = {
             "submission_token": token,
             "miner_hotkey": miner_hotkey,
@@ -98,12 +109,16 @@ class SubmissionClient:
                 timeout=10,
             )
             if response.status_code in (200, 201):
+                self._circuit_breaker.record_success()
                 return True
+            if response.status_code >= 500:
+                self._circuit_breaker.record_failure()
             bt.logging.warning(
                 f"Failed to register submission token: {response.status_code} {response.text}"
             )
             return False
         except requests.RequestException as e:
+            self._circuit_breaker.record_failure()
             bt.logging.warning(f"Failed to register submission token: {e}")
             return False
 
@@ -119,6 +134,13 @@ class SubmissionClient:
 
         Returns True if successful, False otherwise.
         """
+        if not self._circuit_breaker.can_execute():
+            bt.logging.debug(
+                f"Collector API circuit breaker OPEN — skipping submission update "
+                f"(retry in {self._circuit_breaker.get_time_until_retry():.0f}s)"
+            )
+            return False
+
         data: dict = {"status": status}
         if result is not None:
             data["result"] = result
@@ -138,12 +160,16 @@ class SubmissionClient:
                 timeout=10,
             )
             if response.status_code == 200:
+                self._circuit_breaker.record_success()
                 return True
+            if response.status_code >= 500:
+                self._circuit_breaker.record_failure()
             bt.logging.warning(
                 f"Failed to update submission {token}: {response.status_code} {response.text}"
             )
             return False
         except requests.RequestException as e:
+            self._circuit_breaker.record_failure()
             bt.logging.warning(f"Failed to update submission {token}: {e}")
             return False
 
@@ -152,15 +178,23 @@ class SubmissionClient:
 
         Returns the submission dict or None if not found.
         """
+        if not self._circuit_breaker.can_execute():
+            bt.logging.debug("Collector API circuit breaker OPEN — skipping submission get")
+            return None
+
         try:
             response = self._session.get(
                 f"{self._base_url}/{token}",
                 timeout=10,
             )
             if response.status_code == 200:
+                self._circuit_breaker.record_success()
                 return response.json()
+            if response.status_code >= 500:
+                self._circuit_breaker.record_failure()
             return None
         except requests.RequestException as e:
+            self._circuit_breaker.record_failure()
             bt.logging.warning(f"Failed to get submission {token}: {e}")
             return None
 

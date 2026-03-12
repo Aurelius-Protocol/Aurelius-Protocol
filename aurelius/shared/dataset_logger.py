@@ -16,6 +16,7 @@ import bittensor as bt
 import requests
 from opentelemetry.trace import SpanKind
 
+from aurelius.shared.circuit_breaker import get_collector_circuit_breaker
 from aurelius.shared.telemetry.otel_setup import get_tracer
 
 
@@ -137,6 +138,9 @@ class DatasetLogger:
         from aurelius.shared.config import Config
         self._tracer = get_tracer("aurelius.dataset") if Config.TELEMETRY_ENABLED else None
 
+        # Shared circuit breaker for collector API resilience
+        self._circuit_breaker = get_collector_circuit_breaker()
+
         # Start background worker if we have a central API
         if self.central_api_endpoint:
             bt.logging.info(f"Dataset logger: Central API enabled at {self.central_api_endpoint}")
@@ -243,6 +247,15 @@ class DatasetLogger:
 
     def _do_submit_to_api(self, entry: DatasetEntry, max_retries: int) -> tuple[bool, int | None, int]:
         """Internal method to perform the API submission with retries."""
+        # Check circuit breaker before attempting — fail fast if API is known to be down
+        if not self._circuit_breaker.can_execute():
+            bt.logging.debug(
+                f"Collector API circuit breaker OPEN — skipping dataset submission "
+                f"(retry in {self._circuit_breaker.get_time_until_retry():.0f}s)"
+            )
+            self.submissions_failed += 1
+            return False, None, 0
+
         # Serialize body once — used for both hashing and sending to ensure consistency
         data = asdict(entry)
         body_json = json.dumps(data, separators=(',', ':'), sort_keys=True)
@@ -289,15 +302,23 @@ class DatasetLogger:
 
                 if response.status_code in [200, 201]:
                     self.submissions_successful += 1
+                    self._circuit_breaker.record_success()
                     bt.logging.success(f"Dataset entry submitted to central API (total: {self.submissions_successful})")
                     return True, last_status_code, attempt
                 else:
+                    if response.status_code >= 500:
+                        self._circuit_breaker.record_failure()
                     bt.logging.warning(f"Central API returned status {response.status_code}: {response.text}")
 
             except requests.RequestException as e:
+                self._circuit_breaker.record_failure()
                 bt.logging.warning(f"Failed to submit to central API (attempt {attempt + 1}/{max_retries}): {e}")
 
                 if attempt < max_retries - 1:
+                    # Don't retry if circuit just opened
+                    if not self._circuit_breaker.can_execute():
+                        bt.logging.debug("Circuit breaker opened during retries — aborting remaining attempts")
+                        break
                     time.sleep(2**attempt)  # Exponential backoff
 
         self.submissions_failed += 1

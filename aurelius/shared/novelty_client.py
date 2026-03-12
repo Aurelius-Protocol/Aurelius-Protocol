@@ -9,7 +9,7 @@ import bittensor as bt
 import requests
 from opentelemetry.trace import SpanKind
 
-from aurelius.shared.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, get_circuit_breaker
+from aurelius.shared.circuit_breaker import get_collector_circuit_breaker
 from aurelius.shared.config import Config
 from aurelius.shared.telemetry.otel_setup import get_tracer
 
@@ -71,16 +71,9 @@ class NoveltyClient:
         self._session = requests.Session()
         self._tracer = get_tracer("aurelius.novelty") if Config.TELEMETRY_ENABLED else None
 
-        # Initialize circuit breaker for API resilience
-        self._circuit_breaker = get_circuit_breaker(
-            "novelty-api",
-            CircuitBreakerConfig(
-                failure_threshold=5,
-                recovery_timeout=60.0,
-                half_open_max_calls=1,
-                success_threshold=1,
-            ),
-        )
+        # Use shared collector API circuit breaker — when any collector client
+        # detects the API is down, all clients fail fast immediately
+        self._circuit_breaker = get_collector_circuit_breaker()
 
         if self.api_endpoint:
             bt.logging.info(f"Novelty client: API endpoint at {self.api_endpoint}")
