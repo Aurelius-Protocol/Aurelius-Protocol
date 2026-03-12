@@ -364,7 +364,7 @@ def get_collector_circuit_breaker() -> CircuitBreaker:
         CircuitBreakerConfig(
             failure_threshold=5,
             recovery_timeout=60.0,
-            half_open_max_calls=1,
+            half_open_max_calls=2,
             success_threshold=2,
             max_recovery_timeout=300.0,
         ),
