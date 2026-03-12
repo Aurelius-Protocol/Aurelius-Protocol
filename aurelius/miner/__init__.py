@@ -1,5 +1,6 @@
 """Aurelius Miner Module."""
 
+from aurelius.miner.dashboard import Dashboard
 from aurelius.miner.errors import (
     DiagnosticsFormatter,
     ErrorCategory,
@@ -9,8 +10,10 @@ from aurelius.miner.errors import (
     create_error,
 )
 from aurelius.miner.health import HealthCheckResult, ValidatorHealthChecker
+from aurelius.miner.history import SubmissionHistory, SubmissionRecord
 from aurelius.miner.miner import QueryProgress, ValidatorQueryResult
 from aurelius.miner.retry import RetryConfig, RetryHandler, RetryResult
+from aurelius.miner.validator_preferences import ValidatorPerformance, ValidatorPreferences
 
 
 # Lazy import for miner to avoid bittensor import at module load time
@@ -68,4 +71,11 @@ __all__ = [
     "RetryConfig",
     "RetryHandler",
     "RetryResult",
+    # History & Dashboard
+    "SubmissionRecord",
+    "SubmissionHistory",
+    "Dashboard",
+    # Validator selection
+    "ValidatorPerformance",
+    "ValidatorPreferences",
 ]

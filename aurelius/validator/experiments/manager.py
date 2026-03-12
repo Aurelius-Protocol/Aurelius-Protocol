@@ -488,8 +488,8 @@ class ExperimentManager:
 
         tracer = get_tracer("aurelius.experiments") if Config.TELEMETRY_ENABLED else None
 
-        # Default to "moral-reasoning" experiment (prompt experiment deprecated)
-        experiment_id = synapse.experiment_id or "moral-reasoning"
+        # Default to "moral_reasoning" experiment (prompt experiment deprecated)
+        experiment_id = synapse.experiment_id or "moral_reasoning"
 
         bt.logging.debug(
             f"Routing submission: experiment_id={experiment_id}, "
@@ -560,7 +560,7 @@ class ExperimentManager:
 
         # Check miner registration (skip for default experiments - all miners auto-registered)
         # On testnet, skip registration check (no central API registration endpoint yet)
-        skip_registration = experiment_id in ("prompt", "moral-reasoning")
+        skip_registration = experiment_id in ("prompt", "moral_reasoning")
         if not skip_registration and Config.BT_NETWORK != "test":
             miner_hotkey = synapse.miner_hotkey or ""
             if not self.experiment_client.is_miner_registered(experiment_id, miner_hotkey):

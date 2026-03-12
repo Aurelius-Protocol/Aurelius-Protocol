@@ -213,7 +213,7 @@ def screen_with_gatekeeper(
 class MoralReasoningExperiment(PushExperiment):
     """Push-based experiment for moral dilemma evaluation via MoReBench signals."""
 
-    NAME = "moral-reasoning"
+    NAME = "moral_reasoning"
     TYPE = ExperimentType.PUSH
 
     def __init__(self, core: ValidatorCore, config: ExperimentConfig):
@@ -427,14 +427,18 @@ class MoralReasoningExperiment(PushExperiment):
             timing_metrics["gatekeeper_ms"] = round((time.time() - gk_start) * 1000, 2)
 
             if not gatekeeper_passed:
+                # Parse the reason line from gatekeeper output (line after FAIL)
+                gk_lines = (gatekeeper_reason or "").split("\n")
+                parsed_reason = gk_lines[1].strip() if len(gk_lines) > 1 else "Screening failed"
+
                 bt.logging.info(
                     f"Gatekeeper rejected scenario from "
                     f"{miner_hotkey[:8] if miner_hotkey else '?'}...: "
-                    f"{gatekeeper_reason[:100]}"
+                    f"{parsed_reason[:100]}"
                 )
                 synapse.accepted = False
                 synapse.danger_score = 0.0
-                synapse.rejection_reason = "Gatekeeper screening failed"
+                synapse.rejection_reason = f"Gatekeeper: {parsed_reason}"
 
                 # Record as zero-score submission (counts against miner history)
                 try:
@@ -447,7 +451,38 @@ class MoralReasoningExperiment(PushExperiment):
                     passed_screening=False,
                     block=current_block,
                 )
-                return synapse, None
+
+                # Populate miner stats on synapse (same as successful path)
+                miner_score = self.scoring_system.get_miner_score(miner_hotkey or "unknown")
+                miner_stats_dict: dict[str, Any] = {}
+                if miner_score:
+                    hit_rate = (
+                        miner_score.accepted_submissions / miner_score.total_submissions
+                        if miner_score.total_submissions > 0 else 0.0
+                    )
+                    synapse.miner_novelty_avg = miner_score.average_novelty
+                    synapse.miner_hit_rate = hit_rate
+                    synapse.miner_submission_count = miner_score.total_submissions
+                    miner_stats_dict = {
+                        "novelty_avg": miner_score.average_novelty,
+                        "hit_rate": hit_rate,
+                        "submission_count": miner_score.total_submissions,
+                    }
+
+                return synapse, {
+                    "danger_score": 0.0,
+                    "accepted": False,
+                    "quality_score": 0.0,
+                    "screening": "FAIL",
+                    "final_score": 0.0,
+                    "response": None,
+                    "model_used": None,
+                    "rejection_reason": f"Gatekeeper: {parsed_reason}",
+                    "gatekeeper_reason": parsed_reason,
+                    "gatekeeper_quality_signals": gatekeeper_quality_signals,
+                    "timing_ms": timing_metrics,
+                    "miner_stats": miner_stats_dict,
+                }
         except Exception as e:
             bt.logging.warning(f"Gatekeeper error (fail-open): {e}")
             timing_metrics["gatekeeper_ms"] = round((time.time() - gk_start) * 1000, 2)
@@ -567,6 +602,23 @@ class MoralReasoningExperiment(PushExperiment):
             novelty_score=None,  # Updated in background
         )
 
+        # Populate miner stats on synapse (same pattern as prompt experiment)
+        miner_score = self.scoring_system.get_miner_score(miner_hotkey or "unknown")
+        miner_stats_dict: dict[str, Any] = {}
+        if miner_score:
+            hit_rate = (
+                miner_score.accepted_submissions / miner_score.total_submissions
+                if miner_score.total_submissions > 0 else 0.0
+            )
+            synapse.miner_novelty_avg = miner_score.average_novelty
+            synapse.miner_hit_rate = hit_rate
+            synapse.miner_submission_count = miner_score.total_submissions
+            miner_stats_dict = {
+                "novelty_avg": miner_score.average_novelty,
+                "hit_rate": hit_rate,
+                "submission_count": miner_score.total_submissions,
+            }
+
         timing_metrics["total_ms"] = round((time.time() - start_time) * 1000, 2)
 
         # Count true signals (used for OTel + signal velocity detection)
@@ -623,15 +675,19 @@ class MoralReasoningExperiment(PushExperiment):
         from dataclasses import asdict
 
         result_dict = {
+            "danger_score": final_score,
+            "accepted": passed_screening,
             "quality_score": quality_score,
             "screening": "PASS" if passed_screening else "FAIL",
             "final_score": final_score,
             "response": response_text,
             "model_used": model_used,
             "signals": asdict(signals),
+            "dimension_scores": asdict(dim_scores),
             "judge_summary": judge_summary,
             "timing_ms": timing_metrics,
             "gatekeeper_quality_signals": gatekeeper_quality_signals,
+            "miner_stats": miner_stats_dict,
         }
 
         return synapse, result_dict

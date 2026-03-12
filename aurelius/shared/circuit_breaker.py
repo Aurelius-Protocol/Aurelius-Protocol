@@ -52,6 +52,13 @@ class CircuitBreakerConfig:
     max_recovery_timeout: float = 300.0
     backoff_multiplier: float = 2.0
 
+    def __post_init__(self):
+        if self.success_threshold > self.half_open_max_calls:
+            raise ValueError(
+                f"success_threshold ({self.success_threshold}) must be <= "
+                f"half_open_max_calls ({self.half_open_max_calls})"
+            )
+
 
 class CircuitBreakerOpen(Exception):
     """Raised when circuit is open and request is rejected."""

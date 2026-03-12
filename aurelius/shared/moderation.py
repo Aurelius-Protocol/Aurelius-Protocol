@@ -100,7 +100,7 @@ class OpenAIModerationProvider(ModerationProvider):
             failure_threshold=5,
             recovery_timeout=60.0,
             half_open_max_calls=1,
-            success_threshold=2,
+            success_threshold=1,
         )
         self._circuit_breaker = get_circuit_breaker("openai-moderation", cb_config)
 

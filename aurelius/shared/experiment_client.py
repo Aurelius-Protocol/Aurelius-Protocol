@@ -264,7 +264,7 @@ DEFAULT_PROMPT_EXPERIMENT = ExperimentDefinition(
 # Default moral-reasoning experiment definition for backward compatibility
 # Used as fallback when API is unavailable or cache is empty
 DEFAULT_MORAL_REASONING_EXPERIMENT = ExperimentDefinition(
-    id="moral-reasoning",
+    id="moral_reasoning",
     name="Moral Reasoning Evaluation",
     version=1,
     experiment_type="push",
@@ -326,7 +326,7 @@ class ExperimentClient:
                 failure_threshold=3,
                 recovery_timeout=60.0,
                 half_open_max_calls=1,
-                success_threshold=2,
+                success_threshold=1,
             ),
         )
 
@@ -445,7 +445,7 @@ class ExperimentClient:
             self._cache = dict(CORE_EXPERIMENT_DEFAULTS)
             self._registrations = {}  # Empty - all miners auto-registered for core experiments
             self._reward_allocation = RewardAllocation(
-                allocations={"moral-reasoning": 100.0, "prompt": 0.0},
+                allocations={"moral_reasoning": 100.0, "prompt": 0.0},
                 burn_percentage=0.0,
                 redistribute_unused=True,
                 version=1,
@@ -674,7 +674,7 @@ class ExperimentClient:
         Returns:
             True if registered, False otherwise
         """
-        if experiment_id in ("prompt", "moral-reasoning"):
+        if experiment_id in ("prompt", "moral_reasoning"):
             # All miners are auto-registered for default experiments
             return True
 

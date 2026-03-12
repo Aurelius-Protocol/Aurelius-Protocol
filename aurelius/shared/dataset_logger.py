@@ -131,6 +131,7 @@ class DatasetLogger:
         # Submission statistics
         self.submissions_successful = 0
         self.submissions_failed = 0
+        self.submissions_expired = 0
 
         # Telemetry tracer - import Config here to avoid circular import
         from aurelius.shared.config import Config
@@ -156,15 +157,39 @@ class DatasetLogger:
         self.worker_thread.start()
         bt.logging.info("Dataset logger: Background worker thread started")
 
+    # Maximum age (in seconds) for a queued entry before it's considered stale.
+    # Auth timestamps have a 5-minute (300s) tolerance on staging and 30s on production.
+    # Use 240s (4 min) as the cutoff so entries are skipped before they'd cause auth
+    # failures even on the most lenient server config.
+    _MAX_QUEUE_AGE_SECONDS = 240
+
     def _worker(self):
         """Background worker that processes the queue."""
         while self.running:
             try:
-                # Get entry from queue (blocks with timeout)
-                entry = self.queue.get(timeout=1.0)
-                if entry is None:  # Poison pill to stop worker
+                # Get item from queue (blocks with timeout)
+                item = self.queue.get(timeout=1.0)
+                if item is None:  # Poison pill to stop worker
                     bt.logging.info("Dataset logger: Received stop signal")
                     break
+
+                # Unpack (entry, queued_at) tuple
+                entry, queued_at = item
+
+                # Check if the entry has been in the queue too long.
+                # The auth signature will be generated at send time, but if the
+                # queue is severely backed up, the entry data is stale and the
+                # server may reject it or it wastes resources sending old data.
+                age = time.time() - queued_at
+                if age > self._MAX_QUEUE_AGE_SECONDS:
+                    self.submissions_expired += 1
+                    bt.logging.debug(
+                        f"Dataset logger: Skipping stale entry "
+                        f"(age={age:.0f}s, limit={self._MAX_QUEUE_AGE_SECONDS}s, "
+                        f"total_expired={self.submissions_expired})"
+                    )
+                    self.queue.task_done()
+                    continue
 
                 bt.logging.debug("Dataset logger: Processing queued entry")
                 # Try to submit to central API
@@ -218,39 +243,40 @@ class DatasetLogger:
 
     def _do_submit_to_api(self, entry: DatasetEntry, max_retries: int) -> tuple[bool, int | None, int]:
         """Internal method to perform the API submission with retries."""
-        headers = {
-            "Content-Type": "application/json",
-        }
-
         # Serialize body once — used for both hashing and sending to ensure consistency
         data = asdict(entry)
         body_json = json.dumps(data, separators=(',', ':'), sort_keys=True)
 
-        # Add wallet signature for authenticated submissions
-        if self.wallet:
-            try:
-                timestamp = int(time.time())
-                hotkey = self.wallet.hotkey.ss58_address
-                # Compute body hash to bind signature to payload (prevents replay with different body)
-                body_hash = hashlib.sha256(body_json.encode()).hexdigest()
-                message = f"aurelius-submission:{timestamp}:{hotkey}:{body_hash}"
-                signature = self.wallet.hotkey.sign(message.encode()).hex()
-                headers.update({
-                    "X-Validator-Hotkey": hotkey,
-                    "X-Signature": signature,
-                    "X-Timestamp": str(timestamp),
-                    "X-Body-Hash": body_hash,
-                })
-            except Exception as e:
-                bt.logging.error(
-                    f"Failed to sign dataset submission: {e} "
-                    f"(wallet path: {self.wallet.path if hasattr(self.wallet, 'path') else 'unknown'})"
-                )
+        # Pre-compute body hash (stable across retries since body doesn't change)
+        body_hash = hashlib.sha256(body_json.encode()).hexdigest() if self.wallet else None
 
         last_status_code = None
 
         for attempt in range(max_retries):
             try:
+                # Build headers fresh each attempt so the auth timestamp is always
+                # current.  The body hash is stable (body doesn't change between
+                # retries), but the timestamp and signature must be regenerated to
+                # stay within the server's tolerance window.
+                headers: dict[str, str] = {"Content-Type": "application/json"}
+                if self.wallet:
+                    try:
+                        timestamp = int(time.time())
+                        hotkey = self.wallet.hotkey.ss58_address
+                        message = f"aurelius-submission:{timestamp}:{hotkey}:{body_hash}"
+                        signature = self.wallet.hotkey.sign(message.encode()).hex()
+                        headers.update({
+                            "X-Validator-Hotkey": hotkey,
+                            "X-Signature": signature,
+                            "X-Timestamp": str(timestamp),
+                            "X-Body-Hash": body_hash,
+                        })
+                    except Exception as e:
+                        bt.logging.error(
+                            f"Failed to sign dataset submission: {e} "
+                            f"(wallet path: {self.wallet.path if hasattr(self.wallet, 'path') else 'unknown'})"
+                        )
+
                 # Send body_json directly (not json=data) to ensure the exact bytes
                 # that were hashed are what the server receives
                 response = self._session.post(
@@ -444,9 +470,10 @@ class DatasetLogger:
             self._save_local(entry)
 
         # Queue for central API submission (non-blocking)
+        # Store (entry, queued_at) so the worker can detect stale entries
         if self.central_api_endpoint:
             try:
-                self.queue.put_nowait(entry)
+                self.queue.put_nowait((entry, time.time()))
                 bt.logging.debug(f"Dataset logger: Entry queued (queue size: {self.queue.qsize()})")
             except Full:
                 self.submissions_failed += 1
@@ -517,8 +544,10 @@ class DatasetLogger:
             remaining_items = []
             while not self.queue.empty():
                 try:
-                    entry = self.queue.get_nowait()
-                    if entry is not None:  # Skip poison pill
+                    item = self.queue.get_nowait()
+                    if item is not None:  # Skip poison pill
+                        # Queue items are (entry, queued_at) tuples
+                        entry, _queued_at = item
                         remaining_items.append(entry)
                 except Exception:
                     break
@@ -548,4 +577,5 @@ class DatasetLogger:
             "queue_size": self.queue.qsize() if self.central_api_endpoint else 0,
             "submissions_successful": self.submissions_successful,
             "submissions_failed": self.submissions_failed,
+            "submissions_expired": self.submissions_expired,
         }

@@ -94,9 +94,11 @@ class ValidatorHealthChecker:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(self.timeout)
 
-            result = sock.connect_ex((host, port))
-            latency_ms = (time.time() - start_time) * 1000
-            sock.close()
+            try:
+                result = sock.connect_ex((host, port))
+                latency_ms = (time.time() - start_time) * 1000
+            finally:
+                sock.close()
 
             if result == 0:
                 return HealthCheckResult(

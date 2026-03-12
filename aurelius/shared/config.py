@@ -286,6 +286,15 @@ class Config:
     MINER_MAX_VALIDATORS: int = int(os.getenv("MINER_MAX_VALIDATORS", "10"))
     MINER_MIN_VALIDATOR_STAKE: float = float(os.getenv("MINER_MIN_VALIDATOR_STAKE", "0"))
 
+    # Miner Data & History Configuration
+    MINER_DATA_DIR: str = os.getenv("MINER_DATA_DIR", os.path.expanduser("~/.aurelius"))
+    MINER_HISTORY_ENABLED: bool = os.getenv("MINER_HISTORY_ENABLED", "true").lower() == "true"
+    MINER_HISTORY_RETENTION_DAYS: int = int(os.getenv("MINER_HISTORY_RETENTION_DAYS", "30"))
+
+    # Miner Smart Validator Selection
+    MINER_SMART_SELECTION: bool = os.getenv("MINER_SMART_SELECTION", "true").lower() == "true"
+    MINER_SELECTION_STAKE_WEIGHT: float = float(os.getenv("MINER_SELECTION_STAKE_WEIGHT", "0.6"))
+
     # Subtensor Lock Timeout (seconds to wait for blockchain RPC lock)
     SUBTENSOR_LOCK_TIMEOUT: float = float(os.getenv("SUBTENSOR_LOCK_TIMEOUT", "30.0"))
 

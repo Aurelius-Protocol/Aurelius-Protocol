@@ -257,6 +257,11 @@ class Validator:
         self._cached_metagraph = None
         self._metagraph_lock = threading.RLock()
 
+        # Cached network context to reduce subtensor lock contention
+        self._network_context_cache: dict = {}
+        self._network_context_cache_time: float = 0.0
+        self._network_context_cache_ttl: float = 30.0
+
         # Thread pool for background tasks (prevents DoS via thread explosion)
         # Limits concurrent background operations to prevent resource exhaustion
         self.background_executor = ThreadPoolExecutor(
@@ -496,7 +501,7 @@ class Validator:
             )
 
             config = ExperimentConfig(
-                name="moral-reasoning",
+                name="moral_reasoning",
                 experiment_type=ExperimentType.PUSH,
                 weight_allocation=1.0,  # 100% allocation — sole active experiment
                 enabled=True,
@@ -504,7 +509,7 @@ class Validator:
             )
             experiment = MoralReasoningExperiment(core=self, config=config)
             self._moral_reasoning_experiment = experiment
-            self.experiment_manager.experiments["moral-reasoning"] = experiment
+            self.experiment_manager.experiments["moral_reasoning"] = experiment
             bt.logging.info("Registered 'moral-reasoning' experiment")
         except Exception as e:
             bt.logging.warning(f"Could not register moral reasoning experiment: {e}")
@@ -920,7 +925,7 @@ class Validator:
         self._update_submission_status(token, "PROCESSING")
 
         try:
-            if experiment_id == "moral-reasoning" and hasattr(self, "_moral_reasoning_experiment"):
+            if experiment_id == "moral_reasoning" and hasattr(self, "_moral_reasoning_experiment"):
                 result_dict = self._process_moral_reasoning_background(
                     token, prompt, miner_hotkey,
                 )
@@ -1246,7 +1251,7 @@ class Validator:
 
         # Delegate to moral reasoning experiment if applicable
         # (placed AFTER rate limit checks to prevent bypass)
-        if effective_experiment == "moral-reasoning":
+        if effective_experiment == "moral_reasoning":
             if hasattr(self, "_moral_reasoning_experiment"):
                 return self._moral_reasoning_experiment._handle_scenario(synapse)
             else:
@@ -2456,6 +2461,9 @@ class Validator:
         """
         Collect network context information for logging.
 
+        Uses a 30s TTL cache to avoid subtensor lock contention from
+        background threads. On lock timeout, returns stale cached values.
+
         Args:
             miner_hotkey: Hotkey of the miner (optional)
 
@@ -2464,38 +2472,64 @@ class Validator:
         """
         context = {"subnet_uid": Config.BT_NETUID}
 
-        try:
-            if self.subtensor:
-                # Lock only for block height and validator stake (lightweight RPCs)
-                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
-                    context["block_height"] = self.subtensor.block
+        now = time.time()
+        cache_age = now - self._network_context_cache_time
+        cache_fresh = cache_age < self._network_context_cache_ttl
 
-                    if self.wallet:
+        # Return cached values if fresh (no lock needed)
+        if cache_fresh and self._network_context_cache:
+            context.update(self._network_context_cache)
+        elif self.subtensor:
+            # Cache is stale — try to refresh under lock
+            try:
+                with self._timed_lock(self.subtensor_lock, "subtensor_lock"):
+                    # Double-check: another thread may have refreshed while we waited
+                    if time.time() - self._network_context_cache_time < self._network_context_cache_ttl:
+                        context.update(self._network_context_cache)
+                    else:
+                        fresh = {}
                         try:
-                            validator_stake = self.subtensor.get_stake_for_coldkey_and_hotkey(
-                                hotkey_ss58=self.wallet.hotkey.ss58_address,
-                                coldkey_ss58=self.wallet.coldkeypub.ss58_address,
-                            )
-                            context["validator_stake"] = float(validator_stake)
+                            fresh["block_height"] = self.subtensor.block
                         except Exception:
                             pass
 
-                # Use cached metagraph for miner stake (avoids expensive RPC under lock)
-                if miner_hotkey:
-                    try:
-                        metagraph = self._get_cached_metagraph()
-                        if metagraph is not None:
-                            for uid, hotkey in enumerate(metagraph.hotkeys):
-                                if hotkey == miner_hotkey:
-                                    miner_stake = metagraph.S[uid]
-                                    context["miner_stake"] = float(miner_stake)
-                                    break
-                    except Exception:
-                        pass
-        except TimeoutError:
-            bt.logging.debug("subtensor_lock timeout in _get_network_context, skipping")
-        except Exception as e:
-            bt.logging.debug(f"Could not collect full network context: {e}")
+                        if self.wallet:
+                            try:
+                                validator_stake = self.subtensor.get_stake_for_coldkey_and_hotkey(
+                                    hotkey_ss58=self.wallet.hotkey.ss58_address,
+                                    coldkey_ss58=self.wallet.coldkeypub.ss58_address,
+                                )
+                                fresh["validator_stake"] = float(validator_stake)
+                            except Exception:
+                                pass
+
+                        self._network_context_cache = fresh
+                        self._network_context_cache_time = time.time()
+                        context.update(fresh)
+            except TimeoutError:
+                # Graceful degradation: use stale cache instead of empty context
+                if self._network_context_cache:
+                    bt.logging.debug("subtensor_lock timeout in _get_network_context, using stale cache")
+                    context.update(self._network_context_cache)
+                else:
+                    bt.logging.debug("subtensor_lock timeout in _get_network_context, no cache available")
+            except Exception as e:
+                bt.logging.debug(f"Could not collect full network context: {e}")
+                if self._network_context_cache:
+                    context.update(self._network_context_cache)
+
+        # Miner stake lookup uses cached metagraph (already outside the lock)
+        if miner_hotkey:
+            try:
+                metagraph = self._get_cached_metagraph()
+                if metagraph is not None:
+                    for uid, hotkey in enumerate(metagraph.hotkeys):
+                        if hotkey == miner_hotkey:
+                            miner_stake = metagraph.S[uid]
+                            context["miner_stake"] = float(miner_stake)
+                            break
+            except Exception:
+                pass
 
         return context
 

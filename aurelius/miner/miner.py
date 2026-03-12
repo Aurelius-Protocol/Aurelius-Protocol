@@ -7,9 +7,11 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import bittensor as bt
 
+from aurelius.miner.dashboard import Dashboard
 from aurelius.miner.errors import (
     DiagnosticsFormatter,
     ErrorCategory,
@@ -17,12 +19,14 @@ from aurelius.miner.errors import (
     create_error,
 )
 from aurelius.miner.health import ValidatorHealthChecker
+from aurelius.miner.history import SubmissionHistory, SubmissionRecord
 from aurelius.miner.registration import (
     list_registrations,
     register_for_experiment,
     withdraw_from_experiment,
 )
 from aurelius.miner.retry import RetryConfig, RetryHandler
+from aurelius.miner.validator_preferences import ValidatorPreferences
 from aurelius.shared.config import Config, ConfigurationError
 from aurelius.shared.protocol import PromptSynapse, SubmissionStatusSynapse
 
@@ -110,17 +114,23 @@ def discover_validators(
     metagraph,
     min_stake: float = 0.0,
     max_count: int | None = None,
+    preferences: ValidatorPreferences | None = None,
 ) -> list[int]:
     """
-    Discover eligible validators from metagraph, sorted by stake (highest first).
+    Discover eligible validators from metagraph, sorted by composite score.
+
+    When preferences are provided and smart selection is enabled, validators
+    are ranked by a composite score blending stake with historical performance.
+    Otherwise falls back to pure stake-descending ordering.
 
     Args:
         metagraph: Bittensor metagraph object
         min_stake: Minimum stake required (default: 0.0)
         max_count: Maximum number of validators to return (default: None = all)
+        preferences: Optional ValidatorPreferences for intelligent ranking
 
     Returns:
-        List of validator UIDs sorted by stake (highest first) that:
+        List of validator UIDs sorted by score (highest first) that:
         - Have stake >= min_stake
         - Are currently serving (axon.is_serving)
     """
@@ -143,11 +153,16 @@ def discover_validators(
 
         eligible.append((uid, stake))
 
-    # Sort by stake descending (highest first)
-    eligible.sort(key=lambda x: x[1], reverse=True)
+    if not eligible:
+        return []
 
-    # Extract UIDs only
-    sorted_uids = [uid for uid, _ in eligible]
+    # Use smart ranking if preferences available and has data
+    if preferences is not None and Config.MINER_SMART_SELECTION and preferences.validators:
+        sorted_uids = preferences.rank(eligible)
+    else:
+        # Fallback: sort by stake descending (highest first)
+        eligible.sort(key=lambda x: x[1], reverse=True)
+        sorted_uids = [uid for uid, _ in eligible]
 
     # Limit count if specified
     if max_count and len(sorted_uids) > max_count:
@@ -403,6 +418,8 @@ def send_prompt(
             return ""
 
     # --- Phase 1: Submit prompt and get token ---
+    query_start = time.time()
+
     def do_submit():
         return dendrite.query(
             axons=target_axon,
@@ -459,6 +476,17 @@ def send_prompt(
         # Fallback: validator may still use legacy sync flow — check for response
         if result_synapse and hasattr(result_synapse, "response") and result_synapse.response:
             _display_legacy_response(result_synapse, effective_colors)
+            if Config.MINER_HISTORY_ENABLED:
+                try:
+                    history = SubmissionHistory(data_dir=Config.MINER_DATA_DIR, retention_days=Config.MINER_HISTORY_RETENTION_DAYS)
+                    legacy_latency_ms = (time.time() - query_start) * 1000
+                    record = _record_from_synapse(
+                        result_synapse, validator_uid, latency_ms=legacy_latency_ms,
+                        experiment_id=experiment_id or "prompt",
+                    )
+                    history.record(record)
+                except Exception as e:
+                    bt.logging.debug(f"History recording failed: {e}")
             return result_synapse.response
 
         error = create_error(ErrorCategory.VALIDATOR_BUSY, context)
@@ -536,15 +564,51 @@ def send_prompt(
         print(f"\n{YELLOW}Polling timed out after {max_poll_time}s. Token: {token}{RESET}")
         return ""
 
-    # Display results
+    # Display results and record to history
+    # Use submit latency (not total poll time) for the history record
+    submit_latency_ms = (poll_start - query_start) * 1000
+
+    history_inst: SubmissionHistory | None = None
+    if Config.MINER_HISTORY_ENABLED:
+        try:
+            history_inst = SubmissionHistory(data_dir=Config.MINER_DATA_DIR, retention_days=Config.MINER_HISTORY_RETENTION_DAYS)
+        except Exception as e:
+            bt.logging.debug(f"History init failed: {e}")
+
     if status == "COMPLETED" and status_result.result:
         _display_async_result(status_result, effective_colors)
+        if history_inst:
+            try:
+                record = _record_from_async_result(
+                    status_result, prompt, validator_uid, latency_ms=submit_latency_ms,
+                )
+                history_inst.record(record)
+            except Exception as e:
+                bt.logging.debug(f"History recording failed: {e}")
         return status_result.result.get("response", "")
     elif status == "FAILED":
         print(f"\n{YELLOW}Processing failed: {status_result.error_message or 'Unknown error'}{RESET}")
+        if history_inst:
+            try:
+                record = _record_from_error(
+                    prompt, validator_uid, status_result.error_message or "Processing failed",
+                    experiment_id=experiment_id or "prompt", latency_ms=submit_latency_ms,
+                )
+                history_inst.record(record)
+            except Exception as e:
+                bt.logging.debug(f"History recording failed: {e}")
         return ""
     elif status == "TIMEOUT":
         print(f"\n{YELLOW}Processing timed out on validator side{RESET}")
+        if history_inst:
+            try:
+                record = _record_from_error(
+                    prompt, validator_uid, "Timeout on validator side",
+                    experiment_id=experiment_id or "prompt", latency_ms=submit_latency_ms,
+                )
+                history_inst.record(record)
+            except Exception as e:
+                bt.logging.debug(f"History recording failed: {e}")
         return ""
     else:
         print(f"\n{YELLOW}Final status: {status}. Token: {token}{RESET}")
@@ -581,7 +645,7 @@ def _display_async_result(status_synapse: SubmissionStatusSynapse, use_colors: b
     print(f"{BOLD}RESULT FROM VALIDATOR{RESET} (experiment: {experiment_id})")
     print("=" * 60)
 
-    if experiment_id == "moral-reasoning":
+    if experiment_id == "moral_reasoning":
         quality = result.get("quality_score", 0)
         screening = result.get("screening", "?")
         final = result.get("final_score", 0)
@@ -601,6 +665,35 @@ def _display_async_result(status_synapse: SubmissionStatusSynapse, use_colors: b
         if signals:
             true_count = sum(1 for v in signals.values() if v)
             print(f"Signals:        {true_count}/{len(signals)} true")
+
+        # Dimension scores breakdown
+        dim_scores = result.get("dimension_scores", {})
+        if dim_scores:
+            print("\nDimension Scores:")
+            for dim_name, dim_val in dim_scores.items():
+                if isinstance(dim_val, (int, float)):
+                    print(f"  {dim_name:25s}: {dim_val:.3f}")
+
+        # Judge summary
+        judge_summary = result.get("judge_summary")
+        if judge_summary:
+            print(f"\nJudge Summary:  {judge_summary[:200]}")
+
+        # Rejection reason (especially useful for gatekeeper rejections)
+        rejection_reason = result.get("rejection_reason")
+        if rejection_reason:
+            print(f"Rejection:      {RED}{rejection_reason}{RESET}")
+
+        # Miner stats (same pattern as prompt experiment)
+        miner_stats = result.get("miner_stats", {})
+        if miner_stats:
+            print(f"\nSubmissions:    {miner_stats.get('submission_count', '?')}")
+            hr = miner_stats.get("hit_rate")
+            if hr is not None:
+                print(f"Hit Rate:       {hr:.1%}")
+            nov = miner_stats.get("novelty_avg")
+            if nov is not None:
+                print(f"Novelty Avg:    {nov:.3f}")
 
         if response_text:
             print("\nResponse preview:")
@@ -639,6 +732,87 @@ def _display_async_result(status_synapse: SubmissionStatusSynapse, use_colors: b
     print("=" * 60 + "\n")
 
 
+def _record_from_async_result(
+    status_synapse: SubmissionStatusSynapse,
+    prompt: str,
+    validator_uid: int,
+    latency_ms: float = 0.0,
+) -> SubmissionRecord:
+    """Create a SubmissionRecord from an async polling result."""
+    result = status_synapse.result or {}
+    experiment_id = status_synapse.experiment_id or "prompt"
+    miner_stats = result.get("miner_stats", {})
+
+    return SubmissionRecord(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        experiment_id=experiment_id,
+        validator_uid=validator_uid,
+        prompt_hash=SubmissionRecord.hash_prompt(prompt),
+        danger_score=(
+            result.get("danger_score")
+            if result.get("danger_score") is not None
+            else result.get("final_score")
+        ),
+        accepted=(
+            result.get("accepted")
+            if result.get("accepted") is not None
+            else (result.get("screening") == "PASS")
+        ),
+        rejection_reason=result.get("rejection_reason"),
+        rejection_code=None,
+        novelty_avg=miner_stats.get("novelty_avg"),
+        hit_rate=miner_stats.get("hit_rate"),
+        submission_count=miner_stats.get("submission_count"),
+        latency_ms=latency_ms,
+        model_used=result.get("model_used"),
+        success=True,
+    )
+
+
+def _record_from_synapse(
+    synapse: PromptSynapse,
+    validator_uid: int,
+    latency_ms: float = 0.0,
+    experiment_id: str = "prompt",
+) -> SubmissionRecord:
+    """Create a SubmissionRecord from a PromptSynapse response."""
+    return SubmissionRecord(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        experiment_id=experiment_id,
+        validator_uid=validator_uid,
+        prompt_hash=SubmissionRecord.hash_prompt(synapse.prompt),
+        danger_score=synapse.danger_score,
+        accepted=synapse.accepted,
+        rejection_reason=synapse.rejection_reason,
+        rejection_code=synapse.rejection_code,
+        novelty_avg=synapse.miner_novelty_avg,
+        hit_rate=synapse.miner_hit_rate,
+        submission_count=synapse.miner_submission_count,
+        latency_ms=latency_ms,
+        model_used=synapse.model_used,
+        success=True,
+    )
+
+
+def _record_from_error(
+    prompt: str,
+    validator_uid: int,
+    error_message: str,
+    experiment_id: str = "prompt",
+    latency_ms: float = 0.0,
+) -> SubmissionRecord:
+    """Create a SubmissionRecord for a failed query."""
+    return SubmissionRecord(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        experiment_id=experiment_id,
+        validator_uid=validator_uid,
+        prompt_hash=SubmissionRecord.hash_prompt(prompt),
+        success=False,
+        error_message=error_message,
+        latency_ms=latency_ms,
+    )
+
+
 def send_prompt_multi(
     prompt: str,
     validator_uids: list[int] | None = None,
@@ -657,6 +831,7 @@ def send_prompt_multi(
     skip_preflight: bool = False,
     use_colors: bool | None = None,
     experiment_id: str | None = None,
+    shutdown_event: threading.Event | None = None,
 ) -> dict[int, ValidatorQueryResult]:
     """
     Send a prompt to multiple validators in parallel.
@@ -700,7 +875,8 @@ def send_prompt_multi(
             max_attempts=effective_retries,
             initial_delay_seconds=Config.MINER_RETRY_DELAY,
             max_delay_seconds=Config.MINER_RETRY_MAX_DELAY,
-        )
+        ),
+        shutdown_event=shutdown_event,
     )
 
     context = {
@@ -753,6 +929,18 @@ def send_prompt_multi(
         print(formatter.format_error(error, context))
         return {}
 
+    # Load validator preferences for smart selection
+    prefs: ValidatorPreferences | None = None
+    if Config.MINER_SMART_SELECTION:
+        try:
+            prefs = ValidatorPreferences(
+                data_dir=Config.MINER_DATA_DIR,
+                stake_weight=Config.MINER_SELECTION_STAKE_WEIGHT,
+            )
+        except Exception as e:
+            bt.logging.warning(f"Failed to load validator preferences: {e}")
+            prefs = None
+
     # Determine which validators to query
     if validator_uids is not None:
         # Use specified UIDs
@@ -766,6 +954,7 @@ def send_prompt_multi(
             metagraph=metagraph,
             min_stake=effective_stake,
             max_count=effective_max,
+            preferences=prefs,
         )
 
     if not target_uids:
@@ -872,6 +1061,12 @@ def send_prompt_multi(
     if not isinstance(responses, list):
         responses = [responses]
 
+    if len(target_uids) != len(responses):
+        bt.logging.warning(
+            f"Response count mismatch: expected {len(target_uids)} but got {len(responses)}. "
+            "Some results may be missing."
+        )
+
     for uid, response in zip(target_uids, responses):
         if response is None:
             query_result = ValidatorQueryResult(
@@ -921,7 +1116,9 @@ def send_prompt_multi(
                 uid=uid,
                 success=True,
                 synapse=result_synapse,
-                latency_ms=query_duration_ms / len(target_uids),  # Approximate per-validator
+                # dendrite.query() returns a batch — individual per-validator latency
+                # is unavailable, so we approximate by splitting total time evenly.
+                latency_ms=query_duration_ms / len(target_uids),
             )
             results[uid] = query_result
             progress.record_result(query_result)
@@ -940,6 +1137,35 @@ def send_prompt_multi(
 
     # Merge with unhealthy results from health check
     all_results = {**unhealthy_results, **results}
+
+    # Record to history and update validator preferences
+    if Config.MINER_HISTORY_ENABLED:
+        try:
+            history = SubmissionHistory(data_dir=Config.MINER_DATA_DIR, retention_days=Config.MINER_HISTORY_RETENTION_DAYS)
+            effective_exp = experiment_id or "prompt"
+            for uid, qr in all_results.items():
+                if qr.success and qr.synapse:
+                    record = _record_from_synapse(
+                        qr.synapse, uid, latency_ms=qr.latency_ms,
+                        experiment_id=effective_exp,
+                    )
+                else:
+                    record = _record_from_error(
+                        prompt, uid, qr.error_message or "Unknown error",
+                        experiment_id=effective_exp, latency_ms=qr.latency_ms,
+                    )
+                history.record(record)
+        except Exception as e:
+            bt.logging.debug(f"History recording failed: {e}")
+
+    if prefs is not None:
+        try:
+            for uid, qr in all_results.items():
+                accepted = qr.synapse.accepted if qr.success and qr.synapse else None
+                prefs.update(uid, success=qr.success, accepted=accepted, latency_ms=qr.latency_ms)
+            prefs.save()
+        except Exception as e:
+            bt.logging.debug(f"Validator preferences update failed: {e}")
 
     # Show progress summary
     progress.show_query_complete()
@@ -1288,6 +1514,49 @@ Experiment Registration:
         help="List all experiment registrations for this miner",
     )
 
+    # History & dashboard arguments
+    insights_group = parser.add_argument_group("history & dashboard")
+    insights_group.add_argument(
+        "--history",
+        nargs="?",
+        const=20,
+        type=int,
+        metavar="N",
+        help="Show last N submissions (default: 20) with summary stats",
+    )
+    insights_group.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Show performance dashboard (default: last 24h)",
+    )
+    insights_group.add_argument(
+        "--dashboard-period",
+        type=str,
+        default="24h",
+        help="Dashboard time period: 1h, 24h, 7d (default: 24h)",
+    )
+    insights_group.add_argument(
+        "--dashboard-experiment",
+        type=str,
+        default=None,
+        help="Filter dashboard to a specific experiment",
+    )
+    insights_group.add_argument(
+        "--dashboard-json",
+        action="store_true",
+        help="Output dashboard as JSON",
+    )
+    insights_group.add_argument(
+        "--no-smart-selection",
+        action="store_true",
+        help="Disable intelligent validator selection (use pure stake sort)",
+    )
+    insights_group.add_argument(
+        "--show-validator-stats",
+        action="store_true",
+        help="Display per-validator performance statistics",
+    )
+
     args = parser.parse_args()
 
     # Override netuid if provided
@@ -1310,6 +1579,32 @@ Experiment Registration:
     if args.register_experiment or args.withdraw_experiment or args.list_registrations:
         _handle_experiment_commands(args, use_colors)
         return
+
+    # Handle history/dashboard/validator-stats commands (no prompt needed)
+    if args.history is not None:
+        history = SubmissionHistory(data_dir=Config.MINER_DATA_DIR, retention_days=Config.MINER_HISTORY_RETENTION_DAYS)
+        print(history.format_table(count=args.history, use_colors=use_colors))
+        return
+
+    if args.dashboard or args.dashboard_json:
+        history = SubmissionHistory(data_dir=Config.MINER_DATA_DIR, retention_days=Config.MINER_HISTORY_RETENTION_DAYS)
+        dashboard = Dashboard(history)
+        print(dashboard.render(
+            period=args.dashboard_period,
+            experiment=args.dashboard_experiment,
+            json_output=args.dashboard_json,
+            use_colors=use_colors,
+        ))
+        return
+
+    if args.show_validator_stats:
+        prefs = ValidatorPreferences(data_dir=Config.MINER_DATA_DIR)
+        print(prefs.get_stats_table(use_colors=use_colors))
+        return
+
+    # Override smart selection if requested
+    if args.no_smart_selection:
+        Config.MINER_SMART_SELECTION = False
 
     # Validate prompt is provided for sending prompts
     if not args.prompt:
@@ -1365,6 +1660,7 @@ Experiment Registration:
             skip_preflight=args.no_preflight,
             use_colors=use_colors,
             experiment_id=args.experiment,
+            shutdown_event=shutdown_event,
         )
         display_multi_results(results, use_colors=use_colors)
 
