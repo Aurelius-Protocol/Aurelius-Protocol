@@ -489,7 +489,7 @@ class ExperimentManager:
         tracer = get_tracer("aurelius.experiments") if Config.TELEMETRY_ENABLED else None
 
         # Default to "moral_reasoning" experiment (prompt experiment deprecated)
-        experiment_id = synapse.experiment_id or "moral_reasoning"
+        experiment_id = (synapse.experiment_id or "moral_reasoning").replace("-", "_")
 
         bt.logging.debug(
             f"Routing submission: experiment_id={experiment_id}, "

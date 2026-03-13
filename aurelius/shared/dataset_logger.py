@@ -482,7 +482,7 @@ class DatasetLogger:
             timing_metrics=timing_metrics,
             network_context=network_context,
             prompt_embedding=prompt_embedding,
-            experiment_id=experiment_id,  # T087: Per-experiment tracking
+            experiment_id=experiment_id.replace("_", "-") if experiment_id else experiment_id,  # T087: Per-experiment tracking
             moral_reasoning_data=moral_reasoning_data,
         )
 
