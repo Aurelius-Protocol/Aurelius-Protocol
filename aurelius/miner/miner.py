@@ -186,7 +186,7 @@ def send_prompt(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
-    experiment_id: str | None = None,
+    experiment_id: str = "moral_reasoning",
     poll_interval: int = 5,
     max_poll_time: int = 300,
     submit_only: bool = False,
@@ -330,8 +330,7 @@ def send_prompt(
         experiment_id=experiment_id,
     )
 
-    if experiment_id:
-        bt.logging.info(f"Experiment: {experiment_id}")
+    bt.logging.info(f"Experiment: {experiment_id}")
 
     # Determine target axon based on mode
     target_axon = None
@@ -482,7 +481,7 @@ def send_prompt(
                     legacy_latency_ms = (time.time() - query_start) * 1000
                     record = _record_from_synapse(
                         result_synapse, validator_uid, latency_ms=legacy_latency_ms,
-                        experiment_id=experiment_id or "prompt",
+                        experiment_id=experiment_id,
                     )
                     history.record(record)
                 except Exception as e:
@@ -592,7 +591,7 @@ def send_prompt(
             try:
                 record = _record_from_error(
                     prompt, validator_uid, status_result.error_message or "Processing failed",
-                    experiment_id=experiment_id or "prompt", latency_ms=submit_latency_ms,
+                    experiment_id=experiment_id, latency_ms=submit_latency_ms,
                 )
                 history_inst.record(record)
             except Exception as e:
@@ -604,7 +603,7 @@ def send_prompt(
             try:
                 record = _record_from_error(
                     prompt, validator_uid, "Timeout on validator side",
-                    experiment_id=experiment_id or "prompt", latency_ms=submit_latency_ms,
+                    experiment_id=experiment_id, latency_ms=submit_latency_ms,
                 )
                 history_inst.record(record)
             except Exception as e:
@@ -740,7 +739,7 @@ def _record_from_async_result(
 ) -> SubmissionRecord:
     """Create a SubmissionRecord from an async polling result."""
     result = status_synapse.result or {}
-    experiment_id = status_synapse.experiment_id or "prompt"
+    experiment_id = status_synapse.experiment_id or "moral_reasoning"  # synapse field can be None
     miner_stats = result.get("miner_stats", {})
 
     return SubmissionRecord(
@@ -773,7 +772,7 @@ def _record_from_synapse(
     synapse: PromptSynapse,
     validator_uid: int,
     latency_ms: float = 0.0,
-    experiment_id: str = "prompt",
+    experiment_id: str = "moral_reasoning",
 ) -> SubmissionRecord:
     """Create a SubmissionRecord from a PromptSynapse response."""
     return SubmissionRecord(
@@ -798,7 +797,7 @@ def _record_from_error(
     prompt: str,
     validator_uid: int,
     error_message: str,
-    experiment_id: str = "prompt",
+    experiment_id: str = "moral_reasoning",
     latency_ms: float = 0.0,
 ) -> SubmissionRecord:
     """Create a SubmissionRecord for a failed query."""
@@ -830,7 +829,7 @@ def send_prompt_multi(
     max_retries: int | None = None,
     skip_preflight: bool = False,
     use_colors: bool | None = None,
-    experiment_id: str | None = None,
+    experiment_id: str = "moral_reasoning",
     shutdown_event: threading.Event | None = None,
 ) -> dict[int, ValidatorQueryResult]:
     """
@@ -1019,8 +1018,7 @@ def send_prompt_multi(
         experiment_id=experiment_id,
     )
 
-    if experiment_id:
-        bt.logging.info(f"Experiment: {experiment_id}")
+    bt.logging.info(f"Experiment: {experiment_id}")
 
     # Define the query operation for retry
     def do_query():
@@ -1142,17 +1140,16 @@ def send_prompt_multi(
     if Config.MINER_HISTORY_ENABLED:
         try:
             history = SubmissionHistory(data_dir=Config.MINER_DATA_DIR, retention_days=Config.MINER_HISTORY_RETENTION_DAYS)
-            effective_exp = experiment_id or "prompt"
             for uid, qr in all_results.items():
                 if qr.success and qr.synapse:
                     record = _record_from_synapse(
                         qr.synapse, uid, latency_ms=qr.latency_ms,
-                        experiment_id=effective_exp,
+                        experiment_id=experiment_id,
                     )
                 else:
                     record = _record_from_error(
                         prompt, uid, qr.error_message or "Unknown error",
-                        experiment_id=effective_exp, latency_ms=qr.latency_ms,
+                        experiment_id=experiment_id, latency_ms=qr.latency_ms,
                     )
                 history.record(record)
         except Exception as e:
@@ -1438,7 +1435,7 @@ Experiment Registration:
         help=f"Minimum validator stake requirement (default: {Config.MINER_MIN_VALIDATOR_STAKE})",
     )
     parser.add_argument("--netuid", type=int, default=None, help=f"Override the netuid (default: {Config.BT_NETUID})")
-    parser.add_argument("--experiment", type=str, default=None, help="Target experiment ID (e.g., 'moral-reasoning')")
+    parser.add_argument("--experiment", type=str, default="moral_reasoning", help="Target experiment ID (default: moral_reasoning)")
 
     # Model specification arguments
     parser.add_argument("--vendor", type=str, default=None, help="AI vendor to use (e.g., 'openai', 'anthropic')")
