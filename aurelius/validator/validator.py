@@ -504,7 +504,7 @@ class Validator:
                 name="moral_reasoning",
                 experiment_type=ExperimentType.PUSH,
                 weight_allocation=1.0,  # 100% allocation — sole active experiment
-                enabled=True,
+                enabled=False,
                 settings={},
             )
             experiment = MoralReasoningExperiment(core=self, config=config)
