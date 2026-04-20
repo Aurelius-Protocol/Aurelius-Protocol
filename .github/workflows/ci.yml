@@ -1,0 +1,209 @@
+name: CI
+
+on:
+  push:
+    branches: [main, testnet]
+    # Publish versioned images on semver tags (e.g. `v1.2.3`). Third-party
+    # operators pin to these tags instead of `:latest` so a bad push to
+    # `main` can't reach them automatically. See `docker-compose.validator.yml`
+    # and VALIDATOR_SETUP.md §Upgrades.
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main, testnet]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff
+      - run: ruff check aurelius/
+      - run: ruff format --check aurelius/
+
+  test:
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e ".[ml,simulation,dev]"
+      - run: pytest tests/ --ignore=tests/e2e --ignore=tests/common/test_embeddings.py -x --tb=short
+
+  docker-build:
+    # Build on main pushes (re-tagging :latest and :<sha>), on testnet pushes
+    # (tagging :testnet and :<sha>), and on semver tag pushes (re-tagging
+    # :vX.Y.Z for third-party pinning — B-2).
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/testnet' ||
+       startsWith(github.ref, 'refs/tags/v'))
+    needs: [lint]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      packages: write
+
+    strategy:
+      matrix:
+        role: [validator, miner]
+
+    steps:
+      - name: Free runner disk space
+        # The ubuntu-latest runner ships ~14 GB free; our image exceeds that
+        # with ML + sim extras, causing "No space left on device" mid-build.
+        # This action frees ~30 GB by removing preinstalled toolchains we
+        # don't use (dotnet, android, haskell, tool-cache, swap).
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - name: Lowercase owner for GHCR
+        id: repo
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ steps.repo.outputs.owner }}/aurelius-${{ matrix.role }}
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - uses: useblacksmith/build-push-action@v2
+        with:
+          context: .
+          file: Dockerfile.node
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            DEFAULT_CMD=aurelius-${{ matrix.role }}
+
+  docker-build-concordia:
+    if: |
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/testnet')
+    needs: [lint]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      # `contents: write` so the digest-pin step below can commit an update
+      # to DEFAULT_CONCORDIA_IMAGE_DIGEST back to main.
+      contents: write
+      packages: write
+
+    steps:
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: true
+
+      - uses: actions/checkout@v4
+
+      - name: Lowercase owner for GHCR
+        id: repo
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ steps.repo.outputs.owner }}/aurelius-concordia
+          tags: |
+            type=sha,prefix=
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: useblacksmith/build-push-action@v2
+        id: build-push
+        with:
+          context: aurelius/simulation/
+          file: aurelius/simulation/Dockerfile.concordia
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Pin CONCORDIA_IMAGE_DIGEST in config.py
+        # Captures the digest emitted by build-push-action and rewrites the
+        # _COMMON["CONCORDIA_IMAGE_DIGEST"] default in aurelius/config.py so
+        # validators in strict mode (REQUIRE_IMAGE_DIGEST=1 on testnet/mainnet)
+        # don't have to set it themselves. Idempotent: only commits when the
+        # digest actually changed, which prevents the auto-commit loop from
+        # running forever — the follow-up CI run will rebuild the validator/
+        # miner images with the pinned digest baked in, then produce the same
+        # concordia digest and short-circuit here.
+        env:
+          NEW_DIGEST: ${{ steps.build-push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          FILE="aurelius/config.py"
+
+          if [ -z "${NEW_DIGEST:-}" ]; then
+            echo "build-push did not emit a digest — skipping pin."
+            exit 0
+          fi
+
+          # Awk: the dict line is `    "CONCORDIA_IMAGE_DIGEST": "<value>",`
+          # Splitting on `"` gives $2=key, $4=value.
+          CURRENT=$(awk -F'"' '/"CONCORDIA_IMAGE_DIGEST":[[:space:]]*"/ {print $4; exit}' "$FILE")
+          echo "current: ${CURRENT:-<empty>}"
+          echo "new:     ${NEW_DIGEST}"
+
+          if [ "$CURRENT" = "$NEW_DIGEST" ]; then
+            echo "Digest unchanged — no commit needed."
+            exit 0
+          fi
+
+          sed -i -E "s|(\"CONCORDIA_IMAGE_DIGEST\":[[:space:]]*\")[^\"]*(\")|\\1${NEW_DIGEST}\\2|" "$FILE"
+
+          UPDATED=$(awk -F'"' '/"CONCORDIA_IMAGE_DIGEST":[[:space:]]*"/ {print $4; exit}' "$FILE")
+          if [ "$UPDATED" != "$NEW_DIGEST" ]; then
+            echo "sed did not rewrite CONCORDIA_IMAGE_DIGEST in $FILE — aborting" >&2
+            exit 1
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$FILE"
+          git commit -m "ci: pin CONCORDIA_IMAGE_DIGEST=${NEW_DIGEST}"
+          git push origin HEAD:${{ github.ref_name }}

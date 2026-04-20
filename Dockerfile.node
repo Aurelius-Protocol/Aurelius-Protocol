@@ -1,0 +1,56 @@
+FROM python:3.11-slim AS builder
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libpq-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy project and install to /install prefix so we can copy only runtime files
+COPY pyproject.toml .
+COPY aurelius/ aurelius/
+
+RUN pip install --no-cache-dir --prefix=/install ".[ml,simulation,llm]"
+
+# Pre-download the sentence-transformers embedding model so validators
+# don't need to fetch it on first startup (~80 MB).
+# Packages are in /install prefix, so add to PYTHONPATH for the download step.
+ENV SENTENCE_TRANSFORMERS_HOME=/app/.model-cache
+RUN PYTHONPATH=/install/lib/python3.11/site-packages python3 -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Runtime-only dependencies (no build tools)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy installed Python packages from builder
+COPY --from=builder /install /usr/local
+
+# Copy pre-cached ML model
+COPY --from=builder /app/.model-cache /app/.model-cache
+ENV SENTENCE_TRANSFORMERS_HOME=/app/.model-cache
+
+# Copy source (needed for package metadata / entry points)
+COPY pyproject.toml .
+COPY aurelius/ aurelius/
+RUN pip install --no-cache-dir --no-deps -e .
+
+# Simulation data directory (Docker-in-Docker volume mount point)
+ENV SIM_DATA_DIR=/sim-data
+
+# Non-root user (with home dir for bittensor SDK)
+RUN useradd -r -u 1000 -m appuser \
+    && mkdir -p /app/data /app/configs /sim-data /home/appuser/.bittensor \
+    && chown -R appuser:appuser /app /sim-data /home/appuser
+
+USER appuser
+
+# Default role — overridden at build time for registry images.
+ARG DEFAULT_CMD=aurelius-miner
+ENV AURELIUS_CMD="${DEFAULT_CMD}"
+CMD ["sh", "-c", "exec ${AURELIUS_CMD}"]
