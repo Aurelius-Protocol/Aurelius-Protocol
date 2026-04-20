@@ -93,7 +93,9 @@ class TestH5ClockDriftPeriodic:
         v = Validator.__new__(Validator)
         # Avoid real Bittensor / API side-effects in the test.
         v._check_clock_drift = AsyncMock()
-        v._last_clock_drift_check = 0.0
+        # Far enough in the past that the first tick always fires — monotonic
+        # can be small on fresh CI boots, so 0.0 isn't guaranteed-stale.
+        v._last_clock_drift_check = -1e9
         return v
 
     async def test_first_tick_runs_the_check(self):
