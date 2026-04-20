@@ -166,6 +166,12 @@ jobs:
           context: aurelius/simulation/
           file: aurelius/simulation/Dockerfile.concordia
           push: true
+          # Disable attestations — the legacy v3 repo's prior pushes left
+          # provenance blobs in aurelius-concordia whose HEAD-checks our
+          # token can't satisfy, causing 403 on every re-push. Supply-chain
+          # guarantee is already provided by the digest-pin step below.
+          provenance: false
+          sbom: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
 
