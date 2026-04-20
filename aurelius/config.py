@@ -64,7 +64,10 @@ _COMMON = {
     "SIM_BASE_TIMEOUT": "600",
     "SIM_BASE_RAM_MB": "4096",
     "SIM_CPU_COUNT": "2",
-    "SIM_ALLOWED_LLM_HOSTS": "api.deepseek.com,api.openai.com,api.anthropic.com",
+    # Egress allowlist for Concordia simulation containers — empty by default
+    # (operators acknowledge unrestricted egress). Populate with a
+    # comma-separated host list to re-enable iptables enforcement.
+    "SIM_ALLOWED_LLM_HOSTS": "",
     # Validator pipeline
     "MAX_CONFIG_SIZE": "65536",
     "WORK_ID_FRESHNESS_SECONDS": "300",

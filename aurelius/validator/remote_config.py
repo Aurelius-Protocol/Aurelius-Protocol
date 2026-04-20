@@ -12,6 +12,7 @@ Merge semantics:
 """
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from typing import Any
@@ -402,6 +403,14 @@ class RemoteConfig:
 
     @property
     def sim_allowed_llm_hosts(self) -> list[str]:
+        # Explicit local opt-out: operator sets SIM_ALLOWED_LLM_HOSTS="" in
+        # .env to signal "no sim egress enforcement", even on testnet/mainnet
+        # where remote config is otherwise authoritative. Honor it as a hard
+        # override so a stale remote-side allowlist can't resurrect rules on
+        # hosts where the operator has explicitly acknowledged unrestricted
+        # egress.
+        if os.environ.get("SIM_ALLOWED_LLM_HOSTS") == "":
+            return []
         # Handle local-env / missing-remote fallback using the already-list Config attr
         if self._environment == "local":
             return list(getattr(self._local, "SIM_ALLOWED_LLM_HOSTS", []) or [])
