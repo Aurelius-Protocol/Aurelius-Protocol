@@ -33,7 +33,9 @@ ml = [
     # which removed the ClassifierMixin class-attribute pattern that older
     # xgboost versions relied on via _get_type().
     "xgboost>=2.1.0,<3",
-    "scikit-learn>=1.4.0,<2",
+    # scikit-learn 1.7 dropped the class-level _estimator_type attribute
+    # from ClassifierMixin that xgboost 2.1.x still reads via _get_type().
+    "scikit-learn>=1.4.0,<1.7",
 ]
 tools = [
     "openai>=1.0.0,<2",
