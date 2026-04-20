@@ -54,7 +54,7 @@ _COMMON = {
     "LOG_FORMAT": "text",
     # Simulation
     "CONCORDIA_IMAGE_NAME": "ghcr.io/aurelius-protocol/aurelius-concordia",
-    "CONCORDIA_IMAGE_DIGEST": "sha256:1c913947a3b15fa42371195687edc870eefd788d7d79626e95410e15d075288d",
+    "CONCORDIA_IMAGE_DIGEST": "sha256:da277d6c740fe68e9b922f78d111d25d730db79618c06e49729433fbe0fa5d6c",
     # CS-06: when "1", refuse to run simulations without a pinned image digest.
     # Defaults to "0" in local/testlab; set to "1" in mainnet/testnet profiles.
     "REQUIRE_IMAGE_DIGEST": "0",
