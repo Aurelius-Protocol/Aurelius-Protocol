@@ -29,8 +29,19 @@ WORKDIR /app
 # Without it, the validator fails closed on startup to avoid silent
 # unrestricted egress (ASSERTIONS.md §Concordia). The validator container
 # additionally needs CAP_NET_ADMIN at runtime — granted in the compose.
+#
+# libcap2-bin is installed for setcap; we grant the iptables multi-call
+# binaries the CAP_NET_ADMIN/CAP_NET_RAW file capabilities so the
+# non-root appuser can invoke iptables without the container running
+# as root. Relies on cap_add: NET_ADMIN at the compose level to populate
+# the container's bounding set; file caps then admit the effective set
+# to the process.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 curl iptables \
+    libpq5 curl iptables libcap2-bin \
+    && setcap 'cap_net_admin,cap_net_raw+eip' /usr/sbin/xtables-nft-multi \
+    && ([ -e /usr/sbin/xtables-legacy-multi ] \
+        && setcap 'cap_net_admin,cap_net_raw+eip' /usr/sbin/xtables-legacy-multi \
+        || true) \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
