@@ -23,9 +23,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Runtime-only dependencies (no build tools)
+# Runtime-only dependencies (no build tools).
+# iptables is required by aurelius.simulation.docker_runner.RestrictedNetwork
+# to enforce per-sim-container egress allowlisting (SIM_ALLOWED_LLM_HOSTS).
+# Without it, the validator fails closed on startup to avoid silent
+# unrestricted egress (ASSERTIONS.md §Concordia). The validator container
+# additionally needs CAP_NET_ADMIN at runtime — granted in the compose.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 curl \
+    libpq5 curl iptables \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder
