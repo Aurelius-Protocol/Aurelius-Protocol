@@ -103,6 +103,7 @@ def _render_cycle_summary(stats: dict) -> str:
         parts.append(f"failures={fail_parts}")
     return " | ".join(parts)
 
+
 # CS-11: periodic Docker daemon health check cadence (seconds).
 DOCKER_HEALTH_CHECK_INTERVAL = 300.0
 # H-5: periodic clock-drift re-check cadence. Running it once per tempo is
@@ -353,8 +354,7 @@ class Validator:
             )
         else:
             logger.info(
-                "Burn UID %d verified (hotkey=%s, unstaked) — emissions from "
-                "burn_mode will route here as intended.",
+                "Burn UID %d verified (hotkey=%s, unstaked) — emissions from burn_mode will route here as intended.",
                 BURN_UID,
                 burn_hotkey[:16],
             )
@@ -635,9 +635,9 @@ class Validator:
 
                 # One structured summary line per cycle so operators don't
                 # have to grep across 10 different per-stage INFO lines.
-                logger.info(_render_cycle_summary(self._build_cycle_stats(
-                    responses=responses, cycle_start=cycle_start
-                )))
+                logger.info(
+                    _render_cycle_summary(self._build_cycle_stats(responses=responses, cycle_start=cycle_start))
+                )
 
                 polling_interval = self.remote_config.polling_interval
                 await asyncio.sleep(polling_interval)

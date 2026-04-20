@@ -76,9 +76,7 @@ def check_environment(environment: str, network: str, netuid: int) -> CheckResul
             f"testnet requires BT_SUBTENSOR_NETWORK=test, got {network!r}",
             "Set BT_SUBTENSOR_NETWORK=test (testnet is SN455 on test).",
         )
-    return CheckResult(
-        "environment", PASS, f"env={environment} network={network} netuid={netuid}"
-    )
+    return CheckResult("environment", PASS, f"env={environment} network={network} netuid={netuid}")
 
 
 def check_testlab_safety(testlab_mode: bool, network: str) -> CheckResult:
@@ -350,9 +348,7 @@ def run_all() -> tuple[list[CheckResult], int]:
         )
     )
     checks.append(_safe(check_llm_api_key, Config.LLM_API_KEY, Config.LLM_BASE_URL))
-    checks.append(
-        _safe(check_iptables, list(getattr(Config, "SIM_ALLOWED_LLM_HOSTS", []) or []))
-    )
+    checks.append(_safe(check_iptables, list(getattr(Config, "SIM_ALLOWED_LLM_HOSTS", []) or [])))
     checks.append(_safe(check_docker_daemon))
     from aurelius.config import _DATA_DIR
 

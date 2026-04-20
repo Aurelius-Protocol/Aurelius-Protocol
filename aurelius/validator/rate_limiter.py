@@ -109,8 +109,7 @@ class RateLimiter:
                     discarded_future,
                 )
             logger.info(
-                "Loaded rate limiter state: %d UIDs with active windows "
-                "(discarded %d stale, %d future-dated)",
+                "Loaded rate limiter state: %d UIDs with active windows (discarded %d stale, %d future-dated)",
                 len(self._timestamps),
                 discarded_stale,
                 discarded_future,

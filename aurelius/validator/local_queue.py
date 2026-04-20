@@ -190,8 +190,7 @@ class LocalSubmissionQueue:
                         return
                 else:
                     logger.warning(
-                        "Queue file %s has no schema_version header; "
-                        "treating as legacy v0. Next save will upgrade it.",
+                        "Queue file %s has no schema_version header; treating as legacy v0. Next save will upgrade it.",
                         self._persist_path,
                     )
             except (json.JSONDecodeError, ValueError, TypeError):
