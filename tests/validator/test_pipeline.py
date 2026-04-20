@@ -362,3 +362,88 @@ class TestNoveltyFailClosed:
         assert result.failed_stage == "novelty_check"
         novelty_stage = [s for s in result.stages if s.stage == "novelty_check"][0]
         assert "fail closed" in novelty_stage.reason.lower()
+
+
+class TestGatekeeperCheck:
+    """Stage 7.5: remote-configured LLM rubric evaluating the transcript."""
+
+    def _make_transcript(self):
+        from aurelius.simulation.transcript import Transcript, TranscriptEvent
+
+        return Transcript(
+            agent_names=["Dr. Chen", "Nurse Patel"],
+            events=[
+                TranscriptEvent(type="action", agent="Dr. Chen", content="We must follow protocol."),
+                TranscriptEvent(type="action", agent="Nurse Patel", content="The child needs it first."),
+            ],
+            completed=True,
+        )
+
+    def _pipeline_with_prompt(self, prompt: str, llm_reply: str | None = None, llm_raises: bool = False):
+        remote_config = RemoteConfig()
+        remote_config._config = {"gatekeeper_prompt": prompt}
+        rate_limiter = RateLimiter(max_submissions=3, window_seconds=4320)
+        pipeline = ValidationPipeline(
+            api_client=None,
+            remote_config=remote_config,
+            rate_limiter=rate_limiter,
+        )
+        llm = AsyncMock()
+        if llm_raises:
+            llm.complete.side_effect = RuntimeError("LLM down")
+        else:
+            llm.complete.return_value = llm_reply or ""
+        pipeline._llm_provider = llm
+        pipeline._last_transcript = self._make_transcript()
+        return pipeline, llm
+
+    async def test_empty_prompt_skips_stage(self):
+        pipeline, llm = self._pipeline_with_prompt(prompt="")
+        result = await pipeline._gatekeeper_check(_valid_config())
+        assert result is None
+        llm.complete.assert_not_called()
+
+    async def test_pass_reply_passes(self):
+        pipeline, llm = self._pipeline_with_prompt(
+            prompt="Judge this scenario.", llm_reply="PASS\nGenuine tradeoff engaged."
+        )
+        result = await pipeline._gatekeeper_check(_valid_config())
+        assert result is not None
+        assert result.stage == "gatekeeper"
+        assert result.passed
+        llm.complete.assert_awaited_once()
+
+    async def test_fail_reply_fails(self):
+        pipeline, llm = self._pipeline_with_prompt(
+            prompt="Judge this scenario.", llm_reply="FAIL\nTranscript was incoherent."
+        )
+        result = await pipeline._gatekeeper_check(_valid_config())
+        assert result is not None
+        assert result.stage == "gatekeeper"
+        assert not result.passed
+        assert "Gatekeeper rejected" in result.reason
+        assert "incoherent" in result.reason
+
+    async def test_llm_exception_is_fail_open(self):
+        pipeline, _ = self._pipeline_with_prompt(prompt="Judge this.", llm_raises=True)
+        result = await pipeline._gatekeeper_check(_valid_config())
+        assert result is None
+
+    async def test_ambiguous_reply_is_fail_open(self):
+        pipeline, _ = self._pipeline_with_prompt(
+            prompt="Judge this.", llm_reply="I'm not sure, maybe?"
+        )
+        result = await pipeline._gatekeeper_check(_valid_config())
+        assert result is None
+
+    async def test_no_llm_provider_skips_stage(self):
+        pipeline, _ = self._pipeline_with_prompt(prompt="Judge this.")
+        pipeline._llm_provider = None
+        result = await pipeline._gatekeeper_check(_valid_config())
+        assert result is None
+
+    async def test_no_transcript_skips_stage(self):
+        pipeline, _ = self._pipeline_with_prompt(prompt="Judge this.")
+        pipeline._last_transcript = None
+        result = await pipeline._gatekeeper_check(_valid_config())
+        assert result is None

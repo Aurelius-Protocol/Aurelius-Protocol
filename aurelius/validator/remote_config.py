@@ -455,3 +455,15 @@ class RemoteConfig:
     @property
     def queue_max_age_seconds(self) -> int:
         return self._resolve("queue_max_age_seconds", "QUEUE_MAX_AGE_SECONDS", int)
+
+    @property
+    def gatekeeper_prompt(self) -> str:
+        """LLM rubric (served by Central API) the validator consults between
+        the Concordia simulation and work-token deduction. Empty string
+        disables the stage. Purely remote-controlled — no local env override
+        so a leaked local env can't disable the gate on a misconfigured node.
+        """
+        raw = self._config.get("gatekeeper_prompt")
+        if not raw:
+            return ""
+        return str(raw)

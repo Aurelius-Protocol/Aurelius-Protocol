@@ -148,6 +148,16 @@ class ValidationPipeline:
         if not result.passed:
             return PipelineResult(weight=WEIGHT_FAIL, stages=stages)
 
+        # Stage 7.5: Gatekeeper — LLM rubric served by the Central API decides
+        # whether the transcript represents a valid moral-reasoning outcome.
+        # Rubric is remote-controlled so operators tune it without re-deploying
+        # validators and so miners can't optimize against a leaked prompt.
+        gatekeeper_result = await self._gatekeeper_check(config)
+        if gatekeeper_result is not None:
+            stages.append(gatekeeper_result)
+            if not gatekeeper_result.passed:
+                return PipelineResult(weight=WEIGHT_FAIL, stages=stages)
+
         # Stage 7b: Semantic coherence check (controlled by remote config)
         if self._llm_provider and self._last_transcript and config:
             if self.remote_config.semantic_coherence_enabled:
@@ -520,6 +530,48 @@ class ValidationPipeline:
             logger.error("Simulation error: %s", e)
             return StageResult(passed=False, reason=f"Simulation error: {e}", stage="simulate")
 
+    async def _gatekeeper_check(self, config: dict) -> StageResult | None:
+        """Ask a remote-configured LLM rubric whether the just-run simulation
+        represents a valid moral-reasoning outcome.
+
+        Returns None when the feature is disabled (empty remote prompt, no
+        transcript, or no LLM provider) so the caller skips appending a stage
+        record. Fail-open on any LLM error or ambiguous reply — a quality gate
+        outage should not reject every submission.
+        """
+        prompt = self.remote_config.gatekeeper_prompt if self.remote_config else ""
+        if not prompt:
+            return None
+        if self._last_transcript is None or self._llm_provider is None:
+            return None
+
+        summary = _summarize_transcript_for_gatekeeper(self._last_transcript, config)
+        try:
+            reply = await self._llm_provider.complete(
+                summary,
+                system=f"{prompt}\n\nRespond with exactly PASS or FAIL on the first line, then one sentence.",
+                max_tokens=256,
+                temperature=0.0,
+            )
+        except Exception as e:
+            logger.warning("gatekeeper LLM call failed (fail-open): %s", e)
+            return None
+
+        stripped = reply.strip()
+        first_word = stripped.split(None, 1)[0].upper() if stripped else ""
+        if first_word.startswith("FAIL"):
+            # Keep the full reply (verdict + explanation) up to 256 chars so
+            # operators can see why the gatekeeper rejected in pipeline logs.
+            return StageResult(
+                passed=False,
+                reason=f"Gatekeeper rejected: {stripped[:256]}",
+                stage="gatekeeper",
+            )
+        if first_word.startswith("PASS"):
+            return StageResult(passed=True, reason="OK", stage="gatekeeper")
+        logger.warning("gatekeeper: ambiguous LLM reply %r (fail-open)", reply[:120])
+        return None
+
     async def _semantic_coherence_check(self, config: dict) -> StageResult | None:
         """Run LLM-based semantic coherence check on simulation output."""
         if not self._last_transcript or not self._llm_provider:
@@ -576,3 +628,33 @@ class ValidationPipeline:
             return StageResult(passed=False, reason=reason, stage="deduct_work_token")
         except Exception as e:
             return StageResult(passed=False, reason=f"Deduction failed: {e}", stage="deduct_work_token")
+
+
+def _summarize_transcript_for_gatekeeper(transcript, config: dict, char_cap: int = 6000) -> str:
+    """Build the user message sent to the gatekeeper LLM.
+
+    Includes the scenario premise, agent roster, and an ordered list of
+    transcript events (truncated to `char_cap` characters total) so the LLM
+    can judge whether the simulation actually engaged with a moral tradeoff.
+    Separate from the system prompt (which carries the remote-configured
+    rubric) so the rubric owner controls the evaluation criteria.
+    """
+    parts: list[str] = []
+    premise = (config or {}).get("premise") or ""
+    if premise:
+        parts.append(f"PREMISE:\n{premise}\n")
+    agents = getattr(transcript, "agent_names", None) or []
+    if agents:
+        parts.append("AGENTS: " + ", ".join(agents) + "\n")
+    events = getattr(transcript, "events", None) or []
+    if events:
+        parts.append("TRANSCRIPT:")
+        for ev in events:
+            agent = getattr(ev, "agent", None)
+            content = getattr(ev, "content", "") or ""
+            prefix = f"[{agent}] " if agent else ""
+            parts.append(f"{prefix}{content}")
+    summary = "\n".join(parts)
+    if len(summary) > char_cap:
+        summary = summary[:char_cap] + "\n… [truncated]"
+    return summary

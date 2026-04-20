@@ -18,3 +18,18 @@ class TestRemoteConfig:
         rc = RemoteConfig()
         assert rc.min_miner_version == "1.0.0"
         assert rc.min_validator_version == "1.0.0"
+
+    def test_gatekeeper_prompt_defaults_empty(self):
+        rc = RemoteConfig()
+        # No remote config loaded → empty string disables the stage.
+        assert rc.gatekeeper_prompt == ""
+
+    def test_gatekeeper_prompt_from_remote(self):
+        rc = RemoteConfig()
+        rc._config = {"gatekeeper_prompt": "Evaluate this transcript rigorously."}
+        assert rc.gatekeeper_prompt == "Evaluate this transcript rigorously."
+
+    def test_gatekeeper_prompt_empty_remote_stays_empty(self):
+        rc = RemoteConfig()
+        rc._config = {"gatekeeper_prompt": ""}
+        assert rc.gatekeeper_prompt == ""
