@@ -541,8 +541,10 @@ class ValidationPipeline:
         """
         prompt = self.remote_config.gatekeeper_prompt if self.remote_config else ""
         if not prompt:
+            logger.debug("gatekeeper: skipped (no remote prompt configured)")
             return None
         if self._last_transcript is None or self._llm_provider is None:
+            logger.debug("gatekeeper: skipped (no transcript or LLM provider)")
             return None
 
         summary = _summarize_transcript_for_gatekeeper(self._last_transcript, config)
@@ -562,12 +564,14 @@ class ValidationPipeline:
         if first_word.startswith("FAIL"):
             # Keep the full reply (verdict + explanation) up to 256 chars so
             # operators can see why the gatekeeper rejected in pipeline logs.
+            logger.info("gatekeeper: FAIL %s", stripped[:200])
             return StageResult(
                 passed=False,
                 reason=f"Gatekeeper rejected: {stripped[:256]}",
                 stage="gatekeeper",
             )
         if first_word.startswith("PASS"):
+            logger.info("gatekeeper: PASS %s", stripped[:200])
             return StageResult(passed=True, reason="OK", stage="gatekeeper")
         logger.warning("gatekeeper: ambiguous LLM reply %r (fail-open)", reply[:120])
         return None
