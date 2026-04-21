@@ -123,8 +123,12 @@ _profile = PROFILES[ENVIRONMENT]
 
 
 def _get(key: str, fallback: str = "") -> str:
-    """Resolve config: env var > profile default > fallback."""
-    return os.getenv(key, _profile.get(key, fallback))
+    """Resolve config: env var (if non-empty) > profile default > fallback.
+
+    Empty-string env vars are treated as unset so operators can't accidentally
+    clobber a profile default by writing `KEY=` in their .env.
+    """
+    return os.getenv(key) or _profile.get(key, fallback)
 
 
 # ---------------------------------------------------------------------------
