@@ -39,7 +39,7 @@ Prerequisites:
 - A Bittensor wallet registered on mainnet `netuid 37`
   (`btcli subnet register --netuid 37 --network finney`) — registration costs TAO
 - An OpenAI-compatible LLM API key — [DeepSeek](https://platform.deepseek.com/) is the
-  default and cheapest; OpenAI, Anthropic, and other compatible providers also work
+  default and cheapest.
 
 ### 1. Write a minimal `.env`
 
