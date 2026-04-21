@@ -701,7 +701,13 @@ class DockerSimulationRunner:
         if self._restricted_network:
             # External LLM API — use restricted network
             return self._restricted_network.network_name
-        # No API key or network setup failed — fully isolated
+        if self.llm_api_key:
+            # External LLM configured but operator opted out of restricted
+            # egress (empty SIM_ALLOWED_LLM_HOSTS). Use bridge so the sim
+            # container can reach the LLM API on the public internet;
+            # isolation is explicitly waived.
+            return "bridge"
+        # No LLM configured — fully isolated (no reason to grant network).
         return "none"
 
     def _compute_limits(self, agent_count: int) -> dict:
