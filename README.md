@@ -6,35 +6,39 @@ accepted scenarios through [Concordia](https://github.com/google-deepmind/concor
 generative-agent simulations. The resulting transcripts form training data that improves
 LLM performance on moral reasoning benchmarks (MoReBench).
 
-> **This is the `testnet` branch.** It tracks the v3 codebase and publishes
-> `:testnet`-tagged images to public GHCR on every push. For mainnet, see
-> [Mainnet](#mainnet).
+Every push to `main` or `testnet` publishes container images to public GHCR.
+No registry auth is required to pull.
 
-| | |
-|---|---|
-| Testnet subnet | `netuid 455` on the Bittensor `test` network |
-| Validator image | `ghcr.io/aurelius-protocol/aurelius-validator:testnet` |
-| Miner image | `ghcr.io/aurelius-protocol/aurelius-miner:testnet` |
-| Simulation image | `ghcr.io/aurelius-protocol/aurelius-concordia:testnet` (pulled automatically by validators) |
-| GHCR auth | Not required — images are public |
+| | Testnet (subnet 455, `test` network) | Mainnet (subnet 37, `finney`) |
+|---|---|---|
+| Validator image | `ghcr.io/aurelius-protocol/aurelius-validator:testnet` | `ghcr.io/aurelius-protocol/aurelius-validator:latest` |
+| Miner image | `ghcr.io/aurelius-protocol/aurelius-miner:testnet` | `ghcr.io/aurelius-protocol/aurelius-miner:latest` |
+| Simulation image | `…/aurelius-concordia:testnet` (pulled automatically by validators) | `…/aurelius-concordia:latest` |
+
+The quickstart examples below use the testnet tags. For mainnet, set
+`ENVIRONMENT=mainnet` in the `.env` and swap every `:testnet` reference to
+`:latest`.
 
 ---
 
 ## Quickstart — Testnet Validator
 
-Three commands. Prerequisites:
+Use **Docker Compose with docker-socket-proxy** (below) for anything long-lived —
+the validator needs Docker daemon access to spawn sandboxed simulation
+containers, and the proxy restricts that to the minimum set of API calls it
+actually uses. A raw-socket `docker run` for quick exploration is shown at the
+end of this section with appropriate caveats.
 
-- Docker 20.10+
+Prerequisites:
+
+- Docker 20.10+ and `docker compose`
 - A Bittensor wallet registered on testnet `netuid 455`
   (`btcli subnet register --netuid 455 --network test`)
 - An OpenAI-compatible LLM API key — [DeepSeek](https://platform.deepseek.com/) is the
   default and cheapest; OpenAI / Anthropic also work
 
 ```bash
-# 1. Pull the latest testnet image
-docker pull ghcr.io/aurelius-protocol/aurelius-validator:testnet
-
-# 2. Write a minimal .env — ENVIRONMENT=testnet auto-sets netuid, network,
+# 1. Write a minimal .env — ENVIRONMENT=testnet auto-sets netuid, network,
 #    Central API URL, simulation resources, and safety flags.
 cat > .env <<'EOF'
 ENVIRONMENT=testnet
@@ -43,8 +47,56 @@ WALLET_HOTKEY=your-hotkey
 LLM_API_KEY=sk-...
 EOF
 
-# 3. Run. Validators need Docker daemon access to spawn sandboxed simulation
-#    containers — hence the /var/run/docker.sock mount.
+# 2. Create a compose file with a docker-socket-proxy sidecar so the
+#    validator can launch sim containers without direct daemon access.
+cat > docker-compose.yml <<'EOF'
+services:
+  aurelius-validator:
+    image: ghcr.io/aurelius-protocol/aurelius-validator:testnet
+    container_name: aurelius-validator
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+    cap_add: [NET_ADMIN]
+    volumes:
+      - ~/.bittensor/wallets:/home/appuser/.bittensor/wallets:ro
+      - ./data:/app/data
+      - ./simdata:/sim-data
+    depends_on: [docker-proxy]
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    container_name: docker-proxy
+    restart: unless-stopped
+    environment: { CONTAINERS: 1, IMAGES: 1, POST: 1, NETWORKS: 1 }
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+EOF
+
+# 3. Bring it up
+mkdir -p data simdata
+docker compose up -d
+docker compose logs -f aurelius-validator
+```
+
+<details>
+<summary><b>Raw-socket single-command alternative — local exploration only</b></summary>
+
+A one-container equivalent that mounts `/var/run/docker.sock` directly. **Not
+recommended for long-running deployments**: any compromise of the validator
+container can drive the host's Docker daemon directly (`docker run
+--privileged`, mount arbitrary volumes, etc.). Use only on a disposable VM
+where you control nothing else.
+
+```bash
+docker pull ghcr.io/aurelius-protocol/aurelius-validator:testnet
+cat > .env <<'EOF'
+ENVIRONMENT=testnet
+WALLET_NAME=your-wallet
+WALLET_HOTKEY=your-hotkey
+LLM_API_KEY=sk-...
+EOF
 mkdir -p data simdata
 docker run -d \
   --name aurelius-validator \
@@ -55,12 +107,9 @@ docker run -d \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/simdata:/sim-data" \
   ghcr.io/aurelius-protocol/aurelius-validator:testnet
-
-docker logs -f aurelius-validator
 ```
 
-For stricter production isolation, use the `docker-socket-proxy` setup in
-[Production Setup](#production-setup-docker-compose) instead of the raw socket mount.
+</details>
 
 ---
 
@@ -161,43 +210,16 @@ any of the remote-tier values — they live server-side.
 
 ---
 
-## Production Setup (Docker Compose)
+## Auto-update via Watchtower (optional add-on)
 
-More robust than `docker run`: adds a `docker-socket-proxy` sidecar so the validator
-never touches the Docker daemon directly, plus watchtower for auto-update on every push
-to the `testnet` branch.
+If you want the validator to roll forward automatically whenever a new
+`:testnet` (or `:latest` for mainnet) image is published, append a watchtower
+service to the compose file from the Quickstart. Watchtower polls GHCR every
+5 minutes and only restarts containers that opt in via the
+`com.centurylinklabs.watchtower.enable: "true"` label.
 
 ```yaml
-# docker-compose.yml
-services:
-  aurelius-validator:
-    image: ghcr.io/aurelius-protocol/aurelius-validator:testnet
-    container_name: aurelius-validator
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      DOCKER_HOST: tcp://docker-proxy:2375
-    volumes:
-      - ~/.bittensor/wallets:/home/appuser/.bittensor/wallets:ro
-      - ./data:/app/data
-      - ./simdata:/sim-data
-    depends_on:
-      - docker-proxy
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
-
-  docker-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
-    container_name: docker-proxy
-    restart: unless-stopped
-    environment:
-      CONTAINERS: 1
-      IMAGES: 1
-      POST: 1
-      NETWORKS: 1
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-
+# append to docker-compose.yml
   watchtower:
     image: containrrr/watchtower
     container_name: watchtower
@@ -212,12 +234,9 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
 ```
 
-Bring it up with `docker compose up -d`. Watchtower polls GHCR every 5 minutes and
-rolls the validator forward whenever the `:testnet` tag is updated. Because GHCR packages
-under `aurelius-protocol` are public, no registry credentials are mounted.
-
-Miners can use a simpler compose (no proxy, no sim-data) if they prefer compose over
-`docker run`.
+Then add `labels: { com.centurylinklabs.watchtower.enable: "true" }` to the
+`aurelius-validator` service block so watchtower manages it. GHCR packages
+under `aurelius-protocol` are public, so no registry credentials are mounted.
 
 ---
 
@@ -228,7 +247,6 @@ For development, or if you prefer not to use Docker:
 ```bash
 git clone https://github.com/Aurelius-Protocol/Aurelius-Protocol.git
 cd Aurelius-Protocol
-git checkout testnet
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -273,10 +291,11 @@ ruff format aurelius/
 - **Concordia isolation.** Every simulation runs in an ephemeral Docker container with
   capped RAM / CPU, egress limited to `SIM_ALLOWED_LLM_HOSTS`, and no persistent
   filesystem outside the mounted `/sim-data`.
-- **Socket proxy.** The raw `/var/run/docker.sock` mount in the quickstart is fine for
-  testnet exploration but exposes full Docker API access. Prefer the
-  `tecnativa/docker-socket-proxy` setup from [Production Setup](#production-setup-docker-compose)
-  for anything long-lived.
+- **Socket proxy.** The Quickstart uses `tecnativa/docker-socket-proxy` so the
+  validator container can only invoke the Docker API calls it actually needs
+  (`CONTAINERS`, `IMAGES`, `NETWORKS`, `POST`). The raw `/var/run/docker.sock`
+  mount is only shown as an exploration alternative and is not recommended for
+  long-running deployments.
 - **Image digest pinning.** `REQUIRE_IMAGE_DIGEST=1` is on by default in the testnet and
   mainnet profiles. The Concordia image digest is auto-pinned by CI after each build,
   so operators don't need to configure `CONCORDIA_IMAGE_DIGEST` themselves — just keep
@@ -289,10 +308,11 @@ ruff format aurelius/
 
 ## Mainnet
 
-Mainnet operation uses `ENVIRONMENT=mainnet` (netuid 37, `finney` network) and images
-tagged `:latest`. The v2→v3 cutover is in progress; until it ships, `:latest` on GHCR
-still holds the legacy v2 code published from `main`. This README covers v3 only —
-follow the repository's releases page for the cutover schedule.
+For mainnet, use `ENVIRONMENT=mainnet` in the `.env` and the `:latest` image
+tag everywhere the quickstart uses `:testnet`. Everything else — compose
+topology, socket proxy, watchtower, `.env` fields — is identical. `:latest`
+tracks the `main` branch; the v2→v3 cutover is complete as of the commit
+that merged v3 to `main`.
 
 ---
 
