@@ -110,6 +110,7 @@ PROFILES: dict[str, dict[str, str]] = {
         "TESTLAB_MODE": "0",
         "QUERY_TIMEOUT": "12",
         "CONTAINER_POOL_SIZE": "2",
+        "CENTRAL_API_URL": "https://new-collector-api-production.up.railway.app",
         "SIM_DATA_DIR": "/sim-data",
         "REQUIRE_IMAGE_DIGEST": "1",
     },
