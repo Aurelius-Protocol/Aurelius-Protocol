@@ -59,6 +59,18 @@ jobs:
             const candidates = [];
             for (const v of versions) {
               const tags = (v.metadata && v.metadata.container && v.metadata.container.tags) || [];
+              if (tags.length === 0) {
+                // Untagged version — almost always a per-arch child manifest
+                // of a tagged manifest-list (linux/amd64, linux/arm64, etc.).
+                // Deleting it orphans the parent, making `docker pull :tag`
+                // fail mid-transfer with "manifest not found". We don't walk
+                // manifest references here, so the safe choice is to protect
+                // every untagged version. Downside: orphaned children of
+                // deleted parents accumulate; acceptable tradeoff vs. the
+                // alternative of bricking active tags.
+                protect.push(v);
+                continue;
+              }
               if (tags.some(t => protectedTagPattern.test(t))) {
                 protect.push(v);
               } else {
