@@ -211,8 +211,10 @@ class Validator:
         than local fallbacks."""
         from aurelius.config import ENVIRONMENT
 
+        gatekeeper_prompt_len = len(self.remote_config.gatekeeper_prompt or "")
+        gatekeeper_status = f"configured ({gatekeeper_prompt_len} chars)" if gatekeeper_prompt_len else "OFF"
         logger.info(
-            "Config summary | env=%s network=%s api_url=%s llm_model=%s llm_base=%s llm_key=%s testlab=%s burn_mode=%s burn_pct=%.0f%% pool_size=%d",
+            "Config summary | env=%s network=%s api_url=%s llm_model=%s llm_base=%s llm_key=%s testlab=%s burn_mode=%s burn_pct=%.0f%% pool_size=%d gatekeeper=%s",
             ENVIRONMENT,
             self.config.NETWORK,
             self.config.CENTRAL_API_URL,
@@ -223,6 +225,7 @@ class Validator:
             self.remote_config.burn_mode,
             self.remote_config.burn_percentage * 100,
             self.remote_config.container_pool_size,
+            gatekeeper_status,
         )
 
     @property
