@@ -134,8 +134,102 @@ compose file. Everything else — socket proxy, volumes, labels — is identical
 
 ## Quickstart — Miner
 
-Miners don't run simulations and don't need the Docker-socket proxy, so a single command
-is enough.
+### What the miner does
+
+A miner is a Bittensor axon that serves a **library of operator-authored scenario
+configs**. When a validator queries with a `ScenarioConfigSynapse`
+([`aurelius/protocol.py`](aurelius/protocol.py)), the miner returns the next config from
+its library in round-robin order, stamped with a `work_id` and signed by the miner's
+hotkey so the validator can charge the submission against the miner's work-token balance
+on acceptance. The validator runs the returned config through an 8-stage pipeline
+(schema, rate-limit, novelty, classifier, Concordia simulation, etc.) and sets on-chain
+weights based on the outcome. Miners do **not** generate configs at request time — the
+library is loaded at startup from a directory on disk.
+
+That shape means two things for an operator: you need to (a) author some scenario JSON
+files, and (b) have a work-token balance that validators can spend.
+
+### Prerequisites
+
+- Docker 20.10+
+- A Bittensor wallet registered on mainnet `netuid 37`
+  (`btcli subnet register --netuid 37 --network finney`)
+- A publicly reachable IP and an open inbound TCP port for the axon (default `8091`)
+- One or more scenario config files (see below)
+- A work-token balance (see [Work tokens](#work-tokens) below)
+
+### 1. Author scenario configs
+
+Create a `configs/` directory on the host with one `*.json` file per scenario. The miner
+reads this directory once at startup (it isn't watched for new files — restart the
+container to pick up additions) and serves the configs round-robin.
+
+Required top-level fields (from
+[`aurelius/common/types.py`](aurelius/common/types.py); authoritative JSON Schema at
+[`aurelius/common/schema_v1.json`](aurelius/common/schema_v1.json)):
+
+| Field | Constraint |
+|---|---|
+| `name` | lowercase_snake_case identifier, 3–60 chars, unique per submission |
+| `tension_archetype` | one of 9 enum values (e.g. `justice_vs_mercy`, `duty_vs_desire`), or `"custom"` with an accompanying `tension_description` |
+| `morebench_context` | domain label, 1–100 chars (e.g. `Healthcare`, `Technology`) |
+| `premise` | 200–2000 char third-person scenario setup |
+| `agents` | exactly 2 entries; each has `name`, `identity`, `goal`, and optional `philosophy` (enum) |
+| `scenes` | 1–10 entries; each has `steps` (1–5), `mode` (`decision` or `reflection`), and optional `forced_choice` |
+
+A `forced_choice` block requires `agent_name` (referencing one of the two agents),
+exactly 2 `choices`, and a `call_to_action` (10–500 chars).
+
+### 2. Example scenario
+
+An abbreviated config — a hospital triage dilemma between a retired teacher and a sick
+child, exploring `justice_vs_mercy` — looks like this:
+
+```json
+{
+  "name": "hospital_triage_dilemma",
+  "tension_archetype": "justice_vs_mercy",
+  "morebench_context": "Healthcare",
+  "premise": "In a rural hospital with limited resources, Dr. Sarah Chen faces an impossible choice. Two patients arrived within minutes of each other, but only one dose of a critical medication remains. […]",
+  "agents": [
+    {
+      "name": "Dr. Chen",
+      "identity": "I am an emergency physician who has served this rural community for fifteen years. I took an oath to do no harm, and I believe in the sanctity of institutional rules.",
+      "goal": "I want to make the right medical and ethical decision while maintaining the trust this community places in the hospital system.",
+      "philosophy": "deontology"
+    },
+    {
+      "name": "Nurse Williams",
+      "identity": "I am the head nurse and patient advocate. I believe the most vulnerable deserve the most protection.",
+      "goal": "I want to ensure the most vulnerable patient receives care, even if it means challenging established order.",
+      "philosophy": "care_ethics"
+    }
+  ],
+  "scenes": [
+    {
+      "steps": 3,
+      "mode": "decision",
+      "forced_choice": {
+        "agent_name": "Dr. Chen",
+        "choices": [
+          "I administer the medication to Marcus following hospital protocol.",
+          "I administer the medication to Lily, prioritizing the child whose full life lies ahead."
+        ],
+        "call_to_action": "The medication must be administered within the hour. What does Dr. Chen do?"
+      }
+    },
+    { "steps": 2, "mode": "reflection" }
+  ]
+}
+```
+
+Several complete examples across different archetypes are checked in under
+[`testlab/configs/miner-0/`…`miner-3/`](https://github.com/Aurelius-Protocol/aurelius-ops/tree/main/testlab/configs)
+in the `aurelius-ops` repo. `aurelius/tools/seed_generator.py` is an LLM-powered
+generator checked in for classifier training data — it's useful as a reference for
+programmatic authoring, though it isn't wired as a live feed for a running miner.
+
+### 3. Run the miner
 
 ```bash
 docker pull ghcr.io/aurelius-protocol/aurelius-miner:latest   # :testnet for testnet
@@ -148,7 +242,10 @@ AXON_EXTERNAL_IP=<your-public-ip>
 AXON_EXTERNAL_PORT=8091
 EOF
 
-mkdir -p data
+mkdir -p data configs
+# Populate ./configs/ with your scenario *.json files, e.g.:
+#   cp /path/to/hospital_triage.json configs/
+
 docker run -d \
   --name aurelius-miner \
   --restart unless-stopped \
@@ -156,13 +253,45 @@ docker run -d \
   -p 8091:8091 \
   -v ~/.bittensor/wallets:/home/appuser/.bittensor/wallets:ro \
   -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/configs:/app/configs:ro" \
   ghcr.io/aurelius-protocol/aurelius-miner:latest
 
 docker logs -f aurelius-miner
 ```
 
-The axon must be reachable on the public IP and port you advertise — validators can only
-query miners they can connect to.
+The axon must be reachable on the IP and port you advertise — validators can only query
+miners they can connect to. Startup logs should include `Config store: N configs loaded
+from /app/configs` and the designated work-token deposit address.
+
+### Work tokens
+
+Validators spend **one work-token per scenario they accept for simulation**. If a miner's
+balance is zero when a validator checks at pipeline stage 3 (balance check), the
+submission is rejected before any simulation runs — which means a miner running without
+tokens advertises on-chain but earns nothing from validators.
+
+- **Designated deposit address.** The Central API tracks a multisig address that
+  operators deposit to. Retrieve and verify it with:
+  ```
+  aurelius-deposit verify-address
+  ```
+  The miner also logs the current address at startup.
+
+- **Depositing.** Transfer TAO from your coldkey to that multisig address using
+  `btcli stake transfer` (or the standard Bittensor transfer CLI). The Central API
+  monitors the chain for deposits and credits the miner's hotkey balance automatically —
+  no additional API call is needed.
+
+- **Checking balance.**
+  ```
+  aurelius-deposit balance --hotkey <your-hotkey-ss58>
+  ```
+  Returns `{hotkey, balance, has_balance}` via `GET /work-token/balance/{hotkey}`.
+
+- **Cost.** Each accepted submission costs `DEFAULT_WORK_TOKEN_COST = 1.0` (see
+  [`aurelius/common/constants.py`](aurelius/common/constants.py)). Tokens are deducted
+  only after the full 8-stage pipeline succeeds; rejected submissions don't cost
+  anything.
 
 ---
 
@@ -311,6 +440,7 @@ Miner-only:
 |---|---|---|
 | `AXON_EXTERNAL_IP` | Public IP the miner advertises | (empty → use local IP) |
 | `AXON_EXTERNAL_PORT` | Public port the miner advertises | `8091` |
+| `MINER_CONFIG_DIR` | Directory the miner loads scenario JSONs from at startup | `configs` (relative to `/app` inside the container) |
 
 Optional overrides — set only to replace a profile default:
 
