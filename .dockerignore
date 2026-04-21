@@ -46,6 +46,8 @@ docs/
 scripts/
 tests/
 *.md
+# Needed by pyproject.toml's `readme = "README.md"` during pip build.
+!README.md
 *.log
 logs/
 
