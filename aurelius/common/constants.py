@@ -35,7 +35,7 @@ DEFAULT_CONCORDIA_LLM_MODEL = "deepseek-chat"
 DEFAULT_CONCORDIA_IMAGE_TAG = "v2.0.0"
 
 # Validator operational defaults (overridable via remote config)
-DEFAULT_BURN_MODE = True
+DEFAULT_BURN_MODE = False
 DEFAULT_BURN_PERCENTAGE = 0.7
 
 # Burn address UID — emissions routed here when burn_mode=True. Must be a UID

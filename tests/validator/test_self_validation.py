@@ -45,9 +45,9 @@ class TestSelfHotkeyExcluded:
         """Validator's own hotkey is excluded when building the weight list."""
         validator = _make_validator()
 
-        # burn_mode defaults to True for production safety — short-circuit it off
-        # here so the per-miner weight distribution path runs. Escape the local-env
-        # bypass so the remote override takes effect.
+        # Escape the local-env bypass so the remote override takes effect, and
+        # force burn_mode off explicitly so the per-miner weight distribution
+        # path runs regardless of what the current local/remote default is.
         validator.remote_config._environment = "testnet"
         validator.remote_config._config["burn_mode"] = False
 

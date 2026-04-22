@@ -36,7 +36,7 @@ _COMMON = {
     "AXON_EXTERNAL_PORT": "",
     "MINER_CONFIG_DIR": "configs",
     # Validator
-    "BURN_MODE": "1",
+    "BURN_MODE": "0",
     "BURN_PERCENTAGE": "0.7",
     "WEIGHT_INTERVAL": "300",
     "CENTRAL_API_URL": "http://localhost:8000",
