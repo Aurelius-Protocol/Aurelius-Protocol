@@ -75,25 +75,26 @@ class Miner:
 
         logger.info("Miner started | wallet=%s hotkey=%s", self.wallet.name, self.wallet.hotkey_str)
 
-        # Fetch and display deposit address for operator convenience
+        # Fetch and display deposit address for operator convenience.
+        # Best-effort: a flaky API must never block miner startup; fall back
+        # to the `aurelius-deposit` CLI if this banner can't be printed.
         try:
-            import httpx
+            from aurelius.common.central_api import CentralAPIClient, CentralAPIError
 
-            resp = httpx.get(f"{self.config.CENTRAL_API_URL}/work-token/designated-address", timeout=5)
-            if resp.status_code == 200:
-                addr = resp.json().get("address", "")
-                if addr:
-                    logger.info("Work-token deposit address: %s", addr)
-                    logger.info(
-                        "To deposit: btcli stake transfer --origin-netuid %d --dest-netuid %d"
-                        " --dest %s --amount <AMOUNT> --network %s",
-                        self.config.NETUID,
-                        self.config.NETUID,
-                        addr,
-                        self.config.NETWORK,
-                    )
-        except Exception:
-            pass  # Non-critical — operator can use aurelius-deposit CLI
+            with CentralAPIClient(self.config.CENTRAL_API_URL, timeout=5) as client:
+                addr = client.get_designated_address().address
+            if addr:
+                logger.info("Work-token deposit address: %s", addr)
+                logger.info(
+                    "To deposit: btcli stake transfer --origin-netuid %d --dest-netuid %d"
+                    " --dest %s --amount <AMOUNT> --network %s",
+                    self.config.NETUID,
+                    self.config.NETUID,
+                    addr,
+                    self.config.NETWORK,
+                )
+        except CentralAPIError as e:
+            logger.debug("Could not fetch deposit address banner: %s", e)
 
     def forward(self, synapse: ScenarioConfigSynapse) -> ScenarioConfigSynapse:
         scenario_config = self.config_store.next()

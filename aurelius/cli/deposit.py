@@ -1,100 +1,103 @@
 """CLI tool for work-token deposit address verification and balance queries."""
 
 import argparse
-import json
 import sys
-from urllib.error import URLError
-from urllib.request import Request, urlopen
+
+from aurelius.common.central_api import CentralAPIClient, CentralAPIError, DesignatedAddressResponse
+from aurelius.common.multisig import derive_multisig_address
 
 
-def _api_get(api_url: str, path: str) -> dict:
-    req = Request(f"{api_url}{path}")
-    req.add_header("Accept", "application/json")
-    with urlopen(req, timeout=10) as resp:
-        return json.loads(resp.read())
+def _verify_address(data: DesignatedAddressResponse) -> None:
+    """Verify the API-claimed deposit address matches what its declared signatory
+    set would derive to. Exits non-zero on inconsistency.
 
+    Multisig accounts have no on-chain "threshold + signatories" record — those
+    are deterministically derived from the inputs. So verification is an
+    off-chain comparison: derive the multisig AccountId from
+    `(signatories, threshold)` ourselves and check it against the API's claim.
 
-def _verify_multisig_on_chain(address: str, expected_threshold: int, expected_signatories: list[str], network: str):
-    """Query the chain to verify multisig configuration matches API claims.
-
-    Returns (verified: bool, reason: str).
+    For single-key deposit addresses the API returns null for both fields; in
+    that case there is nothing to derive, and we print a clear warning so the
+    operator knows the address is not multisig-protected.
     """
+    threshold = data.multisig_threshold
+    signatories = data.signatories
+
+    if threshold is None and signatories is None:
+        print("Single-key deposit address (operator-controlled). No multisig verification possible.")
+        print("Confirm out-of-band that the address belongs to a trusted operator before depositing.")
+        return
+
+    if threshold is None or signatories is None or threshold < 1 or len(signatories) < 1:
+        print(
+            "  ✗ VERIFICATION FAILED: API returned an inconsistent designated-address "
+            f"record (multisig_threshold={threshold!r}, signatories={signatories!r})",
+            file=sys.stderr,
+        )
+        print("DO NOT deposit to this address until the mismatch is resolved.", file=sys.stderr)
+        sys.exit(1)
+
+    if threshold > len(signatories):
+        print(
+            f"  ✗ VERIFICATION FAILED: threshold ({threshold}) exceeds signatory count ({len(signatories)})",
+            file=sys.stderr,
+        )
+        print("DO NOT deposit to this address until the mismatch is resolved.", file=sys.stderr)
+        sys.exit(1)
+
     try:
-        import bittensor as bt
-
-        subtensor = bt.Subtensor(network=network)
-        result = subtensor.substrate.query("Multisig", "Multisigs", [address])
-
-        if result is None or result.value is None:
-            return False, "Address is not a multisig on-chain"
-
-        multisig_info = result.value
-        on_chain_signatories = list(multisig_info.get("signatories", []))
-        on_chain_threshold = multisig_info.get("threshold", 0)
-
-        if on_chain_threshold != expected_threshold:
-            return False, f"Threshold mismatch: API says {expected_threshold}, chain says {on_chain_threshold}"
-
-        expected_set = set(expected_signatories)
-        chain_set = set(on_chain_signatories)
-        if expected_set != chain_set:
-            missing = expected_set - chain_set
-            extra = chain_set - expected_set
-            parts = []
-            if missing:
-                parts.append(f"missing from chain: {missing}")
-            if extra:
-                parts.append(f"unexpected on chain: {extra}")
-            return False, f"Signatory mismatch: {'; '.join(parts)}"
-
-        return True, "On-chain multisig matches API"
-    except ImportError:
-        return False, "bittensor package not installed — cannot verify on-chain"
+        derived = derive_multisig_address(signatories, threshold)
     except Exception as e:
-        return False, f"On-chain verification failed: {e}"
+        print(f"  ✗ VERIFICATION FAILED: could not derive multisig address: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if derived != data.address:
+        print(
+            f"  ✗ VERIFICATION FAILED: derived multisig {derived} does not match "
+            f"API-claimed address {data.address}",
+            file=sys.stderr,
+        )
+        print("DO NOT deposit to this address until the mismatch is resolved.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"  ✓ Verified multisig {threshold}-of-{len(signatories)} → {data.address}")
 
 
 def cmd_verify_address(args):
-    """Fetch designated address from API and verify on-chain multisig configuration."""
+    """Fetch designated address from API and verify the multisig claim is internally consistent."""
     try:
-        data = _api_get(args.api_url, "/work-token/designated-address")
-        print(f"Designated deposit address: {data['address']}")
-        print(f"Multisig threshold:         {data['multisig_threshold']}-of-{len(data['signatories'])}")
-        print("Signatories:")
-        for s in data["signatories"]:
-            print(f"  - {s}")
-        print()
-
-        # On-chain verification
-        print("Verifying on-chain multisig configuration...")
-        verified, reason = _verify_multisig_on_chain(
-            data["address"],
-            data["multisig_threshold"],
-            data["signatories"],
-            args.network,
-        )
-        if verified:
-            print(f"  ✓ {reason}")
-        else:
-            print(f"  ✗ VERIFICATION FAILED: {reason}", file=sys.stderr)
-            print()
-            print("DO NOT deposit to this address until the mismatch is resolved.", file=sys.stderr)
-            sys.exit(1)
-    except URLError as e:
-        print(f"Error: Could not reach API at {args.api_url}: {e}", file=sys.stderr)
+        with CentralAPIClient(args.api_url) as client:
+            data = client.get_designated_address()
+    except CentralAPIError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    print(f"Designated deposit address: {data.address}")
+    if data.multisig_threshold is not None and data.signatories is not None:
+        print(f"Multisig threshold:         {data.multisig_threshold}-of-{len(data.signatories)}")
+        print("Signatories:")
+        for s in data.signatories:
+            print(f"  - {s}")
+    else:
+        print("Multisig threshold:         (single-key)")
+    print()
+
+    print("Verifying designated-address record...")
+    _verify_address(data)
 
 
 def cmd_balance(args):
     """Query work-token balance for a hotkey."""
     try:
-        data = _api_get(args.api_url, f"/work-token/balance/{args.hotkey}")
-        print(f"Hotkey:  {data['hotkey']}")
-        print(f"Balance: {data['balance']}")
-        print(f"Active:  {'yes' if data['has_balance'] else 'no'}")
-    except URLError as e:
-        print(f"Error: Could not reach API at {args.api_url}: {e}", file=sys.stderr)
+        with CentralAPIClient(args.api_url) as client:
+            data = client.get_balance(args.hotkey)
+    except CentralAPIError as e:
+        print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+    print(f"Hotkey:  {data.hotkey}")
+    print(f"Balance: {data.balance if data.balance is not None else '(hidden)'}")
+    print(f"Active:  {'yes' if data.has_balance else 'no'}")
 
 
 def main():
