@@ -33,9 +33,7 @@ def derive_multisig_address(
     if threshold < 1:
         raise ValueError(f"threshold must be >= 1, got {threshold}")
     if len(signatories) < threshold:
-        raise ValueError(
-            f"need at least {threshold} signatories to satisfy threshold, got {len(signatories)}"
-        )
+        raise ValueError(f"need at least {threshold} signatories to satisfy threshold, got {len(signatories)}")
 
     pubkeys = [bytes.fromhex(ss58_decode(s)) for s in signatories]
     pubkeys.sort()

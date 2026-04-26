@@ -53,8 +53,7 @@ def _verify_address(data: DesignatedAddressResponse) -> None:
 
     if derived != data.address:
         print(
-            f"  ✗ VERIFICATION FAILED: derived multisig {derived} does not match "
-            f"API-claimed address {data.address}",
+            f"  ✗ VERIFICATION FAILED: derived multisig {derived} does not match API-claimed address {data.address}",
             file=sys.stderr,
         )
         print("DO NOT deposit to this address until the mismatch is resolved.", file=sys.stderr)
