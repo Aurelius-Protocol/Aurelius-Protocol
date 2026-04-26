@@ -58,13 +58,10 @@ class CentralAPIClient:
         except httpx.HTTPStatusError as e:
             body = (e.response.text or "").strip() or "<empty body>"
             raise CentralAPIError(
-                f"{e.response.status_code} {e.response.reason_phrase} from "
-                f"{self._base_url}{path}: {body}"
+                f"{e.response.status_code} {e.response.reason_phrase} from {self._base_url}{path}: {body}"
             ) from e
         except httpx.RequestError as e:
-            raise CentralAPIError(
-                f"Could not reach Central API at {self._base_url}: {e}"
-            ) from e
+            raise CentralAPIError(f"Could not reach Central API at {self._base_url}: {e}") from e
 
     def get_designated_address(self) -> DesignatedAddressResponse:
         return DesignatedAddressResponse.model_validate(self._get("/work-token/designated-address"))
