@@ -309,8 +309,8 @@ def run_with_concordia(setup: dict, api_key: str) -> dict:
     event resolution.
     """
     from concordia.associative_memory import basic_associative_memory
-    from concordia.contrib.language_models.openai import gpt_model
     from concordia.typing import entity as entity_lib
+    from llm_model import make_model
 
     llm_model = os.environ.get("LLM_MODEL", "deepseek-chat")
     base_url = os.environ.get("OPENAI_BASE_URL") or os.environ.get("LLM_BASE_URL")
@@ -319,8 +319,10 @@ def run_with_concordia(setup: dict, api_key: str) -> dict:
     agents_config = setup["agents"]
     scenes_config = setup["scenes"]
 
-    # Initialize LLM via Concordia's OpenAI-compatible model
-    model = gpt_model.GptLanguageModel(
+    # Use the Aurelius-patched model so reasoning_effort is pinned to a
+    # DeepSeek-acceptable value (upstream Concordia passes 'minimal',
+    # which DeepSeek rejects with HTTP 400).
+    model = make_model(
         model_name=llm_model,
         api_key=api_key,
         api_base=base_url,

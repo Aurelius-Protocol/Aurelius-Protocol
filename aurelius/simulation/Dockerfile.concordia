@@ -10,8 +10,11 @@ RUN pip install --no-cache-dir numpy cython setuptools wheel && \
     pip install --no-cache-dir openai>=1.0.0 && \
     pip install --no-cache-dir "gdm-concordia[openai]==2.4.0"
 
-# Copy the consolidated entrypoint
+# Copy the consolidated entrypoint and the patched LLM model wrapper.
+# llm_model.py is imported by entrypoint.py; both must live in /app
+# so Python's same-directory import resolves.
 COPY entrypoint.py /app/entrypoint.py
+COPY llm_model.py /app/llm_model.py
 
 # Run as non-root user
 RUN useradd -r -u 1000 appuser && mkdir -p /data && chown appuser:appuser /data

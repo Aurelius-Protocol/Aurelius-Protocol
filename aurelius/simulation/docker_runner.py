@@ -913,6 +913,18 @@ class DockerSimulationRunner:
                 transcript.metadata.docker_image_tag = self.image_tag
                 transcript.metadata.llm_model = self.llm_model
 
+                # Diagnostic surface: when the entrypoint catches an exception
+                # it still writes a 1-event fallback ``output.json`` with
+                # ``completed: false``, so the earlier ``output_path.exists()``
+                # branch (line ~891) never fires and the captured stderr
+                # would otherwise be silently dropped. Emit it here so the
+                # validator log shows the underlying traceback.
+                if not transcript.completed and container_logs:
+                    logger.error(
+                        "Simulation reported completed=false; container logs:\n%s",
+                        container_logs,
+                    )
+
                 coherence = validate_coherence(transcript, expected_agents=agent_names)
 
                 # Replenish pool in background after use
