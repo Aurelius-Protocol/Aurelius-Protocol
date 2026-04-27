@@ -16,6 +16,7 @@ from aurelius.common.constants import (
     DEFAULT_RATE_LIMIT_PER_UID_PER_TEMPO,
     MIN_VALIDATIONS_FOR_WEIGHT,
     RAMP_UP_TEMPOS,
+    RESULT_RETENTION_BLOCKS,
     TEMPO_BLOCKS,
     TEMPO_SECONDS,
     WEIGHT_FAIL,
@@ -623,12 +624,14 @@ class Validator:
 
                 responses = await asyncio.to_thread(self._query_miners, axons)
 
-                # Clear results before validation so only current-cycle
-                # results are used for weight-setting (no stale carryover).
-                self.results.clear()
-                await self._validate_responses(responses)
-
+                # Block fetch moved before validation so we can stamp
+                # recorded_at_block on each result and run the retention
+                # prune. Replaces the old self.results.clear() — see
+                # _prune_stale_results / _record_result.
                 current_block = await asyncio.to_thread(lambda: self.subtensor.block)
+                self._prune_stale_results(current_block)
+                await self._validate_responses(responses, current_block)
+
                 blocks_since = current_block - self.last_weight_block
                 block_interval = self.remote_config.weight_interval // 12
                 if blocks_since >= block_interval:
@@ -639,7 +642,13 @@ class Validator:
                 # One structured summary line per cycle so operators don't
                 # have to grep across 10 different per-stage INFO lines.
                 logger.info(
-                    _render_cycle_summary(self._build_cycle_stats(responses=responses, cycle_start=cycle_start))
+                    _render_cycle_summary(
+                        self._build_cycle_stats(
+                            responses=responses,
+                            cycle_start=cycle_start,
+                            current_block=current_block,
+                        )
+                    )
                 )
 
                 polling_interval = self.remote_config.polling_interval
@@ -673,19 +682,30 @@ class Validator:
         elif not was_healthy and self._docker_healthy:
             logger.info("docker_health | state=recovered")
 
-    def _build_cycle_stats(self, responses, cycle_start: float) -> dict:
+    def _build_cycle_stats(self, responses, cycle_start: float, current_block: int | None = None) -> dict:
         """Collect per-cycle stats for _render_cycle_summary.
 
         Pure-ish helper: side-effect-free, pulls from already-computed
         instance state (self.results, self._last_weights_outcome, etc).
         Kept as a method so tests can exercise it with a constructed
         Validator + canned state without running the main loop.
+
+        ``current_block`` filters self.results to entries recorded this
+        cycle so retained passes from prior cycles don't inflate
+        miners_passed. Optional for back-compat with older test fixtures
+        that don't stamp recorded_at_block — when None, every entry is
+        counted (legacy behavior).
         """
         from collections import Counter
 
+        if current_block is None:
+            cycle_results = list(self.results.values())
+        else:
+            cycle_results = [r for r in self.results.values() if r.recorded_at_block == current_block]
+
         stage_failures: Counter = Counter()
         passed = 0
-        for result in self.results.values():
+        for result in cycle_results:
             if result.passed:
                 passed += 1
             elif result.failed_stage:
@@ -813,12 +833,12 @@ class Validator:
             responses = [responses]
         return responses
 
-    async def _validate_responses(self, responses: list[ScenarioConfigSynapse]):
+    async def _validate_responses(self, responses: list[ScenarioConfigSynapse], current_block: int):
         """Run each response through the validation pipeline."""
         for response in responses:
             hotkey = response.axon.hotkey
             if not response.is_success:
-                self.results[hotkey] = PipelineResult(weight=WEIGHT_FAIL, stages=[])
+                self._record_result(hotkey, PipelineResult(weight=WEIGHT_FAIL, stages=[]), current_block)
                 logger.debug("Miner %s: no response", hotkey[:8])
                 continue
 
@@ -829,7 +849,7 @@ class Validator:
                 compat = check_compatibility(min_ver, miner_ver)
                 if compat == VersionResult.REJECT:
                     logger.info("Miner %s: REJECTED at blacklist (version %s < min %s)", hotkey[:8], miner_ver, min_ver)
-                    self.results[hotkey] = PipelineResult(weight=WEIGHT_FAIL, stages=[])
+                    self._record_result(hotkey, PipelineResult(weight=WEIGHT_FAIL, stages=[]), current_block)
                     continue
 
             self._in_flight += 1
@@ -837,7 +857,7 @@ class Validator:
                 result = await self.pipeline.run(response, hotkey)
             finally:
                 self._in_flight -= 1
-            self.results[hotkey] = result
+            self._record_result(hotkey, result, current_block)
             self.validation_counts[hotkey] += 1
             self._save_validation_counts()
             self._last_seen[hotkey] = time.monotonic()
@@ -1110,6 +1130,44 @@ class Validator:
         if stale:
             self._save_validation_counts()
             logger.info("Cleaned up %d stale hotkey results", len(stale))
+
+    def _prune_stale_results(self, current_block: int) -> None:
+        """Drop entries older than RESULT_RETENTION_BLOCKS so a passing
+        miner's vote survives subsequent burn-only cycles long enough to
+        reach the next chain tempo boundary, but doesn't accumulate
+        forever. Replaces the old per-cycle ``self.results.clear()``
+        which erased pass votes ~5 minutes after they were recorded —
+        well before SN37's 72-minute tempo, leaving incentive=0 even
+        when the pipeline accepted the miner. Entries with
+        ``recorded_at_block is None`` (legacy / pre-stamp) are pruned
+        too: they predate this code path and would otherwise stick
+        around indefinitely."""
+        cutoff = current_block - RESULT_RETENTION_BLOCKS
+        stale = [
+            hk
+            for hk, r in self.results.items()
+            if r.recorded_at_block is None or r.recorded_at_block < cutoff
+        ]
+        for hk in stale:
+            self.results.pop(hk, None)
+
+    def _record_result(self, hotkey: str, result: PipelineResult, current_block: int) -> None:
+        """Write a fresh result to self.results, but never let a fresh
+        failure overwrite a still-fresh prior pass — that would
+        re-introduce the same bug for miners that pass once and then
+        fail (or stop responding) for a few cycles before the next
+        tempo boundary. Failed results don't displace passes; they're
+        only stored when no entry exists, so _build_cycle_stats can
+        still see this-cycle failure stats for the per-cycle summary."""
+        if result.weight > 0:
+            result.recorded_at_block = current_block
+            self.results[hotkey] = result
+            return
+        # Fail (weight=0). Only store if there's no existing entry,
+        # so a retained pass for the same hotkey is preserved.
+        if hotkey not in self.results:
+            result.recorded_at_block = current_block
+            self.results[hotkey] = result
 
     async def stop(self):
         logger.info("Stopping validator... (in-flight=%d, queued=%d)", self._in_flight, self.local_queue.size)
