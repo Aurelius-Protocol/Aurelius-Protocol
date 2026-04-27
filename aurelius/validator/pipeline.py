@@ -42,6 +42,11 @@ class PipelineResult:
     scenario_config: dict | None = None
     classifier_score: float | None = None
     simulation_transcript: dict | None = None
+    # Block at which the validator recorded this result into self.results.
+    # Used for the result-retention TTL so a passing miner's vote survives
+    # subsequent burn-only cycles long enough to reach the next chain tempo
+    # boundary. Stamped by Validator._record_result, not by the pipeline.
+    recorded_at_block: int | None = None
 
     @property
     def passed(self) -> bool:

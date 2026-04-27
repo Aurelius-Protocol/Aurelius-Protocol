@@ -8,6 +8,15 @@ TEMPO_SECONDS = TEMPO_BLOCKS * 12  # ~4320s (~72 min)
 RAMP_UP_TEMPOS = 3
 MIN_VALIDATIONS_FOR_WEIGHT = 2
 
+# How long a passing pipeline result stays in Validator.results after the
+# cycle that recorded it. The Bittensor chain reads each validator's most
+# recent set_weights submission at every tempo boundary; without retention
+# a miner that passed once but didn't pass the next 5-minute cycle would
+# be overwritten with burn-only weights long before the next tempo, and
+# the chain would never see the pass. One full tempo (360 blocks ≈ 72 min)
+# is the minimum that guarantees survival across one boundary.
+RESULT_RETENTION_BLOCKS = TEMPO_BLOCKS
+
 # Scenario constraints (defaults, overridable via remote config)
 DEFAULT_MAX_AGENTS = 2
 DEFAULT_MIN_PREMISE_LENGTH = 200
