@@ -1143,11 +1143,7 @@ class Validator:
         too: they predate this code path and would otherwise stick
         around indefinitely."""
         cutoff = current_block - RESULT_RETENTION_BLOCKS
-        stale = [
-            hk
-            for hk, r in self.results.items()
-            if r.recorded_at_block is None or r.recorded_at_block < cutoff
-        ]
+        stale = [hk for hk, r in self.results.items() if r.recorded_at_block is None or r.recorded_at_block < cutoff]
         for hk in stale:
             self.results.pop(hk, None)
 
