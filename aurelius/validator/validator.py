@@ -1152,20 +1152,30 @@ class Validator:
             self.results.pop(hk, None)
 
     def _record_result(self, hotkey: str, result: PipelineResult, current_block: int) -> None:
-        """Write a fresh result to self.results, but never let a fresh
-        failure overwrite a still-fresh prior pass — that would
-        re-introduce the same bug for miners that pass once and then
-        fail (or stop responding) for a few cycles before the next
-        tempo boundary. Failed results don't displace passes; they're
-        only stored when no entry exists, so _build_cycle_stats can
-        still see this-cycle failure stats for the per-cycle summary."""
+        """Write a fresh result to self.results, with two invariants:
+
+        1. A fresh fail must never displace a still-fresh prior pass —
+           that would re-introduce the same overwrite bug for miners
+           that pass once and then fail (or stop responding) for a few
+           cycles before the next tempo boundary.
+        2. A fresh fail *should* refresh a prior fail's
+           ``recorded_at_block`` so the per-cycle summary log still
+           counts the miner as failing this cycle. Without this, the
+           same miner failing every cycle (e.g. no work-token balance)
+           only shows up in cycle_summary on the cycle they first
+           failed, and operators see misleading ``failures={}`` lines.
+        """
         if result.weight > 0:
+            # Pass — always overwrite, stamp.
             result.recorded_at_block = current_block
             self.results[hotkey] = result
             return
-        # Fail (weight=0). Only store if there's no existing entry,
-        # so a retained pass for the same hotkey is preserved.
-        if hotkey not in self.results:
+        # Fail (weight=0) — refresh unless we'd be displacing a still-
+        # fresh pass. Fail-over-fail refreshes the timestamp so the
+        # cycle-summary stage_failures counter for this hotkey reflects
+        # the current cycle.
+        existing = self.results.get(hotkey)
+        if existing is None or existing.weight == 0:
             result.recorded_at_block = current_block
             self.results[hotkey] = result
 

@@ -62,13 +62,18 @@ class TestRecordResult:
         assert v.results["hk_a"].weight == 0.9
         assert v.results["hk_a"].recorded_at_block == 1050
 
-    def test_fail_does_not_overwrite_fail(self):
-        # Different stage failure shouldn't clobber an existing fail entry
-        # either. The first fail's recorded_at_block is what matters for TTL.
+    def test_fail_refreshes_prior_fail(self):
+        # A miner that fails every cycle (e.g. no work-token balance)
+        # must keep refreshing recorded_at_block — otherwise the
+        # per-cycle summary log filters them out as stale and operators
+        # see misleading "failures={}" lines on cycles where the same
+        # 6+ miners are still failing.
         v = _bare_validator()
         v._record_result("hk_a", _fail_result("rate_limit_check"), current_block=1000)
         v._record_result("hk_a", _fail_result("classifier_gate"), current_block=1050)
-        assert v.results["hk_a"].recorded_at_block == 1000
+        # Latest stage and timestamp win.
+        assert v.results["hk_a"].recorded_at_block == 1050
+        assert v.results["hk_a"].failed_stage == "classifier_gate"
 
 
 class TestPruneStaleResults:
@@ -147,6 +152,30 @@ class TestBuildCycleStatsWithCurrentBlock:
         # Only the this-cycle entries count.
         assert stats["miners_passed"] == 0
         assert stats["stage_failures"] == {"classifier_gate": 1}
+
+    def test_repeat_failures_counted_every_cycle(self):
+        """Production reality: 6+ miners with no work-token balance fail
+        ``work_token_check`` every cycle. cycle_summary must keep
+        reporting them as this-cycle failures, not just on the first
+        cycle they appeared. Regression guard for the early review of
+        this fix where fails-over-fails weren't refreshing
+        recorded_at_block."""
+        import time
+
+        v = self._make()
+        # Cycle T: 2 miners fail at work_token_check.
+        v._record_result("hk1", _fail_result("work_token_check"), current_block=1000)
+        v._record_result("hk2", _fail_result("work_token_check"), current_block=1000)
+        stats_t = v._build_cycle_stats(responses=[1, 2], cycle_start=time.monotonic(), current_block=1000)
+        assert stats_t["stage_failures"] == {"work_token_check": 2}
+
+        # Cycle T+25 (~5 min later, well within TTL): same 2 miners
+        # fail again at the same stage. Operator must see the failures
+        # counted *this cycle*, not silently ignored as stale.
+        v._record_result("hk1", _fail_result("work_token_check"), current_block=1025)
+        v._record_result("hk2", _fail_result("work_token_check"), current_block=1025)
+        stats_t1 = v._build_cycle_stats(responses=[1, 2], cycle_start=time.monotonic(), current_block=1025)
+        assert stats_t1["stage_failures"] == {"work_token_check": 2}
 
     def test_legacy_call_without_current_block_still_works(self):
         """Existing tests in test_cycle_summary.py construct PipelineResults
