@@ -835,6 +835,12 @@ class Validator:
 
     async def _validate_responses(self, responses: list[ScenarioConfigSynapse], current_block: int):
         """Run each response through the validation pipeline."""
+        # Anchor freshness against the start of validation rather than the
+        # moment each stage runs. With serial pipeline execution and ~30s/miner
+        # in Concordia, per-stage time.time_ns() drifts by ~cycle_duration on
+        # the last miner and trips verify_work_id even when the miner timestamps
+        # are correct.
+        cycle_anchor_ns = time.time_ns()
         for response in responses:
             hotkey = response.axon.hotkey
             if not response.is_success:
@@ -854,7 +860,7 @@ class Validator:
 
             self._in_flight += 1
             try:
-                result = await self.pipeline.run(response, hotkey)
+                result = await self.pipeline.run(response, hotkey, anchor_ns=cycle_anchor_ns)
             finally:
                 self._in_flight -= 1
             self._record_result(hotkey, result, current_block)

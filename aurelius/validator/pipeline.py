@@ -81,7 +81,12 @@ class ValidationPipeline:
         self._run_lock = asyncio.Lock()
         self._last_pooled_embedding: list[float] | None = None
 
-    async def run(self, synapse: ScenarioConfigSynapse, miner_hotkey: str) -> PipelineResult:
+    async def run(
+        self,
+        synapse: ScenarioConfigSynapse,
+        miner_hotkey: str,
+        anchor_ns: int | None = None,
+    ) -> PipelineResult:
         """Run the full validation pipeline on a miner's response.
 
         VP6: Not safe for concurrent use on the same instance — uses a lock
@@ -91,11 +96,21 @@ class ValidationPipeline:
         Cross-validator serialization is handled by the Central API: rate limits,
         novelty index, and work-token consume all use database-level atomicity.
         Each validator runs a single pipeline instance per hotkey by design.
+
+        ``anchor_ns`` is the freshness reference point for verify_work_id; the
+        validator passes the same value for every miner in a cycle so drift is
+        measured against cycle start, not per-stage execution time. When None,
+        falls back to time.time_ns() at stage execution (legacy behaviour).
         """
         async with self._run_lock:
-            return await self._run_locked(synapse, miner_hotkey)
+            return await self._run_locked(synapse, miner_hotkey, anchor_ns)
 
-    async def _run_locked(self, synapse: ScenarioConfigSynapse, miner_hotkey: str) -> PipelineResult:
+    async def _run_locked(
+        self,
+        synapse: ScenarioConfigSynapse,
+        miner_hotkey: str,
+        anchor_ns: int | None = None,
+    ) -> PipelineResult:
         """Pipeline implementation (must be called under _run_lock)."""
         stages: list[StageResult] = []
         config = synapse.scenario_config
@@ -118,7 +133,7 @@ class ValidationPipeline:
             return PipelineResult(weight=WEIGHT_FAIL, stages=stages)
 
         # Stage 2b: Work ID verification (recompute from config + hotkey + nonce)
-        result = self._verify_work_id(synapse, miner_hotkey)
+        result = self._verify_work_id(synapse, miner_hotkey, anchor_ns)
         stages.append(result)
         if not result.passed:
             return PipelineResult(weight=WEIGHT_FAIL, stages=stages)
@@ -348,7 +363,12 @@ class ValidationPipeline:
 
     # Work ID freshness window (configurable via WORK_ID_FRESHNESS_SECONDS env var)
 
-    def _verify_work_id(self, synapse: ScenarioConfigSynapse, miner_hotkey: str) -> StageResult:
+    def _verify_work_id(
+        self,
+        synapse: ScenarioConfigSynapse,
+        miner_hotkey: str,
+        anchor_ns: int | None = None,
+    ) -> StageResult:
         """Recompute the work ID from config + hotkey + nonce and verify it matches."""
         if not synapse.work_id:
             return StageResult(passed=False, reason="No work_id", stage="verify_work_id")
@@ -368,7 +388,7 @@ class ValidationPipeline:
             import time as _time
 
             miner_time_ns = int(synapse.work_id_time_ns)
-            now_ns = _time.time_ns()
+            now_ns = anchor_ns if anchor_ns is not None else _time.time_ns()
             drift_ns = abs(now_ns - miner_time_ns)
             freshness_s = self.remote_config.work_id_freshness_seconds
             freshness_ns = freshness_s * 1_000_000_000
