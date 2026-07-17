@@ -72,13 +72,13 @@ echo ""
 echo "=== Installing dependencies ==="
 case "$ROLE" in
     validator)
-        pip install -e ".[api,ml,simulation]" -q
+        pip install -c requirements.lock -e ".[ml,simulation]" -q
         ;;
     miner)
-        pip install -e "." -q
+        pip install -c requirements.lock -e "." -q
         ;;
     api)
-        pip install -e ".[api,ml]" -q
+        pip install -c requirements.lock -e ".[ml]" -q
         ;;
     *)
         usage

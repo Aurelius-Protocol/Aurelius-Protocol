@@ -32,7 +32,7 @@ if [ ! -d ".venv" ]; then
     python3 -m venv .venv
 fi
 source .venv/bin/activate
-pip install -e ".[api,ml,simulation,dev]" -q
+pip install -c requirements.lock -e ".[ml,simulation,dev]" -q
 
 # Step 2: Start infrastructure
 echo ""
