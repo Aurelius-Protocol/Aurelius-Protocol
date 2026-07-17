@@ -16,6 +16,11 @@ on:
     paths-ignore:
       - '**.md'
       - 'LICENSE'
+  schedule:
+    # Weekly canary: resolve-check runs a fresh, unconstrained dependency
+    # resolution, so upstream bittensor-ecosystem drift is caught between
+    # PRs instead of on a validator rebuild.
+    - cron: "0 6 * * 1"
   workflow_dispatch:
 
 jobs:
@@ -40,8 +45,55 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[ml,simulation,dev]"
+      # Constrained by the lock so CI tests the same pinned stack the
+      # published image ships; dev-only tools float within pyproject ranges.
+      - run: pip install -c requirements.lock -e ".[ml,simulation,dev]"
       - run: pytest tests/ --ignore=tests/e2e --ignore=tests/common/test_embeddings.py -x --tb=short
+
+  resolve-check:
+    # Proves a fresh, unconstrained resolution of the Docker extras still
+    # installs and imports — the failure mode that broke validator installs
+    # when the bittensor 10.x ecosystem moved underneath us (chain runtime
+    # v432 / async-substrate-interface 2.x / cyscale). If this job fails and
+    # `test` passes, upstream drifted: fix pyproject bounds and/or regenerate
+    # requirements.lock.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ".[ml,simulation,llm]"
+      - run: |
+          python - <<'EOF'
+          import inspect
+
+          import bittensor as bt
+          from bittensor.utils.weight_utils import process_weights_for_netuid  # noqa: F401
+
+          assert "mechid" in inspect.signature(bt.Subtensor.set_weights).parameters
+
+          # Golden vector from tests/common/test_multisig.py: proves the
+          # scalecodec namespace (served by cyscale under bittensor >=10.3)
+          # still produces byte-identical ss58 multisig derivation.
+          from aurelius.common.multisig import derive_multisig_address
+
+          assert derive_multisig_address(
+              [
+                  "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY",
+                  "5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty",
+                  "5FLSigC9HGRKVhB9FiEo4Y3koPsNmBmLJbpXg2mp1hXcS59Y",
+              ],
+              2,
+          ) == "5DYHJokMqSGX6fNy7EpZVeZvJUZedpVUvizur6EqeespKtxz"
+
+          import aurelius.miner.miner  # noqa: F401
+          import aurelius.protocol  # noqa: F401
+          import aurelius.validator.validator  # noqa: F401
+
+          print("resolve-check OK: bittensor", bt.__version__)
+          EOF
+      - run: pip check
 
   docker-build:
     # Build a single image and publish it under both aurelius-validator and

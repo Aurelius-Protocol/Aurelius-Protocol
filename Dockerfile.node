@@ -6,19 +6,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libpq-dev curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install heavy dependencies first, isolated from application source.
-# Everything below the `COPY aurelius/` line re-runs on every source change;
-# everything above stays cached unless pyproject.toml / README changes.
-# This turns a typical commit from a ~3 min pip install into a ~15 s
-# no-deps reinstall.
-COPY pyproject.toml README.md ./
-RUN mkdir -p aurelius \
-    && echo '"""placeholder for dep resolution — real source copied below"""' > aurelius/__init__.py \
-    && pip install --no-cache-dir --prefix=/install ".[ml,simulation,llm]"
+# Deterministic deps: install the exact pinned set from requirements.lock,
+# then the project itself with --no-deps, so a fresh upstream release can
+# never change what ships in the image (a floating bittensor 10.x resolve
+# is what broke validator installs when chain runtime v432 landed).
+# The lock is generated from the [ml,simulation,llm] extras — regenerate it
+# deliberately (see README §Development) whenever pyproject deps change.
+# The dep layer keys off the lock alone, so it stays cached across source
+# and pyproject changes: a typical commit is a ~15 s no-deps reinstall.
+COPY requirements.lock ./
+RUN pip install --no-cache-dir --prefix=/install -r requirements.lock \
+    && PYTHONPATH=/install/lib/python3.11/site-packages pip check
 
 # Real source — cache-busts from here on.
+COPY pyproject.toml README.md ./
 COPY aurelius/ aurelius/
-RUN pip install --no-cache-dir --no-deps --prefix=/install --force-reinstall .
+RUN pip install --no-cache-dir --no-deps --prefix=/install .
 
 # Pre-download the sentence-transformers embedding model so validators
 # don't need to fetch it on first startup (~80 MB).

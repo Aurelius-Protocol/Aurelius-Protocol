@@ -28,6 +28,11 @@ def derive_multisig_address(
     py-substrate-interface. Signatories are sorted by their 32-byte public key
     before hashing, so the result is independent of input ordering.
     """
+    # Under bittensor >=10.3 the `scalecodec` namespace is served by cyscale
+    # (a drop-in replacement shipping the same module path — bittensor itself
+    # imports it this way). Do NOT "fix" this by installing py-scale-codec:
+    # async-substrate-interface 2.x hard-errors when that distribution is
+    # co-installed. tests/common/test_multisig.py pins the golden vector.
     from scalecodec.utils.ss58 import ss58_decode, ss58_encode
 
     if threshold < 1:

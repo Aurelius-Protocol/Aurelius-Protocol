@@ -366,19 +366,42 @@ chown -R 1000:1000 ./data ./simdata
 
 ### Dependency notes for source builds
 
-If you're running from a source checkout and see one of these at import time, the lock
-file gives you the tested dep combination:
+The supported bittensor SDK window is **10.3.0–10.5.0** (chain runtime v432, enacted
+2026-07-16, is not compatible with older SDKs). The lock pins `bittensor==10.5.0`.
+bittensor 11.x is the repackaged `bittensor-core` line and is intentionally excluded
+by the `<11` bound — do not install it alongside this repo.
 
-- `RuntimeError: Conflict detected: 'scalecodec' … conflicts with 'cyscale'` —
-  `async-substrate-interface` 2.x added a conflict check that trips when scalecodec is
-  also present. The lock pins `async-substrate-interface==1.6.3`, which doesn't include
-  the check.
+If you're running from a source checkout and see one of these at import time, your
+environment predates the 10.5.0 stack:
+
 - `ImportError: cannot import name 'ScaleObj' from 'async_substrate_interface.types'` —
-  bittensor newer than `10.2.x` imports `ScaleObj`, which isn't in the 1.6.x line. The
-  lock pins `bittensor==10.2.0`, which doesn't need it.
+  a stale `async-substrate-interface` 1.6.x is still installed; bittensor ≥10.3 needs
+  the 2.x line (the lock pins 2.2.1).
+- `RuntimeError: Conflict detected: 'scalecodec' … conflicts with 'cyscale'` — the old
+  `py-scale-codec` package is still installed. bittensor ≥10.3 uses `cyscale`, which
+  ships the same `scalecodec` module namespace, and `async-substrate-interface` 2.x
+  refuses to start while both distributions are present.
 
-Either way: `pip install -r requirements.lock` before `pip install -e .` to anchor the
-resolution to known-good versions.
+The reliable remedy is a **fresh venv** — the scalecodec→cyscale swap shares a module
+path and does not upgrade in place cleanly:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -c requirements.lock -e .
+```
+
+(In-place alternative: `pip uninstall scalecodec cyscale -y && pip install cyscale --force-reinstall`,
+then reinstall with the lock as above.)
+
+The Docker image installs from `requirements.lock`, so published builds cannot drift
+with upstream releases. To regenerate the lock after changing dependencies:
+
+```bash
+uv pip compile pyproject.toml \
+  --extra ml --extra simulation --extra llm \
+  --universal --python-version 3.10 \
+  -o requirements.lock
+```
 
 ---
 
@@ -462,8 +485,9 @@ remote-tier values.
 
 ## Development
 
-Development and CI typically run from a source checkout. Pairing the lock file with the
-editable install keeps dep resolution aligned with what the published image builds from:
+Development and CI typically run from a source checkout. Using the lock file as a
+constraints file (`-c`) keeps dep resolution aligned with what the published image
+builds from, while dev-only tools float within their pyproject ranges:
 
 ```bash
 git clone https://github.com/Aurelius-Protocol/Aurelius-Protocol.git
@@ -472,8 +496,7 @@ cd Aurelius-Protocol
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install -r requirements.lock
-pip install -e ".[ml,simulation,dev]"
+pip install -c requirements.lock -e ".[ml,simulation,dev]"
 
 cp .env.example .env
 $EDITOR .env                     # ENVIRONMENT=local for a testlab loop
