@@ -1,19 +1,19 @@
-import concurrent.futures
+import asyncio
 import logging
-import signal
 import socket
-import time
 from pathlib import Path
-from typing import Tuple  # noqa: UP035 — bittensor SDK requires typing.Tuple
 
 import bittensor as bt
+import uvicorn
 
 import aurelius
+from aurelius.common.chain import fetch_metagraph_blocking, neuron_for_hotkey
 from aurelius.common.version import PROTOCOL_VERSION
 from aurelius.config import Config
 from aurelius.miner.config_store import ConfigStore
 from aurelius.miner.work_token import generate_work_id
 from aurelius.protocol import ScenarioConfigSynapse
+from aurelius.transport import create_miner_app
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +40,11 @@ class Miner:
             )
 
         self.wallet = bt.Wallet(name=self.config.WALLET_NAME, hotkey=self.config.WALLET_HOTKEY)
+        self.hotkey_ss58 = self.wallet.hotkey.ss58_address
         self.subtensor = bt.Subtensor(network=self.config.NETWORK)
-        self.metagraph = bt.Metagraph(
-            netuid=self.config.NETUID,
-            network=self.config.NETWORK,
-            subtensor=self.subtensor,
-        )
+        self.metagraph = fetch_metagraph_blocking(self.config.NETWORK, self.config.NETUID)
+        if self.metagraph is None:
+            raise RuntimeError(f"Subnet {self.config.NETUID} does not exist on network {self.config.NETWORK}")
 
         config_dir = self.config.MINER_CONFIG_DIR
         if not Path(config_dir).is_dir():
@@ -60,18 +59,13 @@ class Miner:
         if external_ip == "auto":
             external_ip = self._detect_external_ip()
             logger.info("Auto-detected external IP: %s", external_ip)
+        self._external_ip = external_ip
 
-        self.axon = bt.Axon(
-            wallet=self.wallet,
-            port=self.config.AXON_PORT,
-            external_ip=external_ip,
-            external_port=self.config.AXON_EXTERNAL_PORT,
-        )
-        self.axon.attach(forward_fn=self.forward, blacklist_fn=self.blacklist)
-
-        logger.info("Serving axon on netuid %d, port %d", self.config.NETUID, self.config.AXON_PORT)
-        self.axon.serve(netuid=self.config.NETUID, subtensor=self.subtensor)
-        self.axon.start()
+        # bittensor 11 removed the Axon server; the miner runs its own HTTP
+        # app (see aurelius.transport) and publishes its endpoint on-chain
+        # with the ServeAxon intent so validators can discover it.
+        self.app = create_miner_app(self)
+        self._publish_endpoint()
 
         logger.info("Miner started | wallet=%s hotkey=%s", self.wallet.name, self.wallet.hotkey_str)
 
@@ -96,13 +90,53 @@ class Miner:
         except CentralAPIError as e:
             logger.debug("Could not fetch deposit address banner: %s", e)
 
+    def _publish_endpoint(self) -> None:
+        """Publish (or confirm) this miner's endpoint on-chain via ServeAxon.
+
+        Skips the extrinsic when the chain already carries the current
+        ip:port — re-serving identical values every restart would burn fees
+        and can trip the serve rate limit.
+        """
+        target = f"{self._external_ip}:{self.config.AXON_EXTERNAL_PORT}"
+        me = neuron_for_hotkey(self.metagraph, self.hotkey_ss58)
+        if me is None:
+            logger.error(
+                "Hotkey %s is NOT registered on subnet %d. "
+                "Register first: btcli subnet register --netuid %d --network %s",
+                self.hotkey_ss58[:16],
+                self.config.NETUID,
+                self.config.NETUID,
+                self.config.NETWORK,
+            )
+            return
+        if me.axon is not None and str(me.axon) == target:
+            logger.info("Endpoint %s already published on-chain, skipping ServeAxon", target)
+            return
+        logger.info("Publishing endpoint %s on netuid %d (ServeAxon)...", target, self.config.NETUID)
+        try:
+            self.subtensor.execute(
+                bt.ServeAxon(
+                    netuid=self.config.NETUID,
+                    ip=self._external_ip,
+                    port=self.config.AXON_EXTERNAL_PORT,
+                ),
+                self.wallet,
+            )
+            logger.info("Endpoint published")
+        except bt.ChainError as e:
+            logger.error(
+                "Failed to publish endpoint via ServeAxon: %s — validators will "
+                "not discover this miner until it succeeds (retried next restart).",
+                e,
+            )
+
     def forward(self, synapse: ScenarioConfigSynapse) -> ScenarioConfigSynapse:
         scenario_config = self.config_store.next()
         if scenario_config is None:
             logger.warning("No configs available to serve")
             return synapse
 
-        result = generate_work_id(scenario_config, self.wallet.hotkey.ss58_address, wallet=self.wallet)
+        result = generate_work_id(scenario_config, self.hotkey_ss58, wallet=self.wallet)
 
         synapse.scenario_config = scenario_config
         synapse.work_id = result.work_id
@@ -115,16 +149,20 @@ class Miner:
         logger.debug("Serving config '%s' with work_id %s", scenario_config.get("name", "?"), result.work_id[:16])
         return synapse
 
-    def blacklist(self, synapse: ScenarioConfigSynapse) -> Tuple[bool, str]:  # noqa: UP006
-        caller = synapse.dendrite.hotkey
-        if caller not in self.metagraph.hotkeys:
+    def blacklist(self, caller: str) -> tuple[bool, str]:
+        """Reject callers that aren't permitted validators on this subnet.
+
+        `caller` is the http_auth-verified hotkey of the requester (the
+        transport rejects unsigned/badly-signed requests before this runs).
+        """
+        neuron = neuron_for_hotkey(self.metagraph, caller)
+        if neuron is None:
             return True, f"Hotkey {caller} not in metagraph"
 
-        uid = self.metagraph.hotkeys.index(caller)
         # On testnet, validator_permit may not be set for low-stake validators.
         # Allow any registered hotkey to query in testlab mode.
-        if not Config.TESTLAB_MODE and not self.metagraph.validator_permit[uid]:
-            return True, f"UID {uid} lacks validator permit"
+        if not Config.TESTLAB_MODE and not neuron.validator_permit:
+            return True, f"UID {neuron.uid} lacks validator permit"
 
         return False, ""
 
@@ -157,35 +195,51 @@ class Miner:
             "Could not detect a non-loopback external IP. Set AXON_EXTERNAL_IP explicitly in your environment."
         )
 
-    def run(self):
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-
-        logger.info("Miner running. Press Ctrl+C to exit.")
-        sync_timeout = max(self.config.METAGRAPH_SYNC_INTERVAL, 60)
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        while not self.should_exit:
-            try:
-                time.sleep(self.config.METAGRAPH_SYNC_INTERVAL)
-                future = executor.submit(self.metagraph.sync, subtensor=self.subtensor)
+    async def _metagraph_sync_loop(self):
+        """Refresh the metagraph snapshot periodically for blacklist checks."""
+        sync_interval = self.config.METAGRAPH_SYNC_INTERVAL
+        async with bt.Client(network=self.config.NETWORK) as client:
+            while not self.should_exit:
+                await asyncio.sleep(sync_interval)
                 try:
-                    future.result(timeout=sync_timeout)
-                    logger.debug("Metagraph synced: %d neurons", self.metagraph.n)
-                except concurrent.futures.TimeoutError:
-                    logger.warning("Metagraph sync timed out after %ds — skipping this cycle", sync_timeout)
-            except KeyboardInterrupt:
-                break
-        executor.shutdown(wait=False)
+                    fresh = await asyncio.wait_for(
+                        bt.metagraph.fetch(client, self.config.NETUID),
+                        timeout=max(sync_interval, 60),
+                    )
+                    if fresh is not None:
+                        self.metagraph = fresh
+                        logger.debug("Metagraph synced: %d neurons", fresh.num_uids)
+                except asyncio.TimeoutError:
+                    logger.warning("Metagraph sync timed out — skipping this cycle")
+                except Exception as e:
+                    logger.warning("Metagraph sync failed: %s — keeping previous snapshot", e)
 
-        self.stop()
+    async def run_async(self):
+        logger.info("Serving on port %d (netuid %d). Press Ctrl+C to exit.", self.config.AXON_PORT, self.config.NETUID)
+        server = uvicorn.Server(
+            uvicorn.Config(
+                self.app,
+                host="0.0.0.0",
+                port=self.config.AXON_PORT,
+                log_level="warning",
+            )
+        )
+        sync_task = asyncio.create_task(self._metagraph_sync_loop())
+        try:
+            # uvicorn installs its own SIGINT/SIGTERM handlers and exits
+            # serve() gracefully on either.
+            await server.serve()
+        finally:
+            self.should_exit = True
+            sync_task.cancel()
+            self.stop()
+
+    def run(self):
+        asyncio.run(self.run_async())
 
     def stop(self):
         logger.info("Stopping miner...")
-        self.axon.stop()
-
-    def _signal_handler(self, signum, frame):
-        logger.info("Received signal %d, shutting down...", signum)
-        self.should_exit = True
+        self.subtensor.close()
 
 
 def _configure_logging():

@@ -1,14 +1,16 @@
-from typing import ClassVar
-
-import bittensor as bt
+from pydantic import BaseModel
 
 from aurelius.common.version import PROTOCOL_VERSION
 
 
-class ScenarioConfigSynapse(bt.Synapse):
-    """Synapse for exchanging moral dilemma scenario configurations.
+class ScenarioConfigSynapse(BaseModel):
+    """Wire model for exchanging moral dilemma scenario configurations.
 
-    Validators set immutable fields before sending; miners populate mutable fields.
+    Validators set immutable fields before sending; miners populate mutable
+    fields. Since bittensor 11 removed the Synapse/axon/dendrite stack, this
+    is a plain pydantic model carried as JSON over the subnet's own HTTP
+    transport (see `aurelius.transport`); the field set is identical to the
+    pre-11 Synapse so the wire payload is unchanged.
 
     VU2/VU3 VERSIONING POLICY:
     - New fields MUST be Optional with a default value (additive-only).
@@ -30,13 +32,3 @@ class ScenarioConfigSynapse(bt.Synapse):
     work_id_signature: str | None = None  # Miner's hotkey signature over work_id (ownership proof)
     miner_version: str | None = None
     miner_protocol_version: str | None = None
-
-    required_hash_fields: ClassVar[tuple[str, ...]] = (
-        "scenario_config",
-        "work_id",
-        "work_id_nonce",
-        "work_id_time_ns",
-        "work_id_signature",
-        "miner_version",
-        "miner_protocol_version",
-    )

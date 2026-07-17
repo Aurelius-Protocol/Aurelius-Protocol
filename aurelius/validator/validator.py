@@ -9,8 +9,8 @@ from pathlib import Path
 
 import bittensor as bt
 import httpx
-from bittensor.utils.weight_utils import process_weights_for_netuid
 
+from aurelius.common.chain import fetch_metagraph_blocking, neuron_for_hotkey, neuron_for_uid
 from aurelius.common.constants import (
     BURN_UID,
     DEFAULT_RATE_LIMIT_PER_UID_PER_TEMPO,
@@ -24,6 +24,7 @@ from aurelius.common.constants import (
 from aurelius.common.version import PROTOCOL_VERSION, VersionResult, check_compatibility
 from aurelius.config import Config
 from aurelius.protocol import ScenarioConfigSynapse
+from aurelius.transport import MinerResponse, query_miner
 from aurelius.validator.api_client import CentralAPIClient
 from aurelius.validator.local_queue import LocalSubmissionQueue, QueuedSubmission
 from aurelius.validator.pipeline import PipelineResult, ValidationPipeline
@@ -54,11 +55,14 @@ def _fingerprint_secret(val: str) -> str:
 
 
 def _is_weights_rate_limit(message) -> bool:
-    """T-5: detect a subtensor rate-limit rejection from a set_weights result.
+    """T-5: detect a subtensor rate-limit rejection from a set_weights failure.
 
-    The bittensor SDK currently returns `(success=False, message=None)` for
-    the per-subnet weights rate limit. Older builds returned strings with
-    "rate limit" in them. Match both so the helper survives an SDK bump.
+    bittensor 11's `bt.set_weights` raises ChainError on failure; the
+    rate-limit rejection carries "rate limit" text in its description.
+    A None/empty message is treated as rate-limit too — pre-11 SDKs
+    returned `(success=False, message=None)` for this case and an empty
+    ChainError rendering shouldn't escalate the per-cycle deferral (the
+    common, benign outcome) into a warning.
     """
     if message is None:
         return True
@@ -146,13 +150,20 @@ class Validator:
         self._in_flight: int = 0  # count of in-flight pipeline runs
 
         self.wallet = bt.Wallet(name=self.config.WALLET_NAME, hotkey=self.config.WALLET_HOTKEY)
+        # Sync client for blocking one-off reads (current block); the async
+        # client drives the main loop's metagraph refresh and is connected
+        # in run(). Weight-setting uses bt.set_weights, which manages its
+        # own shared connection.
         self.subtensor = bt.Subtensor(network=self.config.NETWORK)
-        self.dendrite = bt.Dendrite(wallet=self.wallet)
-        self.metagraph = bt.Metagraph(
-            netuid=self.config.NETUID,
-            network=self.config.NETWORK,
-            subtensor=self.subtensor,
-        )
+        self.client = bt.Client(network=self.config.NETWORK)
+        self.metagraph = fetch_metagraph_blocking(self.config.NETWORK, self.config.NETUID)
+        if self.metagraph is None:
+            raise RuntimeError(f"Subnet {self.config.NETUID} does not exist on network {self.config.NETWORK}")
+        # Miner-query transport (replaces the removed dendrite): shared
+        # httpx client created in run(); nonce store guards against
+        # replayed miner responses.
+        self._http: httpx.AsyncClient | None = None
+        self._response_nonce_store = bt.http_auth.InMemoryNonceStore(retention=60.0)
 
         # Central API client (async — auth deferred to run())
         api_url = self.config.CENTRAL_API_URL
@@ -203,7 +214,7 @@ class Validator:
             self.wallet.name,
             self.wallet.hotkey_str,
             self.config.NETUID,
-            self.metagraph.n,
+            self.metagraph.num_uids,
         )
 
     def _log_config_summary(self):
@@ -286,10 +297,11 @@ class Validator:
         # 4. Check validator permit on metagraph (warn, don't block — permit may come after staking)
         if not is_local:
             hotkey = self.wallet.hotkey.ss58_address
-            if hotkey in self.metagraph.hotkeys:
-                uid = self.metagraph.hotkeys.index(hotkey)
-                stake = float(self.metagraph.S[uid])
-                has_permit = bool(self.metagraph.validator_permit[uid])
+            neuron = neuron_for_hotkey(self.metagraph, hotkey)
+            if neuron is not None:
+                uid = neuron.uid
+                stake = float(neuron.total_stake)
+                has_permit = bool(neuron.validator_permit)
                 if not has_permit:
                     logger.warning(
                         "Validator permit NOT granted (UID %d, stake: %.4f TAO). "
@@ -329,22 +341,22 @@ class Validator:
         legitimately be pre-population, but the operator must know emissions
         may be routed to a real miner if the expected reservation slips.
         """
-        n = self.metagraph.n
-        if BURN_UID >= n:
+        burn_neuron = neuron_for_uid(self.metagraph, BURN_UID)
+        if burn_neuron is None:
             logger.warning(
-                "Burn UID %d >= metagraph size %d. Weight-setting will "
-                "likely drop the burn slice (process_weights_for_netuid "
-                "clamps out-of-range UIDs). Either wait for the subnet to "
-                "populate or coordinate with the subnet owner to reserve "
-                "UID %d.",
+                "Burn UID %d not present in metagraph (%d uids). "
+                "Weight-setting will likely drop the burn slice (the "
+                "chain-side weight conform step clamps unknown UIDs). "
+                "Either wait for the subnet to populate or coordinate "
+                "with the subnet owner to reserve UID %d.",
                 BURN_UID,
-                n,
+                self.metagraph.num_uids,
                 BURN_UID,
             )
             return
-        burn_hotkey = self.metagraph.hotkeys[BURN_UID]
-        burn_stake = float(self.metagraph.S[BURN_UID])
-        burn_has_permit = bool(self.metagraph.validator_permit[BURN_UID])
+        burn_hotkey = burn_neuron.hotkey
+        burn_stake = float(burn_neuron.total_stake)
+        burn_has_permit = bool(burn_neuron.validator_permit)
         if burn_stake > 1.0 or burn_has_permit:
             logger.warning(
                 "Burn UID %d is occupied (hotkey=%s stake=%.2f TAO permit=%s). "
@@ -558,6 +570,10 @@ class Validator:
 
         await self._initialize_async()
 
+        # Long-lived chain + miner-query connections for the main loop.
+        await self.client.connect()
+        self._http = httpx.AsyncClient()
+
         logger.info("Validator running. Press Ctrl+C to exit.")
         while not self.should_exit:
             try:
@@ -566,8 +582,11 @@ class Validator:
                 # this cycle doesn't attempt _set_weights.
                 self._last_weights_outcome = "skipped"
 
-                # Sync bittensor calls run in thread executor
-                await asyncio.to_thread(self.metagraph.sync, subtensor=self.subtensor)
+                # Refresh the metagraph snapshot (v11 metagraphs are
+                # immutable — re-fetch replaces the old .sync()).
+                fresh = await bt.metagraph.fetch(self.client, self.config.NETUID)
+                if fresh is not None:
+                    self.metagraph = fresh
 
                 # H-9: capture the ramp-up anchor on the first sync after
                 # boot; no-op every other cycle.
@@ -616,19 +635,19 @@ class Validator:
                 # Drain local queue if API is back
                 await self._drain_local_queue()
 
-                axons = self._get_miner_axons()
-                if not axons:
+                endpoints = self._get_miner_endpoints()
+                if not endpoints:
                     logger.info("No serving miners found, sleeping...")
                     await asyncio.sleep(30)
                     continue
 
-                responses = await asyncio.to_thread(self._query_miners, axons)
+                responses = await self._query_miners(endpoints)
 
                 # Block fetch moved before validation so we can stamp
                 # recorded_at_block on each result and run the retention
                 # prune. Replaces the old self.results.clear() — see
                 # _prune_stale_results / _record_result.
-                current_block = await asyncio.to_thread(lambda: self.subtensor.block)
+                current_block = await asyncio.to_thread(self.subtensor.block)
                 self._prune_stale_results(current_block)
                 await self._validate_responses(responses, current_block)
 
@@ -745,7 +764,7 @@ class Validator:
 
     def _check_validator_count(self):
         """Alert if validator count drops to warning threshold."""
-        validator_count = sum(1 for uid in range(self.metagraph.n) if self.metagraph.validator_permit[uid])
+        validator_count = sum(1 for neuron in self.metagraph.neurons if neuron.validator_permit)
         if validator_count <= MIN_VALIDATOR_COUNT_WARN:
             logger.warning(
                 "Low validator count: %d (minimum recommended: %d). Consensus may be fragile.",
@@ -801,39 +820,48 @@ class Validator:
             self._drain_next_attempt = 0.0
             logger.info("Drained %d queued submissions to API (%d remaining)", reported, self.local_queue.size)
 
-    def _get_miner_axons(self) -> list[bt.AxonInfo]:
-        """Get axons of serving miners to query.
+    def _get_miner_endpoints(self) -> list[tuple[str, str]]:
+        """Get (hotkey, "ip:port") pairs of serving miners to query.
 
-        Filters: serving, not our own UID, and (no validator permit OR small subnet).
+        Filters: has a published axon endpoint, and not our own hotkey.
         On small subnets (n <= max_validators), all neurons get permits, so we
         fall back to querying any serving neuron that isn't us.
         """
         my_hotkey = self.wallet.hotkey.ss58_address
-        axons = []
-        for uid in range(self.metagraph.n):
-            axon = self.metagraph.axons[uid]
-            if not axon.is_serving:
+        endpoints = []
+        for neuron in self.metagraph.neurons:
+            if neuron.axon is None:
                 continue
-            if self.metagraph.hotkeys[uid] == my_hotkey:
+            if neuron.hotkey == my_hotkey:
                 continue
-            axons.append(axon)
-        return axons
+            endpoints.append((neuron.hotkey, str(neuron.axon)))
+        return endpoints
 
-    def _query_miners(self, axons: list[bt.AxonInfo]) -> list[ScenarioConfigSynapse]:
+    async def _query_miners(self, endpoints: list[tuple[str, str]]) -> list[MinerResponse]:
         import aurelius
 
-        synapse = ScenarioConfigSynapse(
+        request = ScenarioConfigSynapse(
             request_id=str(uuid.uuid4()),
             validator_version=aurelius.__version__,
             protocol_version=PROTOCOL_VERSION,
         )
-        logger.info("Querying %d miners...", len(axons))
-        responses = self.dendrite.query(axons, synapse, timeout=self.remote_config.query_timeout)
-        if not isinstance(responses, list):
-            responses = [responses]
-        return responses
+        logger.info("Querying %d miners...", len(endpoints))
+        timeout = self.remote_config.query_timeout
+        tasks = [
+            query_miner(
+                self._http,
+                self.wallet,
+                endpoint,
+                hotkey,
+                request,
+                timeout=timeout,
+                nonce_store=self._response_nonce_store,
+            )
+            for hotkey, endpoint in endpoints
+        ]
+        return list(await asyncio.gather(*tasks))
 
-    async def _validate_responses(self, responses: list[ScenarioConfigSynapse], current_block: int):
+    async def _validate_responses(self, responses: list[MinerResponse], current_block: int):
         """Run each response through the validation pipeline."""
         # Anchor freshness against the start of validation rather than the
         # moment each stage runs. With serial pipeline execution and ~30s/miner
@@ -842,14 +870,15 @@ class Validator:
         # are correct.
         cycle_anchor_ns = time.time_ns()
         for response in responses:
-            hotkey = response.axon.hotkey
-            if not response.is_success:
+            hotkey = response.hotkey
+            if not response.success:
                 self._record_result(hotkey, PipelineResult(weight=WEIGHT_FAIL, stages=[]), current_block)
-                logger.debug("Miner %s: no response", hotkey[:8])
+                logger.debug("Miner %s: no response (%s)", hotkey[:8], response.error)
                 continue
+            synapse = response.synapse
 
             # Pre-pipeline blacklist: reject miners below min_miner_version
-            miner_ver = response.miner_protocol_version
+            miner_ver = synapse.miner_protocol_version
             if miner_ver:
                 min_ver = self.remote_config.min_miner_version
                 compat = check_compatibility(min_ver, miner_ver)
@@ -860,7 +889,7 @@ class Validator:
 
             self._in_flight += 1
             try:
-                result = await self.pipeline.run(response, hotkey, anchor_ns=cycle_anchor_ns)
+                result = await self.pipeline.run(synapse, hotkey, anchor_ns=cycle_anchor_ns)
             finally:
                 self._in_flight -= 1
             self._record_result(hotkey, result, current_block)
@@ -953,12 +982,9 @@ class Validator:
             )
             return
 
-        import numpy as np
-
         # Burn mode: direct all emissions to UID 200 (burn address)
         if self.remote_config.burn_mode:
-            uid_array = np.array([BURN_UID], dtype=np.int64)
-            weight_array = np.array([1.0], dtype=np.float32)
+            weights_by_uid: dict[int, float] = {BURN_UID: 1.0}
         else:
             if not self.results:
                 logger.info("No results to set weights for")
@@ -974,19 +1000,16 @@ class Validator:
             uids = []
             weights = []
             for hotkey, result in self.results.items():
-                if hotkey not in self.metagraph.hotkeys:
-                    continue
-
                 # Self-validation prevention: never set weight for own hotkey
                 if hotkey == own_hotkey:
                     logger.debug("Skipping self-validation weight for own hotkey %s", hotkey[:8])
                     continue
 
-                try:
-                    uid = self.metagraph.hotkeys.index(hotkey)
-                except ValueError:
+                neuron = neuron_for_hotkey(self.metagraph, hotkey)
+                if neuron is None:
                     logger.debug("Hotkey %s no longer in metagraph, skipping", hotkey[:8])
                     continue
+                uid = neuron.uid
 
                 if self.in_ramp_up and self.validation_counts[hotkey] < MIN_VALIDATIONS_FOR_WEIGHT:
                     logger.debug(
@@ -1015,52 +1038,49 @@ class Validator:
             else:
                 scaled_weights = [0.0] * len(weights)
 
-            uids.append(BURN_UID)
-            scaled_weights.append(burn_pct)
-
-            uid_array = np.array(uids, dtype=np.int64)
-            weight_array = np.array(scaled_weights, dtype=np.float32)
-
-        processed_uids, processed_weights = process_weights_for_netuid(
-            uids=uid_array,
-            weights=weight_array,
-            netuid=self.config.NETUID,
-            subtensor=self.subtensor,
-            metagraph=self.metagraph,
-        )
+            weights_by_uid = dict(zip(uids, scaled_weights, strict=True))
+            # += guards the (misconfigured) case of a result mapping to the
+            # burn UID itself — the burn share must never be overwritten.
+            weights_by_uid[BURN_UID] = weights_by_uid.get(BURN_UID, 0.0) + burn_pct
 
         logger.info(
             "Setting weights for %d UIDs (burn_mode=%s, ramp_up=%s)...",
-            len(processed_uids),
+            len(weights_by_uid),
             self.remote_config.burn_mode,
             self.in_ramp_up,
         )
 
         def _do_set_weights():
-            return self.subtensor.set_weights(
+            # bt.set_weights conforms the weights to the subnet's
+            # hyperparameters (clip, normalize, u16-quantize) — the work
+            # process_weights_for_netuid did pre-11 — picks plaintext or
+            # commit-reveal automatically, and raises ChainError on failure.
+            return bt.set_weights(
+                self.config.NETUID,
+                weights_by_uid,
                 wallet=self.wallet,
-                netuid=self.config.NETUID,
-                uids=processed_uids,
-                weights=processed_weights,
                 mechid=0,
+                network=self.config.NETWORK,
             )
 
-        result = await asyncio.to_thread(_do_set_weights)
-
-        if result.success:
-            logger.info("Weights set successfully: %s", result.message)
-            self._last_weights_outcome = "success"
-        elif _is_weights_rate_limit(result.message):
-            # T-5: subtensor rejects calls more frequent than its per-subnet
-            # weights rate limit. Our loop attempts every `weight_interval`
-            # (5 min default) while the chain rate limit is usually longer
-            # (observed ~25 min on SN455), so most calls fail this way.
-            # Surface at DEBUG so real weight-set failures remain visible.
-            logger.debug("Weight set deferred by subtensor rate limit: %s", result.message)
-            self._last_weights_outcome = "rate_limit"
+        try:
+            result = await asyncio.to_thread(_do_set_weights)
+        except bt.ChainError as e:
+            message = str(e)
+            if _is_weights_rate_limit(message):
+                # T-5: subtensor rejects calls more frequent than its per-subnet
+                # weights rate limit. Our loop attempts every `weight_interval`
+                # (5 min default) while the chain rate limit is usually longer
+                # (observed ~25 min on SN455), so most calls fail this way.
+                # Surface at DEBUG so real weight-set failures remain visible.
+                logger.debug("Weight set deferred by subtensor rate limit: %s", message)
+                self._last_weights_outcome = "rate_limit"
+            else:
+                logger.warning("Failed to set weights: %s", message)
+                self._last_weights_outcome = "failed"
         else:
-            logger.warning("Failed to set weights: %s", result.message)
-            self._last_weights_outcome = "failed"
+            logger.info("Weights set successfully: %s", result.message or result.extrinsic_id)
+            self._last_weights_outcome = "success"
 
     def _load_validation_counts(self) -> None:
         path = Path(self._validation_counts_path)
@@ -1204,7 +1224,13 @@ class Validator:
                 await self.api_client.close()
             except Exception as e:
                 logger.warning("Error closing API client: %s", e)
-        self.dendrite.close_session()
+        if self._http is not None:
+            await self._http.aclose()
+        try:
+            await self.client.close()
+        except Exception as e:
+            logger.warning("Error closing chain client: %s", e)
+        self.subtensor.close()
 
     def _signal_handler(self, signum, frame):
         logger.info("Received signal %d, shutting down...", signum)

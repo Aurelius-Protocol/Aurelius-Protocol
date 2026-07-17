@@ -366,19 +366,43 @@ chown -R 1000:1000 ./data ./simdata
 
 ### Dependency notes for source builds
 
-If you're running from a source checkout and see one of these at import time, the lock
-file gives you the tested dep combination:
+The supported SDK is **bittensor 11.x** (the unified `bittensor-core` line; the lock
+pins `bittensor==11.0.0`). bittensor 11 ships `btcli` and the wallet itself — do
+**not** install the superseded `bittensor-cli` or `bittensor-wallet` packages
+alongside it; they silently shadow `btcli` and cause import confusion. The 10.x line
+is end-of-life upstream (its repo was archived 2026-07-10) and cannot run this code.
 
-- `RuntimeError: Conflict detected: 'scalecodec' … conflicts with 'cyscale'` —
-  `async-substrate-interface` 2.x added a conflict check that trips when scalecodec is
-  also present. The lock pins `async-substrate-interface==1.6.3`, which doesn't include
-  the check.
-- `ImportError: cannot import name 'ScaleObj' from 'async_substrate_interface.types'` —
-  bittensor newer than `10.2.x` imports `ScaleObj`, which isn't in the 1.6.x line. The
-  lock pins `bittensor==10.2.0`, which doesn't need it.
+Since bittensor 11 removed the axon/dendrite/synapse stack, this repo carries its own
+authenticated HTTP transport (`aurelius/transport.py`, built on `bittensor.http_auth`
+with the same wire payload as before). Consequences for operators:
 
-Either way: `pip install -r requirements.lock` before `pip install -e .` to anchor the
-resolution to known-good versions.
+- **Validators and miners must upgrade together** — the transport is not
+  wire-compatible with pre-11 releases of this repo.
+- The miner's port/IP env vars are unchanged (`AXON_PORT`, `AXON_EXTERNAL_IP`,
+  `AXON_EXTERNAL_PORT`); the endpoint is published on-chain via the ServeAxon intent
+  at miner startup.
+- Unlike the old Synapse protocol, **both requests and responses are signed and
+  verified** (with nonce replay protection), so unauthenticated peers are rejected
+  at the transport layer.
+
+For source builds, always use a **fresh venv** — environments carrying 10.x-era
+packages (`async-substrate-interface`, `cyscale`, `scalecodec`, `bittensor-wallet`)
+do not upgrade in place cleanly:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -c requirements.lock -e .
+```
+
+The Docker image installs from `requirements.lock`, so published builds cannot drift
+with upstream releases. To regenerate the lock after changing dependencies:
+
+```bash
+uv pip compile pyproject.toml \
+  --extra ml --extra simulation --extra llm \
+  --universal --python-version 3.10 \
+  -o requirements.lock
+```
 
 ---
 
@@ -462,8 +486,9 @@ remote-tier values.
 
 ## Development
 
-Development and CI typically run from a source checkout. Pairing the lock file with the
-editable install keeps dep resolution aligned with what the published image builds from:
+Development and CI typically run from a source checkout. Using the lock file as a
+constraints file (`-c`) keeps dep resolution aligned with what the published image
+builds from, while dev-only tools float within their pyproject ranges:
 
 ```bash
 git clone https://github.com/Aurelius-Protocol/Aurelius-Protocol.git
@@ -472,8 +497,7 @@ cd Aurelius-Protocol
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install -r requirements.lock
-pip install -e ".[ml,simulation,dev]"
+pip install -c requirements.lock -e ".[ml,simulation,dev]"
 
 cp .env.example .env
 $EDITOR .env                     # ENVIRONMENT=local for a testlab loop

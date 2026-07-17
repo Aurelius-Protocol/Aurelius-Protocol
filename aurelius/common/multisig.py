@@ -28,14 +28,17 @@ def derive_multisig_address(
     py-substrate-interface. Signatories are sorted by their 32-byte public key
     before hashing, so the result is independent of input ordering.
     """
-    from scalecodec.utils.ss58 import ss58_decode, ss58_encode
+    # bittensor 11 ships ss58 helpers natively (sp_core); unlike the old
+    # scalecodec function, ss58_decode returns raw bytes, not a hex string.
+    # tests/common/test_multisig.py pins the golden vector.
+    from bittensor.sp_core import ss58_decode, ss58_encode
 
     if threshold < 1:
         raise ValueError(f"threshold must be >= 1, got {threshold}")
     if len(signatories) < threshold:
         raise ValueError(f"need at least {threshold} signatories to satisfy threshold, got {len(signatories)}")
 
-    pubkeys = [bytes.fromhex(ss58_decode(s)) for s in signatories]
+    pubkeys = [bytes(ss58_decode(s)) for s in signatories]
     pubkeys.sort()
 
     entropy = b"modlpy/utilis" + b"".join(pubkeys) + struct.pack("<H", threshold)
