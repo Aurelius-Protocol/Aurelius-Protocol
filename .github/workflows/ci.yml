@@ -69,13 +69,14 @@ jobs:
           import inspect
 
           import bittensor as bt
-          from bittensor.utils.weight_utils import process_weights_for_netuid  # noqa: F401
 
-          assert "mechid" in inspect.signature(bt.Subtensor.set_weights).parameters
+          assert "mechid" in inspect.signature(bt.set_weights).parameters
+          for name in ("http_auth", "ServeAxon", "Client"):
+              assert hasattr(bt, name), f"bittensor 11 API missing {name}"
 
-          # Golden vector from tests/common/test_multisig.py: proves the
-          # scalecodec namespace (served by cyscale under bittensor >=10.3)
-          # still produces byte-identical ss58 multisig derivation.
+          # Golden vector from tests/common/test_multisig.py: proves
+          # bt.sp_core's ss58 codec still produces byte-identical
+          # multisig derivation.
           from aurelius.common.multisig import derive_multisig_address
 
           assert derive_multisig_address(
@@ -89,6 +90,7 @@ jobs:
 
           import aurelius.miner.miner  # noqa: F401
           import aurelius.protocol  # noqa: F401
+          import aurelius.transport  # noqa: F401
           import aurelius.validator.validator  # noqa: F401
 
           print("resolve-check OK: bittensor", bt.__version__)

@@ -366,32 +366,33 @@ chown -R 1000:1000 ./data ./simdata
 
 ### Dependency notes for source builds
 
-The supported bittensor SDK window is **10.3.0–10.5.0** (chain runtime v432, enacted
-2026-07-16, is not compatible with older SDKs). The lock pins `bittensor==10.5.0`.
-bittensor 11.x is the repackaged `bittensor-core` line and is intentionally excluded
-by the `<11` bound — do not install it alongside this repo.
+The supported SDK is **bittensor 11.x** (the unified `bittensor-core` line; the lock
+pins `bittensor==11.0.0`). bittensor 11 ships `btcli` and the wallet itself — do
+**not** install the superseded `bittensor-cli` or `bittensor-wallet` packages
+alongside it; they silently shadow `btcli` and cause import confusion. The 10.x line
+is end-of-life upstream (its repo was archived 2026-07-10) and cannot run this code.
 
-If you're running from a source checkout and see one of these at import time, your
-environment predates the 10.5.0 stack:
+Since bittensor 11 removed the axon/dendrite/synapse stack, this repo carries its own
+authenticated HTTP transport (`aurelius/transport.py`, built on `bittensor.http_auth`
+with the same wire payload as before). Consequences for operators:
 
-- `ImportError: cannot import name 'ScaleObj' from 'async_substrate_interface.types'` —
-  a stale `async-substrate-interface` 1.6.x is still installed; bittensor ≥10.3 needs
-  the 2.x line (the lock pins 2.2.1).
-- `RuntimeError: Conflict detected: 'scalecodec' … conflicts with 'cyscale'` — the old
-  `py-scale-codec` package is still installed. bittensor ≥10.3 uses `cyscale`, which
-  ships the same `scalecodec` module namespace, and `async-substrate-interface` 2.x
-  refuses to start while both distributions are present.
+- **Validators and miners must upgrade together** — the transport is not
+  wire-compatible with pre-11 releases of this repo.
+- The miner's port/IP env vars are unchanged (`AXON_PORT`, `AXON_EXTERNAL_IP`,
+  `AXON_EXTERNAL_PORT`); the endpoint is published on-chain via the ServeAxon intent
+  at miner startup.
+- Unlike the old Synapse protocol, **both requests and responses are signed and
+  verified** (with nonce replay protection), so unauthenticated peers are rejected
+  at the transport layer.
 
-The reliable remedy is a **fresh venv** — the scalecodec→cyscale swap shares a module
-path and does not upgrade in place cleanly:
+For source builds, always use a **fresh venv** — environments carrying 10.x-era
+packages (`async-substrate-interface`, `cyscale`, `scalecodec`, `bittensor-wallet`)
+do not upgrade in place cleanly:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -c requirements.lock -e .
 ```
-
-(In-place alternative: `pip uninstall scalecodec cyscale -y && pip install cyscale --force-reinstall`,
-then reinstall with the lock as above.)
 
 The Docker image installs from `requirements.lock`, so published builds cannot drift
 with upstream releases. To regenerate the lock after changing dependencies:

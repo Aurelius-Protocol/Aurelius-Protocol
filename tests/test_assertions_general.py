@@ -59,19 +59,24 @@ class TestGI06BurnUidValidation:
     silent misrouting of emissions would be worse."""
 
     def _mock_metagraph(self, n: int, burn_stake: float = 0.0, burn_permit: bool = False):
+        from types import SimpleNamespace
         from unittest.mock import MagicMock
 
+        # bittensor 11 snapshot shape: neurons list carries per-uid fields.
+        # We only exercise BURN_UID (200), present iff n > 200.
         mg = MagicMock()
-        mg.n = n
-        # 256-wide slots; we only exercise BURN_UID (200)
-        mg.hotkeys = [f"hk_{i}" for i in range(max(n, 201))]
-        stakes = [0.0] * max(n, 201)
-        permits = [False] * max(n, 201)
-        if n > 200:
-            stakes[200] = burn_stake
-            permits[200] = burn_permit
-        mg.S = stakes
-        mg.validator_permit = permits
+        mg.num_uids = n
+        mg.neurons = [
+            SimpleNamespace(
+                uid=i,
+                hotkey=f"hk_{i}",
+                total_stake=(burn_stake if i == 200 else 0.0),
+                validator_permit=(burn_permit if i == 200 else False),
+                axon=None,
+            )
+            for i in range(n)
+        ]
+        mg.hotkeys = [neuron.hotkey for neuron in mg.neurons]
         return mg
 
     def _make_validator(self):
@@ -90,7 +95,7 @@ class TestGI06BurnUidValidation:
         v.metagraph = self._mock_metagraph(n=100)  # < BURN_UID
         with caplog.at_level(logging.WARNING, logger="aurelius.validator.validator"):
             v._validate_burn_uid()
-        assert any("metagraph size" in r.message for r in caplog.records), caplog.records
+        assert any("not present in metagraph" in r.message for r in caplog.records), caplog.records
 
     def test_gi06_warns_when_burn_uid_is_staked(self, caplog):
         import logging

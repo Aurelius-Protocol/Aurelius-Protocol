@@ -31,6 +31,20 @@ class TestScenarioConfigSynapse:
         assert s.scenario_config["name"] == "test_scenario"
         assert s.work_id == "abc123"
 
-    def test_required_hash_fields(self):
-        assert "scenario_config" in ScenarioConfigSynapse.required_hash_fields
-        assert "work_id" in ScenarioConfigSynapse.required_hash_fields
+    def test_wire_fields_present(self):
+        # The Synapse body-hash mechanism died with the bittensor 11
+        # transport swap; what must stay stable is the wire field set
+        # (VU2/VU3: additive-only).
+        fields = set(ScenarioConfigSynapse.model_fields)
+        assert {
+            "request_id",
+            "validator_version",
+            "protocol_version",
+            "scenario_config",
+            "work_id",
+            "work_id_nonce",
+            "work_id_time_ns",
+            "work_id_signature",
+            "miner_version",
+            "miner_protocol_version",
+        } <= fields

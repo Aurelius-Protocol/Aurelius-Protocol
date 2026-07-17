@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,8 +17,8 @@ def _make_validator() -> Validator:
     with (
         patch("aurelius.validator.validator.bt.Wallet") as mock_wallet_cls,
         patch("aurelius.validator.validator.bt.Subtensor"),
-        patch("aurelius.validator.validator.bt.Dendrite"),
-        patch("aurelius.validator.validator.bt.Metagraph") as mock_meta_cls,
+        patch("aurelius.validator.validator.bt.Client"),
+        patch("aurelius.validator.validator.fetch_metagraph_blocking") as mock_fetch,
         patch("aurelius.validator.validator.CentralAPIClient"),
         patch("aurelius.validator.validator.LocalSubmissionQueue"),
     ):
@@ -28,13 +29,17 @@ def _make_validator() -> Validator:
         mock_wallet.name = "test_wallet"
         mock_wallet_cls.return_value = mock_wallet
 
-        # Metagraph mock
+        # Metagraph mock (bittensor 11 snapshot shape: a neurons list)
         mock_meta = MagicMock()
-        mock_meta.n = 3
-        mock_meta.hotkeys = ["miner_hotkey_1", "validator_hotkey_ABC", "miner_hotkey_2"]
-        mock_meta.validator_permit = [False, True, False]
-        mock_meta.axons = [MagicMock(is_serving=True), MagicMock(is_serving=True), MagicMock(is_serving=True)]
-        mock_meta_cls.return_value = mock_meta
+        neurons = [
+            SimpleNamespace(uid=0, hotkey="miner_hotkey_1", total_stake=0.0, validator_permit=False, axon="10.0.0.1:8091"),
+            SimpleNamespace(uid=1, hotkey="validator_hotkey_ABC", total_stake=100.0, validator_permit=True, axon=None),
+            SimpleNamespace(uid=2, hotkey="miner_hotkey_2", total_stake=0.0, validator_permit=False, axon="10.0.0.2:8091"),
+        ]
+        mock_meta.neurons = neurons
+        mock_meta.num_uids = 3
+        mock_meta.hotkeys = [n.hotkey for n in neurons]
+        mock_fetch.return_value = mock_meta
 
         validator = Validator()
     return validator
@@ -71,26 +76,18 @@ class TestSelfHotkeyExcluded:
             return_value={"agreement_rate": 0.9, "total_reports": 50}
         )
 
-        # Mock process_weights_for_netuid to capture what UIDs are passed
-        with patch("aurelius.validator.validator.process_weights_for_netuid") as mock_process:
-            mock_process.return_value = ([], [])
-
-            # Mock subtensor.set_weights so it doesn't actually run
-            validator.subtensor = MagicMock()
-
+        # Mock bt.set_weights to capture the {uid: weight} mapping it receives
+        with patch("aurelius.validator.validator.bt.set_weights") as mock_set:
             await validator._set_weights()
 
-            # Verify process_weights_for_netuid was called
-            assert mock_process.called
-            call_kwargs = mock_process.call_args
-            uids_passed = call_kwargs.kwargs.get("uids", call_kwargs[1].get("uids") if len(call_kwargs) > 1 else call_kwargs[0][0])
+            assert mock_set.called
+            weights_by_uid = mock_set.call_args[0][1]
 
-            # UID for validator_hotkey_ABC is index 1 — it must NOT be present
-            uid_list = uids_passed.tolist()
-            assert 1 not in uid_list, "Validator's own UID should be excluded from weights"
+            # UID for validator_hotkey_ABC is 1 — it must NOT be present
+            assert 1 not in weights_by_uid, "Validator's own UID should be excluded from weights"
             # Miner UIDs 0 and 2 should be present
-            assert 0 in uid_list
-            assert 2 in uid_list
+            assert 0 in weights_by_uid
+            assert 2 in weights_by_uid
 
 
 class TestConsistencyMultiplier:
