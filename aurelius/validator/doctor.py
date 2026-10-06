@@ -52,6 +52,18 @@ class CheckResult:
 # ---------------------------------------------------------------------------
 
 
+def check_validator_enabled(enabled: bool) -> CheckResult:
+    """VALIDATOR_ENABLED master switch (off by default)."""
+    if not enabled:
+        return CheckResult(
+            "validator_enabled",
+            FAIL,
+            "validator disabled — will idle (no miner queries, no Central API, no weights)",
+            "Set VALIDATOR_ENABLED=1 in your .env to run the validator.",
+        )
+    return CheckResult("validator_enabled", PASS, "VALIDATOR_ENABLED=1")
+
+
 def check_environment(environment: str, network: str, netuid: int) -> CheckResult:
     """Basic env sanity: valid triple, not something obviously wrong."""
     known = {"local", "testnet", "mainnet"}
@@ -337,6 +349,7 @@ def run_all() -> tuple[list[CheckResult], int]:
                 "Report this to the Aurelius team — a check should never crash.",
             )
 
+    checks.append(_safe(check_validator_enabled, Config.VALIDATOR_ENABLED))
     checks.append(_safe(check_environment, ENVIRONMENT, Config.NETWORK, Config.NETUID))
     checks.append(_safe(check_testlab_safety, Config.TESTLAB_MODE, Config.NETWORK))
     checks.append(

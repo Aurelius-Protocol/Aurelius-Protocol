@@ -1259,6 +1259,38 @@ def _configure_logging():
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
+DISABLED_LOG_INTERVAL = 600.0
+
+
+def _idle_while_disabled(interval: float = DISABLED_LOG_INTERVAL) -> None:
+    """Idle without touching the wallet, chain, miners, or Central API.
+
+    Used when VALIDATOR_ENABLED is off (the default). Keeps the process
+    alive so `restart: unless-stopped` doesn't crash-loop, and re-logs the
+    reason periodically so it stays visible in `docker compose logs`.
+    The process runs as PID 1 under the Docker CMD's `exec`, which ignores
+    SIGTERM without an explicit handler — install one so `docker stop` and
+    Watchtower updates exit promptly instead of waiting for SIGKILL. The
+    handler raises SystemExit (interrupting time.sleep) rather than setting
+    a threading.Event, whose lock the interrupted main thread may hold.
+    """
+
+    def _handle(signum, frame):
+        logger.info("Received signal %d, shutting down...", signum)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGINT, _handle)
+    signal.signal(signal.SIGTERM, _handle)
+
+    while True:
+        logger.warning(
+            "Validator is DISABLED (VALIDATOR_ENABLED is not '1'). It will not query miners, "
+            "contact the Central API, or set weights. Set VALIDATOR_ENABLED=1 in your .env "
+            "and restart to enable."
+        )
+        time.sleep(interval)
+
+
 def main():
     import sys
 
@@ -1272,6 +1304,12 @@ def main():
         sys.exit(_doctor_main())
 
     _configure_logging()
+    # Default-off master switch (local env only, never remote): bail out
+    # before constructing Validator, which loads the wallet, connects to
+    # the chain, and can set weights.
+    if not Config.VALIDATOR_ENABLED:
+        _idle_while_disabled()
+        return
     validator = Validator()
     asyncio.run(validator.run())
 
