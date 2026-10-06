@@ -21,6 +21,7 @@ from aurelius.validator.doctor import (
     check_iptables,
     check_llm_api_key,
     check_testlab_safety,
+    check_validator_enabled,
     check_wallet_files,
     render_report,
 )
@@ -277,3 +278,14 @@ class TestRunAllIntegration:
         # exercised indirectly by test_runs_without_crashing.
         if r is not None:
             assert r.status == FAIL
+
+
+class TestCheckValidatorEnabled:
+    def test_enabled_passes(self):
+        assert check_validator_enabled(True).status == PASS
+
+    def test_disabled_fails(self):
+        # FAIL, not WARN: doctor must say the validator will not run.
+        r = check_validator_enabled(False)
+        assert r.status == FAIL
+        assert "VALIDATOR_ENABLED=1" in r.hint

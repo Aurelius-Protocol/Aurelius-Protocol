@@ -142,7 +142,7 @@ case "$ROLE" in
     validator)
         echo "Start the validator:"
         echo "  source .venv/bin/activate"
-        echo "  aurelius-validator"
+        echo "  VALIDATOR_ENABLED=1 aurelius-validator"
         echo ""
         echo "Make sure you have:"
         echo "  - A registered hotkey with validator permit on the subnet"

@@ -43,9 +43,13 @@ Prerequisites:
 
 ### 1. Write a minimal `.env`
 
-These four variables are the full operator-side config. The `ENVIRONMENT` profile
+These five variables are the full operator-side config. The `ENVIRONMENT` profile
 auto-selects subnet, network, Central API URL, simulation resources, and safety flags —
 setting any of those directly is almost never necessary.
+
+`VALIDATOR_ENABLED=1` is required: validators are **off by default**. Without it the
+validator idles — it doesn't query miners, contact the Central API, or set weights — and
+logs `Validator is DISABLED` every 10 minutes.
 
 ```bash
 cat > .env <<'EOF'
@@ -53,6 +57,7 @@ ENVIRONMENT=mainnet
 WALLET_NAME=<your-wallet>
 WALLET_HOTKEY=<your-hotkey>
 LLM_API_KEY=<your-openai-compatible-api-key>
+VALIDATOR_ENABLED=1
 EOF
 ```
 
@@ -124,6 +129,7 @@ ENVIRONMENT=testnet
 WALLET_NAME=<your-wallet>
 WALLET_HOTKEY=<your-hotkey>
 LLM_API_KEY=<your-openai-compatible-api-key>
+VALIDATOR_ENABLED=1
 EOF
 ```
 
@@ -317,9 +323,21 @@ Add this to the compose file alongside `aurelius-validator` to auto-pull new ima
 The `aurelius-validator` block in the quickstart already has the
 `com.centurylinklabs.watchtower.enable` label that opts into management.
 
+**Upgrading from an earlier image:** validators are now off by default. A Watchtower-managed
+validator whose `.env` predates `VALIDATOR_ENABLED` will pull the new image and idle (no
+weights, burn or otherwise) until you add `VALIDATOR_ENABLED=1` to `.env` and run
+`docker compose up -d`.
+
 ---
 
 ## Troubleshooting
+
+### `Validator is DISABLED (VALIDATOR_ENABLED is not '1')`
+
+Validators are off by default. The process is idling on purpose: no miner queries, no
+Central API traffic, no `set_weights`. Add `VALIDATOR_ENABLED=1` to `.env` and restart
+(`docker compose up -d`). `aurelius-validator doctor` reports the same state as its
+first check.
 
 ### `Failed to authenticate with Central API: All connection attempts failed`
 
@@ -441,7 +459,7 @@ in [`aurelius/simulation/docker_runner.py`](aurelius/simulation/docker_runner.py
 ## Configuration
 
 The `ENVIRONMENT` profile (`local` / `testnet` / `mainnet`) sets subnet, network, Central
-API URL, simulation resources, and safety flags. Operators normally only set the four
+API URL, simulation resources, and safety flags. Operators normally only set the
 variables in the quickstart; the rest come from the profile.
 
 Required for both validators and miners:
@@ -456,6 +474,7 @@ Validator-only:
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `VALIDATOR_ENABLED` | Master switch. `1` runs the validator; anything else idles it (no miner queries, no Central API, no weights). Local-only — the Central API cannot override it. | `0` (off) |
 | `LLM_API_KEY` | OpenAI-compatible LLM key for Concordia | (empty — required to run simulations) |
 
 Miner-only:
@@ -500,7 +519,7 @@ source .venv/bin/activate
 pip install -c requirements.lock -e ".[ml,simulation,dev]"
 
 cp .env.example .env
-$EDITOR .env                     # ENVIRONMENT=local for a testlab loop
+$EDITOR .env                     # ENVIRONMENT=local + VALIDATOR_ENABLED=1 for a testlab loop
 
 aurelius-validator               # or: aurelius-miner
 ```

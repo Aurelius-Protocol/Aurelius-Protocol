@@ -21,3 +21,12 @@ class TestLocalConfig:
 
     def test_api_defaults(self):
         assert "localhost" in LocalConfig.CENTRAL_API_URL
+
+    def test_validator_disabled_by_default(self):
+        # Auto-updated validators must idle until the operator opts in.
+        # Check the profile defaults, not LocalConfig, which reflects the
+        # developer's own env/.env.
+        from aurelius.config import PROFILES
+
+        for name, profile in PROFILES.items():
+            assert profile["VALIDATOR_ENABLED"] == "0", name

@@ -36,6 +36,11 @@ _COMMON = {
     "AXON_EXTERNAL_PORT": "",
     "MINER_CONFIG_DIR": "configs",
     # Validator
+    # Master switch, off by default: a validator that auto-updates to this
+    # version idles (no miner queries, no Central API, no set_weights) until
+    # the operator sets VALIDATOR_ENABLED=1 locally. Deliberately NOT
+    # remote-overridable — the Central API cannot turn validators on.
+    "VALIDATOR_ENABLED": "0",
     "BURN_MODE": "1",
     "BURN_PERCENTAGE": "1.0",
     "WEIGHT_INTERVAL": "300",
@@ -170,6 +175,7 @@ class LocalConfig:
     MINER_CONFIG_DIR: str = _get("MINER_CONFIG_DIR")
 
     # Validator
+    VALIDATOR_ENABLED: bool = _get("VALIDATOR_ENABLED") == "1"
     BURN_MODE: bool = _get("BURN_MODE") == "1"
     BURN_PERCENTAGE: float = max(0.0, min(1.0, float(_get("BURN_PERCENTAGE"))))
     WEIGHT_INTERVAL: int = int(_get("WEIGHT_INTERVAL"))
