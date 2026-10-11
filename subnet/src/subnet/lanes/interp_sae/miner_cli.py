@@ -10,6 +10,7 @@ from pathlib import Path
 from subnet.miner.config_schema import SchemaUnavailable, load_published_entries, validate_config
 from subnet.miner.journal import AttemptJournal, identity_for
 from subnet.miner.staging import StagingPool
+from subnet.miner.trust import config_signing_pubkey
 from .miner_checks import check_bundle, window_preview
 from .stage import build_candidate, selectable_slot_policy
 
@@ -134,8 +135,9 @@ def status_report(args):
     if args.accounting or args.validator:
         from subnet.miner.serve import minter_from_env
 
-        if args.netuid is None or not os.environ.get("CONFIG_SIGNING_PUBKEY"):
-            raise ValueError("accounting requires --netuid and CONFIG_SIGNING_PUBKEY")
+        if args.netuid is None:
+            raise ValueError("accounting requires --netuid")
+        public_key = config_signing_pubkey()
         minter = minter_from_env(os.environ.get("MINER_HOTKEY", "miner-hotkey"))
     observations = []
     for attempt in attempts:
@@ -155,7 +157,7 @@ def status_report(args):
                         identity,
                         netuid=args.netuid,
                         signer=minter.sign_observation,
-                        config_pubkey=os.environ["CONFIG_SIGNING_PUBKEY"],
+                        config_pubkey=public_key,
                     )
                     journal.record(identity, "charge_observation", "central", facts)
                     result["accounting"] = facts
@@ -192,7 +194,7 @@ def status_report(args):
                         netuid=args.netuid,
                         validator_hotkey=validator,
                         signer=minter.sign_observation,
-                        config_pubkey=os.environ["CONFIG_SIGNING_PUBKEY"],
+                        config_pubkey=public_key,
                     )
                     journal.record(identity, "validator_progress", "validator", facts)
                 except (ValueError, RuntimeError, OSError, TypeError) as exc:

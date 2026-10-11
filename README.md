@@ -16,9 +16,9 @@ the **[lanes folder](lanes/README.md)**. Start with [Lane 1: SAEs](lanes/lane1.m
 Use Linux, Python **3.11 or 3.12**, [uv](https://docs.astral.sh/uv/), a publicly reachable
 IPv4 address and persistent disk. Serving and bundle checks run on CPU; training your own SAE
 requires separate compute. Have a Bittensor wallet, TAO for registration/fees and an evaluation
-budget. Before funding, obtain Aurelius's current **config signing public key**, supported slot,
-chain/runtime pins and work-token purchase instructions. The public key must come from a trusted
-operator channel; downloading a config does not establish its signing key.
+budget. The miner includes Aurelius's **public config verification key** and authenticates
+configuration automatically. Before funding, check the supported slot, current chain/runtime
+pins and active work-token purchase instructions.
 
 ### 1. Install
 
@@ -83,7 +83,6 @@ confirm chain/runtime pins with Aurelius before starting.
 | --- | --- | --- |
 | `NETUID` | `37` | Subnet used by `serve`, `economics` and `observe` unless `--netuid` overrides it. |
 | `CENTRAL_API_URL` | `https://central.aureliusaligned.ai` | Signed configuration, accounting and artifact service. |
-| `CONFIG_SIGNING_PUBKEY` | **Supply** trusted 64-character hex key | Ed25519 public key used to authenticate config and accounting responses. |
 | `SUBSTRATE_URL` | `wss://archive.chain.opentensor.ai:443` | Chain RPC for endpoint publication and finalized chain reads. |
 | `AURELIUS_BT_WALLET` | `miner`, or your wallet name | Directory name under the runtime wallet root. |
 | `AURELIUS_BT_HOTKEY` | `default`, or your hotkey name | Actual signing key loaded from that wallet. |
@@ -134,6 +133,7 @@ These can be omitted to use the defaults shown.
 | `AURELIUS_MINER_METAGRAPH_SYNC_S` | `30` | Refresh interval for finalized caller permits; `1`–`3600` seconds. |
 | `AURELIUS_MINER_STATUS_INTERVAL_S` | `300` | Console status interval; `0` disables, maximum `86400` seconds. |
 | `AURELIUS_CONFIG_SNAPSHOT` | Unset | Read and verify config from a local signed snapshot file instead of fetching `/api/config`; service commands still use `CENTRAL_API_URL`. |
+| `CONFIG_SIGNING_PUBKEY` | Bundled subnet 37 key | Optional 64-character Ed25519 hex public-key override for a different deployment. Omit for subnet 37; an empty or malformed override is rejected. |
 | `MINER_HOTKEY_SS58` | Loaded wallet address | Optional address override for the public `balance` read only. |
 
 ## Miner commands
@@ -166,5 +166,8 @@ aurelius-miner dashboard --port 8093
 The SAE commands `aurelius-sae check`, `preview`, `prepare` and `status`, plus
 `aurelius-sae-upload` and `aurelius-sae-stage`, are documented with their submission options in
 [Lane 1](lanes/lane1.md).
+
+The public verification key is pinned in [the miner release](subnet/src/subnet/miner/trust.py).
+Configuration signatures remain mandatory; a downloaded config cannot replace the trusted key.
 
 Code and documentation are governed by [LICENSE](LICENSE).

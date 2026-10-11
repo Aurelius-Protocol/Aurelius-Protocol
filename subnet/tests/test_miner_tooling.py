@@ -46,7 +46,7 @@ def test_observe_records_remote_facts_into_the_journal(monkeypatch, tmp_path, ca
     journal_path = tmp_path / "attempts.sqlite3"
     AttemptJournal(journal_path).record(identity, "envelope_created", "local", {})
 
-    monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", "02" + "ab" * 32)
+    monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", "ab" * 32)
     monkeypatch.setattr(
         observation_client,
         "observe",
@@ -93,7 +93,7 @@ def test_observe_journals_unavailable_central_as_unknown(monkeypatch, tmp_path, 
     journal_path = tmp_path / "attempts.sqlite3"
     AttemptJournal(journal_path).record(identity, "envelope_created", "local", {})
 
-    monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", "02" + "ab" * 32)
+    monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", "ab" * 32)
 
     def unavailable(*args, **kwargs):
         raise observation_client.ReadUnavailable("network_unavailable")
@@ -106,8 +106,8 @@ def test_observe_journals_unavailable_central_as_unknown(monkeypatch, tmp_path, 
     assert events[-1]["stage"] == "status_unavailable"
 
 
-def test_observe_requires_config_signing_pubkey(monkeypatch, tmp_path, capsys):
-    monkeypatch.delenv("CONFIG_SIGNING_PUBKEY", raising=False)
+def test_observe_rejects_empty_config_signing_pubkey_override(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", "")
     assert cli.main(["observe", "--journal", str(tmp_path / "a.sqlite3")]) == 2
     assert "CONFIG_SIGNING_PUBKEY" in capsys.readouterr().err
 

@@ -156,12 +156,13 @@ def run_observe(
     from subnet.miner.journal import AttemptJournal
     from subnet.miner.observation_client import observe, progress
     from subnet.miner.serve import minter_from_env
+    from subnet.miner.trust import config_signing_pubkey
 
-    public_key = os.environ.get("CONFIG_SIGNING_PUBKEY")
-    if not public_key:
+    try:
+        public_key = config_signing_pubkey()
+    except ValueError as exc:
         print(
-            "[aurelius-miner] observe: CONFIG_SIGNING_PUBKEY is required to verify the "
-            "config snapshot",
+            f"[aurelius-miner] observe: {exc}",
             file=sys.stderr,
             flush=True,
         )

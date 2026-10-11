@@ -12,8 +12,8 @@ allocation and the adopted capital mechanisms, see [INCENTIVES.md](../INCENTIVES
 ## Current competition and model
 
 The values below describe [public config](https://central.aureliusaligned.ai/api/config)
-**version 24**, retrieved on **2026-10-11**. Authenticate the current snapshot with the operator's
-signing key before preparing a submission. A config download alone does not establish its key.
+**version 24**, retrieved on **2026-10-11**. The miner authenticates the current snapshot with
+the public verification key included in its release before preparing a submission.
 
 | Parameter | Current subnet 37 slot |
 | --- | --- |
@@ -311,60 +311,83 @@ SEED = 42
 
 torch.set_default_dtype(torch.float32)
 torch.manual_seed(SEED)
-cfg = LanguageModelSAERunnerConfig.from_dict({
-    "model_name": MODEL,
-    "hook_name": "blocks.16.hook_resid_post",
-    "model_from_pretrained_kwargs": {"revision": REVISION, "dtype": "bfloat16"},
-    "context_size": 2048,
-    "prepend_bos": True,
-    "exclude_special_tokens": True,
-    "seqpos_slice": [None],
-    "dataset_path": str(Path("train.jsonl").resolve()),
-    "dataset_trust_remote_code": False,
-    "is_dataset_tokenized": False,
-    "streaming": True,
-    "training_tokens": 100_003_840,
-    "store_batch_size_prompts": 8,
-    "n_batches_in_buffer": 32,
-    "train_batch_size_tokens": 4096,
-    "prefetch_llm_batches": False,
-    "lr": 3e-4,
-    "lr_scheduler_name": "constant",
-    "lr_warm_up_steps": 1000,
-    "device": "cuda",
-    "dtype": "float32",
-    "autocast": True,
-    "autocast_lm": False,
-    "seed": SEED,
-    "checkpoint_path": "training-checkpoints",
-    "save_final_checkpoint": True,
-    "output_path": "training-output",
-    "logger": {"log_to_wandb": False, "wandb_id": "lane1-topk80"},
-    "sae": {
-        "architecture": "topk", "d_in": 4096, "d_sae": 32768, "k": 80,
-        "device": "cuda", "dtype": "float32",
-        "normalize_activations": "none", "reshape_activations": "none",
-        "apply_b_dec_to_input": False, "rescale_acts_by_decoder_norm": True,
-    },
-})
+cfg = LanguageModelSAERunnerConfig.from_dict(
+    {
+        "model_name": MODEL,
+        "hook_name": "blocks.16.hook_resid_post",
+        "model_from_pretrained_kwargs": {"revision": REVISION, "dtype": "bfloat16"},
+        "context_size": 2048,
+        "prepend_bos": True,
+        "exclude_special_tokens": True,
+        "seqpos_slice": [None],
+        "dataset_path": str(Path("train.jsonl").resolve()),
+        "dataset_trust_remote_code": False,
+        "is_dataset_tokenized": False,
+        "streaming": True,
+        "training_tokens": 100_003_840,
+        "store_batch_size_prompts": 8,
+        "n_batches_in_buffer": 32,
+        "train_batch_size_tokens": 4096,
+        "prefetch_llm_batches": False,
+        "lr": 3e-4,
+        "lr_scheduler_name": "constant",
+        "lr_warm_up_steps": 1000,
+        "device": "cuda",
+        "dtype": "float32",
+        "autocast": True,
+        "autocast_lm": False,
+        "seed": SEED,
+        "checkpoint_path": "training-checkpoints",
+        "save_final_checkpoint": True,
+        "output_path": "training-output",
+        "logger": {"log_to_wandb": False, "wandb_id": "lane1-topk80"},
+        "sae": {
+            "architecture": "topk",
+            "d_in": 4096,
+            "d_sae": 32768,
+            "k": 80,
+            "device": "cuda",
+            "dtype": "float32",
+            "normalize_activations": "none",
+            "reshape_activations": "none",
+            "apply_b_dec_to_input": False,
+            "rescale_acts_by_decoder_norm": True,
+        },
+    }
+)
 
 tokenizer = AutoTokenizer.from_pretrained(
-    MODEL, revision=REVISION, trust_remote_code=False,
-    use_fast=True, add_bos_token=False,
+    MODEL,
+    revision=REVISION,
+    trust_remote_code=False,
+    use_fast=True,
+    add_bos_token=False,
 )
 model = HookedTransformer.from_pretrained_no_processing(
-    MODEL, revision=REVISION, tokenizer=tokenizer, trust_remote_code=False,
-    use_safetensors=True, dtype=torch.bfloat16, device="cuda", n_devices=1,
-    default_prepend_bos=True, default_padding_side="right",
+    MODEL,
+    revision=REVISION,
+    tokenizer=tokenizer,
+    trust_remote_code=False,
+    use_safetensors=True,
+    dtype=torch.bfloat16,
+    device="cuda",
+    n_devices=1,
+    default_prepend_bos=True,
+    default_padding_side="right",
 )
 model.eval()
 model.requires_grad_(False)
 dataset = load_dataset(
-    "json", data_files="train.jsonl", split="train", streaming=True,
+    "json",
+    data_files="train.jsonl",
+    split="train",
+    streaming=True,
 ).shuffle(seed=SEED, buffer_size=10_000)
 
 LanguageModelSAETrainingRunner(
-    cfg, override_model=model, override_dataset=dataset,
+    cfg,
+    override_model=model,
+    override_dataset=dataset,
 ).run()
 
 bundle = Path("bundle")

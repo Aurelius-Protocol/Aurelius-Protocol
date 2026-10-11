@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 
 from subnet.shared.config_snapshot import SnapshotInvalid, verify_snapshot
 from subnet.shared.canonicalization import parse_canonical_json
+from subnet.miner.trust import config_signing_pubkey
 
 _TYPES = {
     "string": str,
@@ -57,12 +58,10 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 def config_source(environ=None) -> tuple[str, str, str]:
     """Bind source and verification key together; running caches never switch authorities."""
     env = os.environ if environ is None else environ
-    pubkey = env.get("CONFIG_SIGNING_PUBKEY", "")
     try:
-        if len(pubkey) != 64 or len(bytes.fromhex(pubkey)) != 32:
-            raise ValueError
-    except (TypeError, ValueError):
-        raise SchemaUnavailable("CONFIG_SIGNING_PUBKEY must be a 32-byte hex key") from None
+        pubkey = config_signing_pubkey(env)
+    except ValueError as exc:
+        raise SchemaUnavailable(str(exc)) from None
     path = env.get("AURELIUS_CONFIG_SNAPSHOT")
     if path:
         return "file", path, pubkey
@@ -246,7 +245,8 @@ def main(argv: list[str] | None = None) -> int:
 
     `python -m subnet.miner.config_schema --out entries.json` reads the snapshot through the same
     seam every miner command uses (`AURELIUS_CONFIG_SNAPSHOT` file, else `CENTRAL_API_URL`
-    `/api/config`), verifies it against `CONFIG_SIGNING_PUBKEY`, and writes only the `entries`
+    `/api/config`), verifies it against the shipped key or `CONFIG_SIGNING_PUBKEY` override,
+    and writes only the `entries`
     object (the shape the ADR-0229 drills consume as `--entries`). An unverifiable snapshot exits 2
     and writes nothing; an existing output file is never overwritten.
     """

@@ -94,11 +94,13 @@ def main(argv: list[str] | None = None) -> int:
         import json
         from subnet.miner.economics_client import read_economics
         from subnet.miner.serve import minter_from_env
+        from subnet.miner.trust import config_signing_pubkey
 
+        try:
+            public_key = config_signing_pubkey()
+        except ValueError as exc:
+            parser.error(str(exc))
         minter = minter_from_env(os.environ.get("MINER_HOTKEY", "miner-hotkey"))
-        public_key = os.environ.get("CONFIG_SIGNING_PUBKEY")
-        if not public_key:
-            parser.error("economics requires CONFIG_SIGNING_PUBKEY")
         result = read_economics(
             os.environ.get("CENTRAL_API_URL", "http://127.0.0.1:4000"),
             hotkey=minter.hotkey_ss58,

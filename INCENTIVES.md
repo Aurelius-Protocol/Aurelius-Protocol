@@ -23,7 +23,7 @@ on **2026-10-11**, declares the following subnet 37 policy:
 | Unused share disposition | `to_burn` |
 
 This is a dated reading of published policy, not a fixed future reward promise or evidence of
-a particular finalized payout. The miner authenticates config against the operator signing key.
+a particular finalized payout. The miner authenticates config against its bundled public key.
 Check the current authenticated policy, result, charge receipt and on-chain payment separately.
 
 The capital and purchase-retention formulas below describe the adopted economic design. They
