@@ -15,7 +15,7 @@ The values below describe [public config](https://central.aureliusaligned.ai/api
 **version 24**, retrieved on **2026-10-11**. Authenticate the current snapshot with the operator's
 signing key before preparing a submission. A config download alone does not establish its key.
 
-| Parameter | Current SN37 slot |
+| Parameter | Current subnet 37 slot |
 | --- | --- |
 | Slot ID | `olmo2-7b-l16-sn37-proof` |
 | Status | `enabled` |
@@ -45,8 +45,8 @@ the artifact passed the measured sparsity or scientific gates. Model identity, h
 precision and inference semantics must match the slot. Do not train on a different checkpoint
 and change the metadata to make it look compatible.
 
-The older `olmo2-7b-l16-mvp` slot in the same snapshot is **disabled**. Do not treat it as the
-mainnet submission target. Testnet SN455 has a separate signed configuration.
+The older `olmo2-7b-l16-mvp` slot in the same snapshot is **disabled**. Use the enabled
+`olmo2-7b-l16-sn37-proof` slot above.
 
 ## What you submit
 
@@ -406,7 +406,7 @@ environment, set:
 export SLOT_ID=olmo2-7b-l16-sn37-proof
 export BUNDLE=/absolute/path/to/bundle
 export HOTKEY_SS58=YOUR_REGISTERED_HOTKEY_SS58
-# Set HEAD to a fresh finalized block height observed from your SN37 chain endpoint.
+# Set HEAD to a fresh finalized block height observed from your subnet 37 chain endpoint.
 export HEAD=YOUR_FINALIZED_BLOCK_HEIGHT
 ```
 

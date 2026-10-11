@@ -1,6 +1,6 @@
 # Aurelius Protocol — v5 miner
 
-Aurelius is Bittensor subnet **37** (mainnet; **455** on testnet). Miners build tools that help
+Aurelius is Bittensor subnet **37**. Miners build tools that help
 explain and work with language models, submit them for evaluation, and compete for rewards based
 on their usefulness. Each tool type has its own **lane**, evaluation rules and emission allocation.
 Sparse autoencoders (SAEs) are the **first lane**, rather than the purpose of mining itself.
@@ -29,7 +29,7 @@ uv sync --all-packages --extra bt --no-dev --frozen
 source .venv/bin/activate
 ```
 
-On your wallet machine, create or restore a wallet and register its hotkey on SN37:
+On your wallet machine, create or restore a wallet and register its hotkey on subnet 37:
 
 ```sh
 btcli wallet create --wallet miner --wallet-hotkey default
@@ -41,7 +41,6 @@ btcli wallet show --wallet miner --wallet-hotkey default
 Save the seed phrases privately and record the **hotkey SS58 address**. Registration has a
 changing chain fee and is separate from work-token funding. See the
 [Bittensor mining guide](https://www.bittensor.com/docs/guides/mining) for registration details.
-For SN455 use `--network test --netuid 455` and the operator's testnet configuration.
 
 Create the runtime wallet view, then transfer that directory to the serving machine:
 

@@ -10,7 +10,7 @@ effectiveness measures while sharing the miner, accounting and reward-allocation
 ## Current policy versus adopted economic design
 
 The [public configuration](https://central.aureliusaligned.ai/api/config), version **24** retrieved
-on **2026-10-11**, declares the following SN37 policy:
+on **2026-10-11**, declares the following subnet 37 policy:
 
 | Setting | Published value |
 | --- | --- |
@@ -191,14 +191,13 @@ The receipt fixes the rate and consumed lots at purchase time; later aging does 
 past purchase. A lot that exits and returns starts a new retention clock; retained internal moves
 and supported coldkey swaps preserve its history.
 
-The selected localnet/SN455 retention tariff uses a base **1 WT/alpha**. The adopted initial
-mainnet denomination is also **1 base WT/alpha**, but neither decision establishes an active
-mainnet quote. Production pricing requires its own enabled, signed conversion and evaluation
-tariff.
+The adopted initial denomination for subnet 37 is **1 base WT/alpha**. This decision does not
+establish an active purchase quote. Production pricing requires its own enabled, signed
+conversion and evaluation tariff.
 
 ### Evaluation-price calibration
 
-The adopted mainnet calibration rule funds an evaluation even at the maximum 20× purchase
+The adopted calibration rule funds an evaluation even at the maximum 20× purchase
 premium, with 30% operating headroom. For measured all-in evaluation cost `C` and conservatively
 realizable funding value `V` per alpha, expressed in the same currency, the candidate class
 tariff is:
