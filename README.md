@@ -8,7 +8,7 @@ Other interpretability tools, such as probes, steering vectors and logit readout
 own lanes as their evaluation rules are approved and enabled. This release includes the miner,
 SAE submission tools and the shared protocol they need.
 
-**Launch status (2026-10-11):** installation and CPU bundle checks are available, but this release
+**Launch status (2026-10-12):** installation and CPU bundle checks are available, but this release
 does not yet provide a complete path for a new miner to compete. Preview now supports the published 100-block schedule. Public economics and deposit-address reads are live. Work-token funding and the
 backend rollout for registered-miner admission remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
 before training or transferring funds.
@@ -21,8 +21,8 @@ the **[lanes folder](lanes/README.md)**. Start with [Lane 1: SAEs](lanes/lane1.m
 Use Linux, Git, curl, Bash, Python **3.11 or 3.12**, [uv](https://docs.astral.sh/uv/), a publicly reachable
 IPv4 address and persistent disk. Serving and bundle checks run on CPU; training your own SAE
 requires separate compute. Have a Bittensor wallet, TAO for registration/fees and an evaluation
-budget. The miner includes Aurelius's **public config verification key** and authenticates
-configuration automatically. Before funding, check the supported slot, current chain/runtime
+budget. The miner includes Aurelius's **public config and receipt verification keys** and authenticates
+configuration and purchase confirmations automatically. Before funding, check the supported slot, current chain/runtime
 pins and active work-token purchase instructions.
 
 ### 1. Install
@@ -182,6 +182,7 @@ environment. Set `NETUID=37` or pass `--netuid 37` explicitly to commands that a
 | --- | --- | --- |
 | `serve` | `--netuid 37`, `--port 8091` | Publish the endpoint and serve staged candidates. `--port` is the bind port; the advertised port comes from the environment. |
 | `economics` | `--netuid 37` | Read your balance, signed prices and recent receipts using hotkey proof. |
+| `fund` | **Required:** `--alpha AMOUNT`, `--wallet-name NAME`, `--wallet-path PATH`, `--intent-dir PATH`; optional `--fee-cap-tao 0.01`, `--execute`, `--central URL`, `--endpoint WSS_URL` | Preview a WT purchase with a separately held coldkey. `--execute` submits once when funding terms are available. Reuse the same intent directory to check confirmation. |
 | `balance` | `--task-type interp_sae`, `--hotkey SS58` | Public affordability check and deposit-address lookup. Pass the lane task type; its default is `synthetic`. |
 | `validate` | No additional options | Check all staged candidates against their published schemas; does not score or submit them. |
 | `ready` | **Required:** `--task-type interp_sae`, `--fanout-window WINDOW_ID` | Use `fanout_window` from SAE preview, not a block height. Check local eligibility; does not establish funding or discovery. |
@@ -199,6 +200,29 @@ aurelius-miner economics --netuid 37
 aurelius-miner pool list
 aurelius-miner dashboard --port 8093
 ```
+
+### Fund evaluations
+
+The `fund` command is included, but public funding is still awaiting the backend rollout.
+It refuses to sign when the API or funding terms are unavailable. Once funding opens, run it
+on your wallet machine with alpha staked on subnet 37 under your registered serving hotkey.
+The funding wallet's coldkey must own that hotkey; keep TAO available for chain fees.
+The command checks unlocked alpha and registration collateral, and requires a transfer worth
+at least the chain's 0.0001 TAO minimum at the current price.
+Use your hotkey wallet view for `AURELIUS_BT_WALLET_PATH` and pass the separate full wallet
+root with `--wallet-path`:
+
+```sh
+aurelius-miner fund --alpha 10 --wallet-name miner \
+  --wallet-path "$HOME/.bittensor/wallets" --intent-dir "$PWD/funding/purchase-001"
+# Review the amount, treasury and fee before adding --execute to the same command.
+```
+
+Alpha is transferred to the published treasury. Credit is confirmed by a signed WT receipt;
+chain inclusion alone does not confirm credit. Keep the intent directory. If the response is
+lost or status is pending, rerun the same command with that directory to inspect the original
+transfer. Use a new directory only for a deliberate new purchase. Purchase rates, retention
+and evaluation rewards are explained in the [lane guide](lanes/lane1.md).
 
 The SAE commands `aurelius-sae check`, `preview`, `prepare` and `status`, plus
 `aurelius-sae-upload` and `aurelius-sae-stage`, are documented with their submission options in

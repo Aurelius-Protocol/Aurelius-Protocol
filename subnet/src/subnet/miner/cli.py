@@ -6,7 +6,8 @@ The original v1 commands are: `deposit`, `balance`, `validate`, `serve` (plan §
   server on `AURELIUS_MINER_HTTP_PORT` (8092 in testlab), signing as `MINER_HOTKEY`.
 - `validate`: check staged items against the PUBLISHED config_schema (no lane import).
 - `balance`: a public affordability read + the deposit address (no session, no coldkey).
-- `deposit`: the sole coldkey unlocker; uses it LOCALLY only (never in a payload).
+- `deposit`: historical address read with optional local coldkey unlock.
+- `fund`: separate coldkey funding command, exact native-alpha transfer with durable intent.
 - `observe`: lane-agnostic refresh of charge/refund + validator-progress facts into the local
   journal (the dashboard's data source; absence of evidence stays unknown).
 
@@ -84,11 +85,60 @@ def main(argv: list[str] | None = None) -> int:
         help="explicitly unlock the coldkey for local deposit signing (never sent)",
     )
 
+    fund = sub.add_parser(
+        "fund", help="preview or submit one native-alpha WT purchase on subnet 37"
+    )
+    fund.add_argument(
+        "--alpha", required=True, help="exact alpha amount, at most nine decimal places"
+    )
+    fund.add_argument("--fee-cap-tao", default="0.01")
+    fund.add_argument("--wallet-name", required=True, help="separate coldkey funding wallet")
+    fund.add_argument("--wallet-path", required=True)
+    fund.add_argument("--hotkey-name", default="default")
+    fund.add_argument(
+        "--intent-dir",
+        required=True,
+        help="durable directory for this one purchase; reuse to observe it",
+    )
+    fund.add_argument(
+        "--execute", action="store_true", help="sign and submit; default is check-only"
+    )
+    fund.add_argument(
+        "--endpoint",
+        default=os.environ.get("SUBSTRATE_URL", "wss://archive.chain.opentensor.ai:443"),
+    )
+    fund.add_argument(
+        "--central", default=os.environ.get("CENTRAL_API_URL", "https://central.aureliusaligned.ai")
+    )
+
     serve = sub.add_parser("serve", help="serve /v1/query (mint a fresh work_id per request)")
     serve.add_argument("--netuid", type=int, default=int(os.environ.get("NETUID", "2")))
     serve.add_argument("--port", type=int, default=8091)
 
     args = parser.parse_args(argv)
+
+    if args.command == "fund":
+        import json
+        from subnet.miner.funding import FundingRefused, run
+        from subnet.miner.read_client import ReadUnavailable
+
+        try:
+            result = run(
+                base_url=args.central,
+                endpoint=args.endpoint,
+                wallet_path=args.wallet_path,
+                wallet_name=args.wallet_name,
+                hotkey_name=args.hotkey_name,
+                alpha=args.alpha,
+                fee_cap=args.fee_cap_tao,
+                execute=args.execute,
+                directory=args.intent_dir,
+            )
+        except (FundingRefused, ReadUnavailable) as exc:
+            print(json.dumps({"status": "refused", "executed": False, "reason": str(exc)}))
+            return 2
+        print(json.dumps(result, indent=2))
+        return 0
 
     if args.command == "economics":
         import json
