@@ -197,21 +197,15 @@ purchase launch is not selected. These requirements do not establish an active p
 quote: verified mainnet lot history, an enabled tariff and the purchase/receipt path must
 be available first.
 
-### Evaluation-price calibration
+### Evaluation funding and price changes
 
-The adopted calibration rule funds an evaluation even at the maximum 20× purchase
-premium, with 30% operating headroom. For measured all-in evaluation cost `C` and conservatively
-realizable funding value `V` per alpha, expressed in the same currency, the candidate class
-tariff is:
+Compute and associated operating costs are covered by the operator from external
+sources, using owned hardware. WT pays for evaluation access; the selected **10 WT
+per SAE evaluation** does not depend on recovering GPU costs from deposited alpha.
 
-```text
-price_WT = max(1, ceil(20 * 1.30 * C/V)) = max(1, ceil(26 * C/V))
-```
-
-This is a rule for deriving a prospective tariff, not a measured cost or a live price. A lower
-subsidized pilot tariff needs an explicit funded budget and exhaustion policy. Prospective
-production changes are intended to have at least 24 hours' notice, expressed through a selected
-finalized-block activation interval; historical purchases and receipts are not repriced.
+Initial price activation and future changes require at least **7,200 finalized
+mainnet blocks** of notice—about 24 hours at 12 seconds per block. Historical
+purchases, balances and signed receipts are not repriced.
 
 Budget with the actual quote and receipts, including training, failed attempts, renewals and
 operating costs. Neither the capital formulas nor the retention schedule guarantee profit.
