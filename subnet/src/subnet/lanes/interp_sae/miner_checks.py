@@ -153,7 +153,9 @@ def window_preview(
     offset = policy["phase_offset_blocks"]
     if (
         type(cadence) is not int
-        or cadence < 2 * window_blocks
+        or cadence < window_blocks
+        or cadence % window_blocks
+        or offset % window_blocks
         or type(offset) is not int
         or offset < 0
     ):

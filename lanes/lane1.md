@@ -428,14 +428,14 @@ Checked on **2026-10-11**:
 
 | Requirement | Current gap |
 | --- | --- |
-| Compatible signed schedule | Config 24 publishes cadence `C = 100` and window `W = 100`; this miner requires `C >= 2*W`, so `preview` and `prepare` refuse. |
-| Public evaluation funding | Existing launch credits do not establish a self-service work-token purchase path. A new hotkey needs a supported funding method before paid admission; no extra signup is required by this miner. |
+| Compatible signed schedule | Fixed in this branch: adjacent `C = W = 100` windows are supported. Overlapping or unaligned schedules remain refused. |
+| Public evaluation funding | Launch requires 10 WT per SAE evaluation, 1 base WT/alpha and the full retention premium described in [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). Verified mainnet lot history and purchase/receipt integration remain incomplete; bootstrap credits are not public funding. |
+| Registered-miner admission | The live backend still pins the original miner. A source change admits registered hotkeys with finalized ownership and paid-result verification; its backend rollout is pending. No extra signup flow is planned. |
 | Economics read | The public ingress omits `/api/miner/economics`; a read-only probe returned HTTP 200 with an empty body, rather than API JSON. `economics` cannot confirm your account through that route yet. |
 | Deposit-address lookup | `/api/deposit_address` is also absent from public ingress and returned an empty body. `balance` may report an unavailable address. Do not infer a transfer destination. |
 
 The config and public verdict routes return JSON, and artifact ingress has a live backend.
-Those checks do not establish a successful funded submission from a new wallet. The schedule,
-funding and API gaps require operator changes; changing local policy or retrying an unfunded
+Those checks do not establish a successful funded submission from a new wallet. The remaining funding, admission and API gaps require backend changes; changing local policy or retrying an unfunded
 submission does not resolve them.
 
 ### Read the finalized chain head

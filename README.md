@@ -9,9 +9,8 @@ own lanes as their evaluation rules are approved and enabled. This release inclu
 SAE submission tools and the shared protocol they need.
 
 **Launch status (2026-10-11):** installation and CPU bundle checks are available, but this release
-does not yet provide a complete path for a new miner to compete. The published schedule is
-incompatible with `preview`/`prepare`, public work-token funding is not established, and the
-economics API is not exposed by the public ingress. See [current blockers](lanes/lane1.md#current-participation-blockers)
+does not yet provide a complete path for a new miner to compete. Preview now supports the published 100-block schedule. Public work-token funding and the
+backend rollout for public API access and registered-miner admission remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
 before training or transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in
@@ -217,7 +216,7 @@ Configuration signatures remain mandatory; a downloaded config cannot replace th
 | Chain/runtime pin mismatch | Compare the read-only chain snapshot in [Lane 1](lanes/lane1.md#read-the-finalized-chain-head). Confirm the endpoint and approved pins before retrying. |
 | Cannot reach `/health` | Check the bind port, advertised IPv4/port, firewall/NAT and startup logs. HTTP 503 means readiness failed; check publication/config evidence. |
 | Config signature/key error | For subnet 37, omit `CONFIG_SIGNING_PUBKEY`; check config connectivity. Do not replace the key with one received from the server. |
-| `invalid signed cadence` | The current schedule is incompatible; see the lane's participation blockers. |
+| `invalid signed cadence` | The signed cadence or offset is invalid or unaligned with the commit window; refresh authenticated config. |
 | Economics unavailable, or affordability is false/unknown | Funding is insufficient or unconfirmed. See funding status in the lane guide; do not send funds to an unavailable address. |
 | Healthy miner, no submissions | Check `pool list`, bundle validation, the previewed window and `ready --fanout-window WINDOW_ID`. Uploading alone does not submit. |
 

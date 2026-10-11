@@ -85,3 +85,24 @@ def test_schedule_boundaries_never_select_expired_epoch():
     assert window_preview(p, head=2300)["slot_epoch"] == 2
     assert window_preview(p, head=2300, epoch=1)["status"] == "expired"
     assert window_preview(p, head=0)["commit_start"] == 2200
+
+
+def test_adjacent_commit_windows_match_the_production_100_block_schedule():
+    p = policy() | {"cadence_blocks": 100, "phase_offset_blocks": 9104900}
+    first = window_preview(p, head=9104700)
+    assert first["slot_epoch"] == 0
+    assert (first["commit_start"], first["commit_end_exclusive"]) == (9104700, 9104800)
+    assert first["status"] == "open"
+    assert window_preview(p, head=9104799)["slot_epoch"] == 0
+    following = window_preview(p, head=9104800)
+    assert following["slot_epoch"] == 1
+    assert following["commit_start"] == first["commit_end_exclusive"]
+    assert following["fanout_window"] == first["fanout_window"] + 1
+    assert window_preview(p, head=9104800, epoch=0)["status"] == "expired"
+
+
+@pytest.mark.parametrize("cadence,offset", [(99, 0), (150, 0), (100, 1)])
+def test_overlapping_or_unaligned_signed_windows_remain_refused(cadence, offset):
+    p = policy() | {"cadence_blocks": cadence, "phase_offset_blocks": offset}
+    with pytest.raises(ValueError, match="invalid signed cadence"):
+        window_preview(p, head=1000)
