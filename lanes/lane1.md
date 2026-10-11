@@ -422,6 +422,49 @@ training or official scientific evaluation command in this public miner package.
 
 ## Prepare, upload and commit
 
+### Current participation blockers
+
+Checked on **2026-10-11**:
+
+| Requirement | Current gap |
+| --- | --- |
+| Compatible signed schedule | Config 24 publishes cadence `C = 100` and window `W = 100`; this miner requires `C >= 2*W`, so `preview` and `prepare` refuse. |
+| Public evaluation funding | Existing launch credits do not establish a self-service work-token purchase path. A new hotkey needs a supported funding method before paid admission; no extra signup is required by this miner. |
+| Economics read | The public ingress omits `/api/miner/economics`; a read-only probe returned HTTP 200 with an empty body, rather than API JSON. `economics` cannot confirm your account through that route yet. |
+| Deposit-address lookup | `/api/deposit_address` is also absent from public ingress and returned an empty body. `balance` may report an unavailable address. Do not infer a transfer destination. |
+
+The config and public verdict routes return JSON, and artifact ingress has a live backend.
+Those checks do not establish a successful funded submission from a new wallet. The schedule,
+funding and API gaps require operator changes; changing local policy or retrying an unfunded
+submission does not resolve them.
+
+### Read the finalized chain head
+
+With the miner environment exported, this read-only command prints the finalized block and
+chain/runtime identity without loading your wallet:
+
+```sh
+python - <<'PY'
+from dataclasses import asdict
+import json
+import os
+
+from subnet.bittensor_v11 import FinalizedRpc
+
+rpc = FinalizedRpc(os.environ["SUBSTRATE_URL"])
+try:
+    print(json.dumps(asdict(rpc.snapshot()), indent=2))
+finally:
+    rpc.close()
+PY
+```
+
+Compare `chain`, `genesis_hash`, `runtime_spec_version` and `transaction_version` with your
+configured pins. Use `block_number` as `HEAD` below. An unexpected identity requires checking
+the endpoint; an upgrade requires confirmed supported pins, rather than blindly copying values.
+
+### Check and stage a bundle
+
 First complete [installation and serving](../README.md). In a shell with the same miner
 environment, set:
 
@@ -463,7 +506,8 @@ When schedule preview succeeds, upload with your hotkey:
 
 ```sh
 aurelius-sae-upload --bundle "$BUNDLE" --slot-id "$SLOT_ID" \
-  --url https://artifacts.aureliusaligned.ai --bittensor-wallet --progress
+  --url https://artifacts.aureliusaligned.ai --wallet "$AURELIUS_BT_WALLET" \
+  --bittensor-wallet --journal "$AURELIUS_MINER_JOURNAL" --progress
 ```
 
 Save the returned `ref` as `ARTIFACT_REF` and the previewed epoch as `SLOT_EPOCH`. Set
@@ -478,6 +522,11 @@ aurelius-miner validate
 aurelius-miner pool list
 aurelius-miner balance --task-type interp_sae
 ```
+
+Save preview's integer `fanout_window` as `WINDOW_ID` and verify local selection with
+`aurelius-miner ready --task-type interp_sae --fanout-window "$WINDOW_ID"`. This is a window
+identifier, not `HEAD` or the epoch number. Check that affordability is explicitly `true` before
+expecting paid admission; an unavailable address or accounting response is not funding evidence.
 
 Stage before the eligible commitment window and keep the miner reachable throughout it.
 **Uploading alone is not submission.** The evaluator pulls the staged candidate and signed

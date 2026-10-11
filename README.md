@@ -8,12 +8,18 @@ Other interpretability tools, such as probes, steering vectors and logit readout
 own lanes as their evaluation rules are approved and enabled. This release includes the miner,
 SAE submission tools and the shared protocol they need.
 
+**Launch status (2026-10-11):** installation and CPU bundle checks are available, but this release
+does not yet provide a complete path for a new miner to compete. The published schedule is
+incompatible with `preview`/`prepare`, public work-token funding is not established, and the
+economics API is not exposed by the public ingress. See [current blockers](lanes/lane1.md#current-participation-blockers)
+before training or transferring funds.
+
 Competition guides, scoring rules, training instructions and the incentive mechanism live in
 the **[lanes folder](lanes/README.md)**. Start with [Lane 1: SAEs](lanes/lane1.md).
 
 ## Start from scratch
 
-Use Linux, Python **3.11 or 3.12**, [uv](https://docs.astral.sh/uv/), a publicly reachable
+Use Linux, Git, curl, Bash, Python **3.11 or 3.12**, [uv](https://docs.astral.sh/uv/), a publicly reachable
 IPv4 address and persistent disk. Serving and bundle checks run on CPU; training your own SAE
 requires separate compute. Have a Bittensor wallet, TAO for registration/fees and an evaluation
 budget. The miner includes Aurelius's **public config verification key** and authenticates
@@ -22,10 +28,14 @@ pins and active work-token purchase instructions.
 
 ### 1. Install
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first. These commands use
+uv to install Python 3.12 if needed and install the serving dependencies from the supplied lockfile:
+
 ```sh
 git clone https://github.com/Aurelius-Protocol/Aurelius-Protocol.git
 cd Aurelius-Protocol
-uv sync --all-packages --extra bt --no-dev --frozen
+uv python install 3.12
+uv sync --all-packages --extra bt --no-dev --frozen --python 3.12
 source .venv/bin/activate
 ```
 
@@ -35,12 +45,25 @@ Use an existing Bittensor wallet with a **hotkey registered on subnet 37**, and 
 address. Keep enough TAO available for chain fees; registration and evaluation funding are
 separate. The serving machine needs the hotkey signing file and public wallet documents. Keep
 the private coldkey and recovery phrases on your wallet machine.
+If you do not yet have a registered hotkey, follow the [Bittensor mining guide](https://www.bittensor.com/docs/guides/mining)
+to create/register one on subnet 37 before continuing.
 
 Point `AURELIUS_BT_WALLET_PATH` at a runtime wallet root containing only
 `<wallet>/coldkeypub.txt`, `<wallet>/hotkeys/<hotkey>` and `<wallet>/hotkeys/<hotkey>pub.txt`.
 Directories must have permissions `0700`, files `0600`. The included
-[wallet-view helper](scripts/prepare_wallet_view.py) copies this layout from an existing wallet;
-its `--help` lists the source, destination, wallet name, hotkey name and SS58 arguments.
+[wallet-view helper](scripts/prepare_wallet_view.py) copies this layout from an existing wallet.
+On the wallet machine, with this repository and its environment installed, run:
+
+```sh
+python scripts/prepare_wallet_view.py --source "$HOME/.bittensor/wallets" \
+  --output "$PWD/miner-wallets" --wallet miner --hotkey default \
+  --hotkey-ss58 YOUR_REGISTERED_HOTKEY_SS58
+```
+
+Substitute your wallet/hotkey names and matching hotkey address. The destination must be new;
+the helper refuses to overwrite it. Transfer only the generated `miner-wallets` directory to
+the serving machine, preserving permissions, then set `AURELIUS_BT_WALLET_PATH` to its absolute
+path and the wallet/hotkey environment variables to the same names.
 
 ### 3. Configure and serve
 
@@ -50,7 +73,9 @@ cp .env.example .env
 set -a
 . ./.env
 set +a
-mkdir -p "$AURELIUS_MINER_DATA" "$AURELIUS_AXON_PUBLISH_STATE_DIR"
+umask 077
+mkdir -p "$AURELIUS_MINER_DATA" "$AURELIUS_AXON_PUBLISH_STATE_DIR" \
+  "$(dirname "$AURELIUS_BITTENSOR_NONCE_DB")" "$(dirname "$AURELIUS_MINER_JOURNAL")"
 chmod 700 "$AURELIUS_AXON_PUBLISH_STATE_DIR"
 aurelius-miner serve --netuid "$NETUID" --port 8091
 ```
@@ -61,6 +86,17 @@ If using NAT, forward the advertised port to the bind port. Keep the local readi
 from the authorized evaluator. Until you stage an eligible candidate, it serves an idle response.
 A process supervisor should restart the same command and retain the wallet and state directories.
 
+`serve` stays in the foreground. Leave it running; use a second terminal with the same activated
+environment and exported `.env` for submission and monitoring. Check readiness there:
+
+```sh
+curl --fail http://127.0.0.1:8092/health
+```
+
+Expect HTTP 200, `status: "ok"` and your registered hotkey. From a different machine, also check
+`http://YOUR_PUBLIC_IPV4:8091/health` (use your advertised port) to verify firewall/NAT reachability.
+A healthy listener does not prove that you have an eligible candidate, funded evaluations or rewards.
+
 Keep the axon publication journal, nonce database, staging pool and attempt journal across
 restarts. A chain upgrade or ambiguous endpoint publication requires investigating the retained
 evidence and updating approved pins; deleting the journal to force another submission is unsafe.
@@ -69,7 +105,9 @@ evidence and updating approved pins; deleting the journal to force another submi
 
 Follow the [lane guides](lanes/README.md) for the required artifact, training workflow,
 submission commands, scoring and competition rules. [Lane 1](lanes/lane1.md) covers the current
-SAE competition and links to the [incentive mechanism](INCENTIVES.md).
+SAE competition and links to the [incentive mechanism](INCENTIVES.md). You need to train or obtain
+a compatible SAE bundle; starting an empty miner earns no rewards, and no pretrained submission
+bundle is included.
 
 ## Environment variables
 
@@ -82,7 +120,7 @@ confirm chain/runtime pins with Aurelius before starting.
 | Variable | Value / action | Purpose |
 | --- | --- | --- |
 | `NETUID` | `37` | Subnet used by `serve`, `economics` and `observe` unless `--netuid` overrides it. |
-| `CENTRAL_API_URL` | `https://central.aureliusaligned.ai` | Signed configuration, accounting and artifact service. |
+| `CENTRAL_API_URL` | `https://central.aureliusaligned.ai` | Signed configuration and accounting; uploads use the separate artifact URL in the lane guide. |
 | `SUBSTRATE_URL` | `wss://archive.chain.opentensor.ai:443` | Chain RPC for endpoint publication and finalized chain reads. |
 | `AURELIUS_BT_WALLET` | `miner`, or your wallet name | Directory name under the runtime wallet root. |
 | `AURELIUS_BT_HOTKEY` | `default`, or your hotkey name | Actual signing key loaded from that wallet. |
@@ -147,7 +185,7 @@ environment. Set `NETUID=37` or pass `--netuid 37` explicitly to commands that a
 | `economics` | `--netuid 37` | Read your balance, signed prices and recent receipts using hotkey proof. |
 | `balance` | `--task-type interp_sae`, `--hotkey SS58` | Public affordability check and deposit-address lookup. Pass the lane task type; its default is `synthetic`. |
 | `validate` | No additional options | Check all staged candidates against their published schemas; does not score or submit them. |
-| `ready` | **Required:** `--task-type interp_sae`, `--fanout-window BLOCK` | Check local candidate eligibility for a particular window; does not establish funding or chain discovery. |
+| `ready` | **Required:** `--task-type interp_sae`, `--fanout-window WINDOW_ID` | Use `fanout_window` from SAE preview, not a block height. Check local eligibility; does not establish funding or discovery. |
 | `pool list` | `--pool PATH` | List staged items, IDs and enabled states. |
 | `pool enable ITEM_ID` / `pool disable ITEM_ID` | `--pool PATH` | Toggle selection eligibility while preserving history. |
 | `status` | `--journal PATH` | Print the local attempt journal. |
@@ -169,5 +207,18 @@ The SAE commands `aurelius-sae check`, `preview`, `prepare` and `status`, plus
 
 The public verification key is pinned in [the miner release](subnet/src/subnet/miner/trust.py).
 Configuration signatures remain mandatory; a downloaded config cannot replace the trusted key.
+
+## If startup or submission fails
+
+| Symptom | Next check |
+| --- | --- |
+| Python/dependency installation fails | Use Python 3.11/3.12 and the frozen lockfile; confirm the `bt` extra was installed. |
+| Wallet guard rejects startup | Check the root/name/hotkey layout, `0700` directories, `0600` files and absence of a private coldkey. |
+| Chain/runtime pin mismatch | Compare the read-only chain snapshot in [Lane 1](lanes/lane1.md#read-the-finalized-chain-head). Confirm the endpoint and approved pins before retrying. |
+| Cannot reach `/health` | Check the bind port, advertised IPv4/port, firewall/NAT and startup logs. HTTP 503 means readiness failed; check publication/config evidence. |
+| Config signature/key error | For subnet 37, omit `CONFIG_SIGNING_PUBKEY`; check config connectivity. Do not replace the key with one received from the server. |
+| `invalid signed cadence` | The current schedule is incompatible; see the lane's participation blockers. |
+| Economics unavailable, or affordability is false/unknown | Funding is insufficient or unconfirmed. See funding status in the lane guide; do not send funds to an unavailable address. |
+| Healthy miner, no submissions | Check `pool list`, bundle validation, the previewed window and `ready --fanout-window WINDOW_ID`. Uploading alone does not submit. |
 
 Code and documentation are governed by [LICENSE](LICENSE).
