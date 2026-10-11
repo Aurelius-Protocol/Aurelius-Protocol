@@ -8,12 +8,6 @@ Other interpretability tools, such as probes, steering vectors and logit readout
 own lanes as their evaluation rules are approved and enabled. This release includes the miner,
 SAE submission tools and the shared protocol they need; the onboarding below covers the SAE lane.
 
-Aurelius uses a **Null validator** model: one authorized evaluator evaluates submissions and
-publishes the subnet's reward weights. The trusted evaluation harness still performs the scientific
-checks; Null replaces the distributed validator voting model, not evaluation. The coordination
-service owns work-token accounting and signed policy. Miners create and serve artifacts; they do
-not calculate their own scores or deductions.
-
 ## Start from scratch
 
 Use Linux, Python **3.11 or 3.12**, [uv](https://docs.astral.sh/uv/), a publicly reachable
@@ -206,8 +200,8 @@ eligible effective capital after provenance, aging, spending and debt; `H` is th
 reference scale. Fresh retained capital ages more slowly than emission-derived capital. The
 reference fresh-principal floor scales up to 20% of the available lane budget; it does not
 promise every miner a 20% reward. Unawarded weight goes to the burn destination, rather than
-being redistributed to losing miners. The Null evaluator publishes the resulting weights, and
-the chain applies them to determine actual alpha emissions to the registered hotkey.
+being redistributed to losing miners. Published reward weights determine actual on-chain alpha
+emissions to the registered hotkey.
 Burn-only or no-eligible-winner periods pay no miner
 reward from that lane.
 
