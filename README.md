@@ -9,8 +9,8 @@ own lanes as their evaluation rules are approved and enabled. This release inclu
 SAE submission tools and the shared protocol they need.
 
 **Launch status (2026-10-11):** installation and CPU bundle checks are available, but this release
-does not yet provide a complete path for a new miner to compete. Preview now supports the published 100-block schedule. Public work-token funding and the
-backend rollout for public API access and registered-miner admission remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
+does not yet provide a complete path for a new miner to compete. Preview now supports the published 100-block schedule. Public economics and deposit-address reads are live. Work-token funding and the
+backend rollout for registered-miner admission remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
 before training or transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in

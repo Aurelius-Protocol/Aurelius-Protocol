@@ -431,11 +431,11 @@ Checked on **2026-10-11**:
 | Compatible signed schedule | Fixed in this branch: adjacent `C = W = 100` windows are supported. Overlapping or unaligned schedules remain refused. |
 | Public evaluation funding | Launch requires 10 WT per SAE evaluation, 1 base WT/alpha and the full retention premium described in [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). Verified mainnet lot history and purchase/receipt integration remain incomplete; bootstrap credits are not public funding. |
 | Registered-miner admission | The live backend still pins the original miner. A source change admits registered hotkeys with finalized ownership and paid-result verification; its backend rollout is pending. No extra signup flow is planned. |
-| Economics read | The public ingress omits `/api/miner/economics`; a read-only probe returned HTTP 200 with an empty body, rather than API JSON. `economics` cannot confirm your account through that route yet. |
-| Deposit-address lookup | `/api/deposit_address` is also absent from public ingress and returned an empty body. `balance` may report an unavailable address. Do not infer a transfer destination. |
+| Economics read | Live: a hotkey-signed `POST /api/miner/economics` returned HTTP 200 and passed the miner client's signed-config and account checks. Unsigned requests return HTTP 401. The response still reports purchase conversion unavailable. |
+| Deposit-address lookup | Live: `GET /api/deposit_address` returns HTTP 200 with the subnet 37 treasury address. Address discovery alone does not enable work-token purchases; real deposits remain paused. |
 
 The config and public verdict routes return JSON, and artifact ingress has a live backend.
-Those checks do not establish a successful funded submission from a new wallet. The remaining funding, admission and API gaps require backend changes; changing local policy or retrying an unfunded
+Those checks do not establish a successful funded submission from a new wallet. The remaining funding and admission gaps require backend changes; changing local policy or retrying an unfunded
 submission does not resolve them.
 
 ### Read the finalized chain head
