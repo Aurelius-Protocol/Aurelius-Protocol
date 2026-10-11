@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """ADR-0269 exact prospective price identities; no IO, signing or activation.
 
 Supports §12 27/36: caller-owned tuple allowlist, explicit effective boundaries
@@ -7,24 +6,18 @@ measurement, capital calibration, finalized provenance or permission to charge.
 """
 
 from __future__ import annotations
-from copy import deepcopy
-from fractions import Fraction
+
 import hashlib
 import re
+from copy import deepcopy
+from fractions import Fraction
+
 from subnet.shared.canonicalization import canonical_bytes
 
 DOMAIN = b"aurelius/price-policy/v1\n"
-
-
 MAX_INT = 2**63 - 1
-
-
 _ID = re.compile(r"[a-z0-9_]{1,64}\Z")
-
-
 _DECIMAL = re.compile(r"(?:0|[1-9][0-9]*)(?:\.[0-9]{1,36})?\Z")
-
-
 _VERSION_FIELDS = {
     "version",
     "effective_from_block",
@@ -62,19 +55,19 @@ def validate_entries(entries):
 
 
 def bounds() -> dict:
-    return dict(
-        max_lanes=16,
-        max_classes_per_lane=32,
-        max_catalog_tuples=512,
-        max_identifier_bytes=64,
-        max_integer=MAX_INT,
-        max_decimal_bytes=128,
-        max_decimal_fraction_places=36,
-        max_policy_bytes=131072,
-        min_exit_penalty="1",
-        max_exit_penalty="5",
-        catalog_required=True,
-    )
+    return {
+        "max_lanes": 16,
+        "max_classes_per_lane": 32,
+        "max_catalog_tuples": 512,
+        "max_identifier_bytes": 64,
+        "max_integer": MAX_INT,
+        "max_decimal_bytes": 128,
+        "max_decimal_fraction_places": 36,
+        "max_policy_bytes": 131072,
+        "min_exit_penalty": "1",
+        "max_exit_penalty": "5",
+        "catalog_required": True,
+    }
 
 
 def _require(condition, kind="invalid_price_policy"):
@@ -115,7 +108,12 @@ def _catalog(entries):
 
 
 def _version(value, catalog):
-    _shape(value, _VERSION_FIELDS)
+    schema = value.get("schema_version") if type(value) is dict else None
+    if type(value) is dict and "schema_version" in value:
+        _require(type(schema) is int and schema == 2)
+        _shape(value, _VERSION_FIELDS | {"schema_version"})
+    else:
+        _shape(value, _VERSION_FIELDS)
     _integer(value["version"])
     _integer(value["effective_from_block"], 0)
     evidence = value["cost_evidence_sha256"]
@@ -134,7 +132,16 @@ def _version(value, catalog):
     _shape(value["conversion"], {"alpha_rao_per_work_token"})
     _integer(value["conversion"]["alpha_rao_per_work_token"])
     capital = value["capital"]
-    _shape(capital, {"exit_penalty", "window_blocks", "payout_reference"})
+    if schema == 2:
+        _require(type(capital) is dict)
+        if capital.get("mode") == "none":
+            _shape(capital, {"mode"})
+            _require(len(canonical_bytes(value)) <= bounds()["max_policy_bytes"])
+            return
+        _require(capital.get("mode") == "conditioned")
+        _shape(capital, {"mode", "exit_penalty", "window_blocks", "payout_reference"})
+    else:
+        _shape(capital, {"exit_penalty", "window_blocks", "payout_reference"})
     _require(1 <= _decimal(capital["exit_penalty"]) <= 5)
     _integer(capital["window_blocks"])
     _shape(capital["payout_reference"], set(lanes))
@@ -161,7 +168,8 @@ def validate(document, catalog):
 def digest(version, catalog):
     """Bind a complete version, independent of the queued-version envelope."""
     _version(version, _catalog(catalog))
-    return hashlib.sha256(DOMAIN + canonical_bytes(version)).hexdigest()
+    domain = b"aurelius/price-policy/v2\n" if version.get("schema_version") == 2 else DOMAIN
+    return hashlib.sha256(domain + canonical_bytes(version)).hexdigest()
 
 
 def resolve(document, finalized_block, catalog):
@@ -176,3 +184,16 @@ def resolve(document, finalized_block, catalog):
         else current
     )
     return {"policy": active, "policy_digest": digest(active, catalog)}
+
+
+def validate_notice(version, finalized_block, minimum_notice_blocks, catalog):
+    """Pure prospective guard; it supplies neither a default notice nor activation."""
+    _version(version, _catalog(catalog))
+    _integer(finalized_block, 0)
+    _require(minimum_notice_blocks is not None, "price_policy_notice_required")
+    _integer(minimum_notice_blocks)
+    _require(finalized_block <= MAX_INT - minimum_notice_blocks)
+    _require(
+        version["effective_from_block"] >= finalized_block + minimum_notice_blocks,
+        "price_policy_notice_too_short",
+    )
