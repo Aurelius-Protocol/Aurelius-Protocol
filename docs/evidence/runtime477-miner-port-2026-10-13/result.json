@@ -1,0 +1,15 @@
+{
+  "tests": 301,
+  "errors": 0,
+  "failures": 0,
+  "skipped": 0,
+  "formatted_source_sha256": {
+    "subnet/src/subnet/miner/axon_serve.py": "3b707dc41a608cf4238a999af6decc57aa90b58c2656d466e74d4f6c8beeaa74",
+    "subnet/src/subnet/shared/sn37_economics.py": "acd2501846e0f1b4ccaf94d42f9897c578f980d9857a25fc5c27b656ab3e46eb",
+    "subnet/tests/test_sn37_economics.py": "0d68bf9b4fc054225c51f8352aeb6217cfce3d9cd5909d5612bdf91bda1008a7",
+    "subnet/tests/test_miner_axon_mode.py": "df1093bb840b7b6f63868018bda0417ddc5a4719319d6a3dd9814b31c2696f43"
+  },
+  "wheel_sha256": {
+    "subnet-0.1.0-py3-none-any.whl": "747c5d23bfd65ba6883c0d8c97264ca28a44f721c5ec58ee4266cf30cee35bd0"
+  }
+}

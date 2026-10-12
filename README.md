@@ -144,7 +144,7 @@ Keep all four state paths across restarts. If `AURELIUS_MINER_JOURNAL` is omitte
 | `CHAIN_ID` | See `.env.example` | Chain identity bound to the endpoint-publication journal. |
 | `AURELIUS_AXON_EXPECTED_CHAIN_NAME` | `Bittensor` | Required chain name before publication. |
 | `AURELIUS_AXON_EXPECTED_GENESIS_HASH` | See `.env.example` | Required genesis hash before publication. |
-| `AURELIUS_RUNTIME_SPEC_PIN` | `475`; confirm current pin | Required runtime specification version. |
+| `AURELIUS_RUNTIME_SPEC_PIN` | `477`; confirm current pin | Required runtime specification version. |
 | `AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN` | `1`; confirm current pin | Required transaction version. |
 | `AURELIUS_TRANSPORT` | `btauth` | Authenticated serving transport. |
 | `AURELIUS_IDENTITY_SOURCE` | `bittensor` | Sign with your mounted Bittensor hotkey. |

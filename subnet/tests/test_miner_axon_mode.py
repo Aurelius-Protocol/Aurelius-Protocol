@@ -812,7 +812,7 @@ def _external_expected_axon_call_args():
     }
 
 
-@pytest.mark.parametrize("runtime_pin", [432, 450, 452, 453, 458])
+@pytest.mark.parametrize("runtime_pin", [432, 450, 452, 453, 458, 477])
 def test_planned_serve_axon_accepts_only_exact_sdk11_callbytes_decode(runtime_pin):
     decoded = _external_decoded_extrinsics()[1]["call"]
 
