@@ -8,8 +8,8 @@ Other interpretability tools, such as probes, steering vectors and logit readout
 own lanes as their evaluation rules are approved and enabled. This release includes the miner,
 SAE submission tools and the shared protocol they need.
 
-**Launch status (2026-10-12):** installation and CPU bundle checks are available, but this release
-does not yet provide a complete path for a new miner to compete. Preview now supports the published 100-block schedule. Public economics and deposit-address reads are live. Work-token funding and the
+**Launch status (2026-10-13):** installation and CPU bundle checks are available, but this release
+does not yet provide a complete path for a new miner to compete. Pricing changes require 7,200 finalized blocks of notice. Public economics and deposit-address reads are live. Work-token funding and the
 backend rollout for registered-miner admission remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
 before training or transferring funds.
 
