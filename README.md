@@ -112,7 +112,8 @@ bundle is included.
 
 Start with [.env.example](.env.example), replace the placeholders, and export it as shown above.
 The miner does **not** load `.env` automatically. Values below describe the supplied configuration;
-confirm chain/runtime pins with Aurelius before starting.
+compare the supplied pins with the [finalized chain read](lanes/lane1.md#read-the-finalized-chain-head)
+before starting. Use a release that supports the observed runtime.
 
 ### Wallet, network and state
 
