@@ -1,0 +1,92 @@
+{
+  "observed_at": 1791880562,
+  "read_only": true,
+  "live_existing_evaluator_session": true,
+  "writer_lease_stolen": false,
+  "original_anchor": 9261069,
+  "live_cycle": {
+    "all_factors_zero": true,
+    "attempted_vector": {
+      "200": 1.0
+    },
+    "authority_capital_mode": "capital_conditioned",
+    "authorization": "ADR-0407",
+    "capital_factors": [
+      "0"
+    ],
+    "capital_policy": {
+      "mode": "capital_conditioned",
+      "reference_principal": "10000"
+    },
+    "capital_reasons": {
+      "history_gap_untracked": 6
+    },
+    "capital_refusal": null,
+    "current_block": 9273152,
+    "discovered": 6,
+    "mode": "burn",
+    "participants": 1,
+    "private_rows_or_keys_exported": false,
+    "seq": 6406,
+    "snapshot_version": 26,
+    "source_blocks": [
+      9263317
+    ],
+    "state_digest": "40816c8a551b870113ee4a4cf590a68f98c9eee1efc29d839590b88ab66ca98f",
+    "valuation_block": 9273150,
+    "weight_refusal": null
+  },
+  "rollout": {
+    "observed_at": 1791880386,
+    "revision": "3adef8b51ba5e35e2f2fcd08fb07d38dddc7ed15",
+    "flux": {
+      "mainnet": {
+        "ready": "True",
+        "revision": "main@sha1:3adef8b51ba5e35e2f2fcd08fb07d38dddc7ed15"
+      },
+      "mainnet-services": {
+        "ready": "True",
+        "revision": "main@sha1:3adef8b51ba5e35e2f2fcd08fb07d38dddc7ed15"
+      },
+      "mainnet-workloads": {
+        "ready": "True",
+        "revision": "main@sha1:3adef8b51ba5e35e2f2fcd08fb07d38dddc7ed15"
+      }
+    },
+    "validator": {
+      "pod": "validator-0-0",
+      "uid": "aaac3b06-b26e-4341-88d5-79d698c0d6bb",
+      "created_at": "2026-10-13T08:31:53Z",
+      "image": "rg.fr-par.scw.cloud/aurelius-labs-registry/aurelius-subnet-chain-bt@sha256:3230723ccfc842915a6ee1faecf3b2a4208b2178ef8cb57cfc58a2d7e7b346c2",
+      "image_id": "rg.fr-par.scw.cloud/aurelius-labs-registry/aurelius-subnet-chain-bt@sha256:3230723ccfc842915a6ee1faecf3b2a4208b2178ef8cb57cfc58a2d7e7b346c2"
+    },
+    "original_anchor": 9261069,
+    "deposits_paused": false,
+    "deposit_pause_verified_by_release_rpc": true,
+    "private_rows_or_keys_exported": false
+  },
+  "known_original_state_digest_preserved": true,
+  "positive_retained_capital_invented": false,
+  "full_history_catchup": false,
+  "purchase_premium_activated": false,
+  "recovery_drill_completed": false,
+  "realized_conditioned_miner_payout_observed": false,
+  "finalized_effective_row": {
+    "block": 9273164,
+    "block_hash": "0x2a300acfc4fdbc5ce19a70bde14407b89ab8bc9ba6fb6bc9163d070f78ad8d72",
+    "row_verified": true,
+    "burn_established": true,
+    "finalized_row": {
+      "200": 65535
+    },
+    "intent_cycle": 502,
+    "intent_block": 9273057,
+    "last_update": 9273062,
+    "pending_owned_commitments": 1,
+    "payout_observed": false,
+    "read_only": true
+  },
+  "new_capital_cycle_chain_submission_observed": false,
+  "live_cycle_set_on_chain": false,
+  "chain_observation_note": "Live capital cycle6406 admitted the intended burn vector; finalized burn row is from the preceding normal chain publication. No fresh capital-cycle commit or realized miner emission is claimed."
+}

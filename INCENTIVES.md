@@ -9,7 +9,7 @@ effectiveness measures while sharing the miner, accounting and reward-allocation
 
 ## Current policy versus adopted economic design
 
-The [public configuration](https://central.aureliusaligned.ai/api/config), version **25** retrieved
+The [public configuration](https://central.aureliusaligned.ai/api/config), version **26** retrieved
 on **2026-10-13**, declares the following subnet 37 policy:
 
 | Setting | Published value |
@@ -19,25 +19,24 @@ on **2026-10-13**, declares the following subnet 37 policy:
 | Configured base burn fraction | `0` |
 | Competition phase | `throne_only` — only the eligible champion has a positive lane score |
 | Lane-health single-miner cap | `1.0` |
-| Capital conditioning | `none` — capital does not scale the current lane payout |
+| Capital conditioning | `capital_conditioned`, reference principal **10,000 alpha** |
 | Unused share disposition | `to_burn` |
 
 This is a dated reading of published policy, not a fixed future reward promise or evidence of
 a particular finalized payout. The miner authenticates config against its bundled public key.
 Check the current authenticated policy, result, charge receipt and on-chain payment separately.
 
-The capital and purchase-retention formulas below describe the adopted economic design. They
-apply only where the relevant signed policy and funding path enable them. In particular, they
-are **not additional capital requirements for the current unconditioned SAE competition**.
+The capital formula below is enabled by signed snapshot26. The separate purchase-retention
+premium remains deferred; base purchases still credit1WT per alpha.
 
-A capital-conditioned launch policy with reference principal **10,000 alpha** is
-prepared, with governed publication still pending. Its backend is deployed. Until
+The capital-conditioned launch policy uses reference principal **10,000 alpha**.
+Its governed publication is complete and its backend is deployed. Until
 the original journal covers the exact finalized valuation block, it grants every
 eligible miner **zero capital and zero fresh floor**, preserving known debt and
 source history. Current stake, a WT deposit or an old lot alone cannot prove
 uninterrupted retention. This can send the entire lane allocation to burn.
-The signed configuration remains the activation authority; the current snapshot
-above still declares `none`.
+The signed configuration remains authoritative. This is an economic reward
+condition, not a hard lock preventing unstaking or a registration minimum.
 
 ## Work-tokens: paying for evaluation
 
@@ -106,9 +105,10 @@ training score or a bare approval label cannot create an eligible share.
 For Lane 1's current `throne_only` phase, only the champion has a positive score. The internal
 ladder score cap is **not** a second absolute payout cap: the allocation engine normalizes the
 eligible scores. With only the champion eligible, its scientific share is `1`. The separate
-lane-health `max_single_miner_share` caps its fraction of the lane budget. Version 25 declares
-that cap as `1.0`, with base burn `0` and capital mode `none`; an otherwise fully eligible
-champion can therefore receive the full allocated lane budget in the reward vector.
+lane-health `max_single_miner_share` caps its fraction of the lane budget. Version26 declares
+that cap as `1.0`, with base burn `0` and capital conditioning enabled. The champion's
+scientific share is multiplied by its verified economic payout factor; a zero
+factor withholds its entire lane share to burn.
 
 Missing or stale results, unavailable required evidence and failed payout gates can leave no
 payable champion. Under the current `to_burn` policy, unused weight goes to the burn destination.
@@ -116,7 +116,7 @@ Capital-withheld weight, if that mechanism is enabled, also goes to burn and is 
 to losing miners. A configured zero base burn does not guarantee that all computed weight pays
 miners. Published weights and actual on-chain alpha emissions must be observed separately.
 
-## Capital-conditioned payout: adopted, currently disabled for Lane 1
+## Capital-conditioned payout: enabled in signed snapshot26
 
 Capital conditioning leaves the scientific winner unchanged. It limits the share of an allocated
 lane budget the eligible winner can draw. For eligible effective capital `K`, a reference scale
@@ -132,7 +132,7 @@ The second term is a fresh-principal floor that rises to 20% of the available la
 does not give every registered miner 20% of emissions. The reference sets `H = K_ref / 19`,
 where `K_ref` is the effective capital of `P` fresh principal at 30 days. Consequently,
 `K = K_ref` gives `K/(K+H) = 0.95`. The selected launch reference is **P = 10,000 alpha**,
-pending governed activation. This is a scaling target, not a registration minimum
+enabled by signed snapshot26. This is a scaling target, not a registration minimum
 or a promise of rewards. The enabled signed policy supplies the live mode and
 reference; unattributed stake earns neither capital nor the fresh-principal floor.
 
