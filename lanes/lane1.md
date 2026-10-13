@@ -429,14 +429,14 @@ Checked on **2026-10-13**:
 | Requirement | Current gap |
 | --- | --- |
 | Compatible signed schedule | Fixed in this branch: adjacent `C = W = 100` windows are supported. Overlapping or unaligned schedules remain refused. |
-| Public evaluation funding | The approved temporary launch uses10WT per SAE evaluation and1WT per alpha with exact carry. Premium and the full recovery drill are deferred; the backend rollout and original notice at9271373 must complete before authenticated terms report available. See [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). |
+| Public evaluation funding | The approved temporary launch uses10WT per SAE evaluation and1WT per alpha with exact carry. Premium and the full recovery drill are deferred; the original notice matured at9271373 and hotkey-authenticated funding terms report available. See [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). |
 | Registered-miner admission | Registered-hotkey admission is implemented with finalized ownership and paid-result verification, but its live authority selection/loop rollout remains pending. No extra signup or trusted-key setup is required. |
-| Economics read | Live: a hotkey-signed `POST /api/miner/economics` returned HTTP 200 and passed the miner client's signed-config and account checks. Unsigned requests return HTTP 401. The response still reports purchase conversion unavailable. |
-| Deposit-address lookup | Live: `GET /api/deposit_address` returns HTTP 200 with the subnet 37 treasury address. Address discovery alone does not enable work-token purchases; real deposits remain paused. |
+| Economics read | Live: a hotkey-signed `POST /api/miner/economics` returned HTTP 200 and passed the miner client's signed-config and account checks. Unsigned requests return HTTP 401. The funding read reports base conversion available. |
+| Deposit-address lookup | Live: `GET /api/deposit_address` returns HTTP 200 with the subnet 37 treasury address. Address discovery alone does not enable work-token purchases; real deposits have been unpaused after notice maturity. |
 
 The config and public verdict routes return JSON, and artifact ingress has a live backend.
-Those checks do not establish a successful funded submission from a new wallet. The remaining funding and admission gaps require backend changes; changing local policy or retrying an unfunded
-submission does not resolve them.
+Those checks do not establish a successful funded submission from a new wallet. The registered-miner rollout and fresh paid scored proof remain outstanding. Confirm
+a signed WT purchase receipt before preparing a paid submission.
 
 ### Read the finalized chain head
 

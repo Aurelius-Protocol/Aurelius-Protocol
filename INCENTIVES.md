@@ -9,8 +9,8 @@ effectiveness measures while sharing the miner, accounting and reward-allocation
 
 ## Current policy versus adopted economic design
 
-The [public configuration](https://central.aureliusaligned.ai/api/config), version **24** retrieved
-on **2026-10-11**, declares the following subnet 37 policy:
+The [public configuration](https://central.aureliusaligned.ai/api/config), version **25** retrieved
+on **2026-10-13**, declares the following subnet 37 policy:
 
 | Setting | Published value |
 | --- | --- |
@@ -39,9 +39,9 @@ training compute. Your miner authorizes the candidate; only the server records t
 The supported purchase mechanism transfers subnet alpha stake to the designated work-token
 wallet. Credit appears only after the transfer is finalized and attributed to your beneficiary.
 Before sending funds, obtain the current destination, active purchase terms and confirmation
-that deposit intake is enabled. The existing production launch uses separately authorized
-bootstrap credits; it does not establish an open production purchase route. Test or synthetic
-credits fund evaluations and do not count as retained capital.
+that deposit intake is enabled. Base purchases are open at1WT per independently verified
+alpha with exact carry; SAE evaluations cost10WT. Premium activation and the full recovery
+drill are deferred. Test or synthetic credits do not establish real purchase or capital evidence.
 
 The miner's legacy `deposit` command is a development seam, not a production funding command.
 Read your balance with:
@@ -196,7 +196,8 @@ The operator selected a temporary base launch on2026-10-13: **1WT per alpha**,
 retention premium activation and the complete recovery drill are deferred; history
 and encrypted backups continue. Base-mode purchases receive base credit and do
 not promise retroactive premium. Active authenticated funding terms must report
-`base_rate_v1`; the original7200-finalized-block notice remains mandatory. The
+`base_rate_v1`; the original7200-finalized-block notice matured at9271373. Base
+purchases are now enabled. The
 retention design above describes the later premium policy, not this temporary rate.
 
 ### Evaluation funding and price changes

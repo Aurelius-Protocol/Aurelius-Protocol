@@ -506,3 +506,34 @@ def test_funding_scope_requires_exact_reviewed_identity(monkeypatch, version, fa
     else:
         with pytest.raises(FundingRefused):
             funding.chain_scope(rpc)
+
+
+@pytest.mark.parametrize("version", [475, 477])
+@pytest.mark.parametrize("free_rao", [0, 4, 5, 1_399_264])
+def test_fee_cap_does_not_require_free_tao_reserve(tmp_path, monkeypatch, version, free_rao):
+    client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
+    client.balances = SimpleNamespace(get=lambda _: SimpleNamespace(rao=free_rao))
+    result = funding.fund(client, wallet, execute=False, **args)
+    assert result["free_tao_rao"] == free_rao
+    assert result["planned_fee_tao_rao"] == 5
+    assert result["fee_payment"] == "chain_selected_tao_or_alpha"
+    assert calls == ["plan"]
+
+
+@pytest.mark.parametrize("free_rao", [-1, True, "0"])
+def test_invalid_free_tao_balance_never_unlocks(tmp_path, monkeypatch, free_rao):
+    client, wallet, calls, args = flow(tmp_path, monkeypatch)
+    client.balances = SimpleNamespace(get=lambda _: SimpleNamespace(rao=free_rao))
+    with pytest.raises(FundingRefused, match="invalid free TAO"):
+        funding.fund(client, wallet, execute=True, **args)
+    assert calls == []
+
+
+def test_alpha_fee_fallback_keeps_exact_fee_cap_before_unlock(tmp_path, monkeypatch):
+    client, wallet, calls, args = flow(tmp_path, monkeypatch, 477)
+    client.balances = SimpleNamespace(get=lambda _: SimpleNamespace(rao=0))
+    args["max_fee_rao"] = 4
+    with pytest.raises(FundingRefused, match="planned transfer/fee"):
+        funding.fund(client, wallet, execute=True, **args)
+    assert calls == ["plan"]
+    assert args["journal"].read("prepared") is None

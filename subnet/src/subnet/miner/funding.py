@@ -462,10 +462,10 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
             "alpha amount is below the native minimum transfer value (0.0001 TAO)",
         )
         free = read.balances.get(coldkey)
-        require(
-            type(free.rao) is int and free.rao >= max_fee_rao,
-            "insufficient free TAO for the fee cap",
-        )
+        require(type(free.rao) is int and free.rao >= 0, "invalid free TAO balance")
+        # The reviewed native fee handler prefers TAO and falls back to free alpha
+        # for transfer_stake. The cap bounds the estimated fee; it is not a TAO
+        # reserve requirement. Runtime validation selects and checks the fee source.
         intent = bt.TransferStake(
             dest_coldkey_ss58=TREASURY,
             hotkey_ss58=hotkey,
@@ -502,6 +502,8 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
             "alpha_rao": alpha_rao,
             "fee_cap_tao_rao": max_fee_rao,
             "planned_fee_tao_rao": plan.fee.rao,
+            "free_tao_rao": free.rao,
+            "fee_payment": "chain_selected_tao_or_alpha",
             "price_policy_digest": response["terms"]["price_policy_digest"],
         }
         if not execute:

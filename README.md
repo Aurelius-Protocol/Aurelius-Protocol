@@ -9,8 +9,8 @@ own lanes as their evaluation rules are approved and enabled. This release inclu
 SAE submission tools and the shared protocol they need.
 
 **Launch status (2026-10-13):** installation and CPU bundle checks are available, but this release
-does not yet provide a complete path for a new miner to compete. Pricing changes require 7,200 finalized blocks of notice. Public economics and deposit-address reads are live. Work-token funding and the
-backend rollout for registered-miner admission remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
+does not yet provide a complete path for a new miner to compete. Pricing changes require 7,200 finalized blocks of notice. Public economics and deposit-address reads are live. Base-rate funding is open after the required notice;
+the backend rollout for registered-miner admission and a fresh paid SAE proof remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
 before training or transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in
@@ -207,11 +207,13 @@ aurelius-miner dashboard --port 8093
 The `fund` command supports the reviewed runtimes475 and477. The temporary launch
 purchases **1WT per alpha**, with exact fractional carry, and charges **10WT per SAE
 evaluation**. Full retention premium activation and the complete recovery drill are
-deferred. The backend is deploying this profile and preserves the original notice
-activation at finalized block9271373. The command refuses to sign while funding
-terms are unavailable. Once funding opens, run it
+deferred. Authenticated funding terms report available after the original notice
+matured at finalized block9271373. The command refuses to sign while funding
+terms are unavailable. Run it
 on your wallet machine with alpha staked on subnet 37 under your registered serving hotkey.
-The funding wallet's coldkey must own that hotkey; keep TAO available for chain fees.
+The funding wallet's coldkey must own that hotkey. The reviewed native transfer fee
+handler uses TAO when possible and otherwise free subnet alpha. The fee cap is a
+maximum estimated fee in TAO units, not a requirement to hold that amount in TAO.
 The command checks unlocked alpha and registration collateral, and requires a transfer worth
 at least the chain's 0.0001 TAO minimum at the current price.
 Use your hotkey wallet view for `AURELIUS_BT_WALLET_PATH` and pass the separate full wallet
