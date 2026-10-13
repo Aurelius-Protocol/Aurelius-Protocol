@@ -105,7 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     fund.add_argument(
         "--endpoint",
-        default=os.environ.get("SUBSTRATE_URL", "wss://archive.chain.opentensor.ai:443"),
+        default=os.environ.get(
+            "SUBSTRATE_URL", "wss://bittensor-finney.api.onfinality.io/public-ws"
+        ),
     )
     fund.add_argument(
         "--central", default=os.environ.get("CENTRAL_API_URL", "https://central.aureliusaligned.ai")

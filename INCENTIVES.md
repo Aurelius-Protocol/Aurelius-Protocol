@@ -7,36 +7,26 @@ pay for evaluation. Buying more evaluation budget does not improve a scientific 
 For the current competition, see [Lane 1: SAEs](lanes/lane1.md). Other lanes can use different
 effectiveness measures while sharing the miner, accounting and reward-allocation machinery.
 
-## Current policy versus adopted economic design
+## Current launch policy
 
-The [public configuration](https://central.aureliusaligned.ai/api/config), version **26** retrieved
-on **2026-10-13**, declares the following subnet 37 policy:
+Work-token purchases are open at **1 WT per alpha** with exact fractional carry.
+SAE evaluation costs **10 WT**. Real WT is charged first; sufficient enabled
+synthetic WT is a fallback. The two balances are never combined for one charge.
 
-| Setting | Published value |
-| --- | --- |
-| Enabled earning lane | `interp_sae` |
-| Lane allocation | `1` — all of the non-burn lane budget |
-| Configured base burn fraction | `0` |
-| Competition phase | `throne_only` — only the eligible champion has a positive lane score |
-| Lane-health single-miner cap | `1.0` |
-| Capital conditioning | `capital_conditioned`, reference principal **10,000 alpha** |
-| Unused share disposition | `to_burn` |
+Retention tracking and sell-off penalties are suspended while RPC capacity is upgraded.
+The immutable original histories, debt records, prior grant and encrypted backups survive;
+the original anchor remains9261069. Neither current stake nor WT purchases invent past
+retention. Restarting or upgrading RPC does not automatically resume penalties.
 
-This is a dated reading of published policy, not a fixed future reward promise or evidence of
-a particular finalized payout. The miner authenticates config against its bundled public key.
-Check the current authenticated policy, result, charge receipt and on-chain payment separately.
+The prepared replacement uses **current owned subnet37 alpha**, with reference principal
+**10,000 alpha**, without an age requirement or exit-debt penalty. It needs separate signed
+activation and matching validator authority. Historical signed snapshot27 does not activate
+this replacement. Check [authenticated current config](https://central.aureliusaligned.ai/api/config),
+charge receipts, published chain weights and realized emissions separately.
 
-The capital formula below is enabled by signed snapshot26. The separate purchase-retention
-premium remains deferred; base purchases still credit1WT per alpha.
-
-The capital-conditioned launch policy uses reference principal **10,000 alpha**.
-Its governed publication is complete and its backend is deployed. Until
-the original journal covers the exact finalized valuation block, it grants every
-eligible miner **zero capital and zero fresh floor**, preserving known debt and
-source history. Current stake, a WT deposit or an old lot alone cannot prove
-uninterrupted retention. This can send the entire lane allocation to burn.
-The signed configuration remains authoritative. This is an economic reward
-condition, not a hard lock preventing unstaking or a registration minimum.
+The scientific lane remains `throne_only`: only an eligible scored champion has a positive
+scientific share. Base burn is0, the single-miner cap is1.0, and unused or economically withheld
+weight goes to burn. No wallet/UID allowlist or additional signup is required.
 
 ## Work-tokens: paying for evaluation
 
@@ -105,8 +95,8 @@ training score or a bare approval label cannot create an eligible share.
 For Lane 1's current `throne_only` phase, only the champion has a positive score. The internal
 ladder score cap is **not** a second absolute payout cap: the allocation engine normalizes the
 eligible scores. With only the champion eligible, its scientific share is `1`. The separate
-lane-health `max_single_miner_share` caps its fraction of the lane budget. Version26 declares
-that cap as `1.0`, with base burn `0` and capital conditioning enabled. The champion's
+lane-health `max_single_miner_share` caps its fraction of the lane budget. The selected
+cap is `1.0`, with base burn `0`. The champion's
 scientific share is multiplied by its verified economic payout factor; a zero
 factor withholds its entire lane share to burn.
 
@@ -116,57 +106,37 @@ Capital-withheld weight, if that mechanism is enabled, also goes to burn and is 
 to losing miners. A configured zero base burn does not guarantee that all computed weight pays
 miners. Published weights and actual on-chain alpha emissions must be observed separately.
 
-## Capital-conditioned payout: enabled in signed snapshot26
+## Current-alpha payout multiplier
 
-Capital conditioning leaves the scientific winner unchanged. It limits the share of an allocated
-lane budget the eligible winner can draw. For eligible effective capital `K`, a reference scale
-`H > 0`, qualifying retained fresh principal `F` and reference principal `P > 0`, the adopted
-reference multiplier is:
+For current owned eligible subnet alpha `S` and reference `P = 10,000 alpha`:
 
 ```text
-p = max(K / (K + H), (1/5) * min(1, F/P))
-p = 0 if payout eligibility fails
+p = S / (S + P/19)
 ```
 
-The second term is a fresh-principal floor that rises to 20% of the available lane share; it
-does not give every registered miner 20% of emissions. The reference sets `H = K_ref / 19`,
-where `K_ref` is the effective capital of `P` fresh principal at 30 days. Consequently,
-`K = K_ref` gives `K/(K+H) = 0.95`. The selected launch reference is **P = 10,000 alpha**,
-enabled by signed snapshot26. This is a scaling target, not a registration minimum
-or a promise of rewards. The enabled signed policy supplies the live mode and
-reference; unattributed stake earns neither capital nor the fresh-principal floor.
+| Owned alpha | Multiplier before scientific share and chain encoding |
+| --- | --- |
+| 0 | 0% |
+| 100 | About 16.0% |
+| 1,000 | About 65.5% |
+| 10,000 | 95% |
+| 100,000 | About 99.5% |
 
-### How effective capital ages
+Only alpha owned by the registered hotkey's coldkey on that eligible hotkey counts.
+Delegated third-party stake, TAO-valued totals, treasury custody and WT balances do not.
+Eligible hotkeys under one coldkey share its grouped multiplier in proportion to their owned
+alpha. Adding hotkeys cannot multiply the same observed stake. With several conditioned lanes,
+stake is divided equally over those lanes before calculating each multiplier.
 
-Capital belongs to a `(coldkey, netuid)` position and is attributed in retained lots. For a lot
-of amount `A` and age `a` in blocks, the adopted unit values are:
+The validator reads exact finalized positions in one bounded batch at the signed10-block
+valuation cadence. It does not scan sell history, create aged lots or enforce exit debt.
+Missing, stale or mismatched current evidence withholds the conditioned lane. Selling alpha
+can reduce the next current-stake multiplier; it creates no additional sell-off penalty in this
+mode. This is a payout condition, not a staking lock or a registration minimum.
 
-```text
-v_fresh(a) = (2 + 8 * min(1, a/216000)) * (0.25 + 0.75 * 2^(-a/2628000))
-
-v_emitted(a) = 2^(-a/216000),  if a < 1296000
-             = 0,            otherwise
-
-K = sum_eligible_lots A_lot * v_source(age_lot)
-```
-
-The schedule uses 7,200 blocks/day as its design convention: 216,000 blocks corresponds to
-30 days, 2,628,000 to 365 days, and 1,296,000 to 180 days. Wall-clock estimates are not the
-valuation authority. Fresh unit value starts at 2, reaches about 9.58 at 30 days, then approaches
-2.5; emitted value halves every 30 days and expires at 180 days. Aging changes economic credit,
-not the amount of alpha that exists on chain.
-
-Only attributed, retained, owner-matching and seasoned lots contribute. Untracked stake does not
-become mining capital merely because it is visible on chain. Outstanding exit debt makes the
-position's payable capital and qualifying fresh principal zero. A top-up has its own birth block;
-moving or changing identity does not legitimately relabel old principal as new. Purchases consume
-principal, so the same capital cannot fund both a purchase and retained mining credit.
-
-If several conditioned lanes are enabled, qualifying capital and fresh principal are divided
-equally across those signed lanes before allocation to eligible owner-matching hotkeys. Neutral
-lanes are excluded from that divisor. Unused allocations are not moved to the lane where the
-miner happens to be winning. One full signed valuation cadence of seasoning is required for
-mining payout; purchase retention uses its own lot-age calculation.
+This formula scales the eligible scientific share; buying stake alone cannot win a score,
+claim the crown or earn without a valid paid result. Unpaid and stale candidates remain
+ineligible. Actual earnings depend on available subnet emissions and finalized chain weights.
 
 ## Retention-based work-token purchase design
 
@@ -178,7 +148,7 @@ rho(a) = 1 + 19 * min(1, a/2628000)^2
 
 It starts at **1×**, rises quadratically to **20×** after 2,628,000 blocks of retention, and
 then stays at 20×. Emitted and untracked alpha stays at 1× for purchases. This is separate from
-the mining-capital aging function above.
+the current-alpha payout multiplier above.
 
 | Fresh lot age | Purchase multiplier |
 | --- | --- |
@@ -204,8 +174,8 @@ and supported coldkey swaps preserve its history.
 
 The operator selected a temporary base launch on2026-10-13: **1WT per alpha**,
 **10WT per SAE evaluation**, and exact fractional carry per beneficiary. Full
-retention premium activation and the complete recovery drill are deferred; history
-and encrypted backups continue. Base-mode purchases receive base credit and do
+retention premium activation and the complete recovery drill are deferred; history capture is paused and
+existing encrypted backups are preserved. Base-mode purchases receive base credit and do
 not promise retroactive premium. Active authenticated funding terms must report
 `base_rate_v1`; the original7200-finalized-block notice matured at9271373. Base
 purchases are now enabled. The

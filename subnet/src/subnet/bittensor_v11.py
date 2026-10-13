@@ -127,11 +127,12 @@ class BittensorV11Error(RuntimeError):
 
 
 def validate_subtensor_endpoint(endpoint: object) -> str:
-    """Return one unambiguous WS authority URL or refuse before SDK/network access.
+    """Return an exact WS endpoint or refuse before SDK/network access.
 
     The configured endpoint is an authority boundary: credentials, paths, query strings and
-    fragments could make two callers interpret the same setting differently. Public SDK fallback
-    is disabled separately by :func:`open_subtensor`.
+    fragments could make two callers interpret the same setting differently. The mainnet operator expressly
+    selects credential-bearing TLS OnFinality paths/queries; their full endpoint is preserved.
+    Public SDK fallback is disabled separately by :func:`open_subtensor`.
     """
 
     if (
@@ -141,7 +142,8 @@ def validate_subtensor_endpoint(endpoint: object) -> str:
         or endpoint != endpoint.strip()
         or any(ord(character) < 0x20 or ord(character) > 0x7E for character in endpoint)
         or any(character.isspace() for character in endpoint)
-        or any(character in endpoint for character in ("\\", "%", "?", "#"))
+        or len(endpoint) > 2048
+        or any(character in endpoint for character in ("\\", "#"))
         or not endpoint.startswith(("ws://", "wss://"))
     ):
         raise BittensorV11Error(
@@ -153,6 +155,12 @@ def validate_subtensor_endpoint(endpoint: object) -> str:
     except ValueError as exc:
         raise BittensorV11Error("Subtensor endpoint has a malformed authority or port") from exc
     hostname = parsed.hostname
+    onfinality = (
+        parsed.scheme == "wss"
+        and hostname is not None
+        and (hostname == "onfinality.io" or hostname.endswith(".onfinality.io"))
+        and port in (None, 443)
+    )
     valid_hostname = False
     if hostname is not None:
         try:
@@ -177,8 +185,8 @@ def validate_subtensor_endpoint(endpoint: object) -> str:
         or not valid_hostname
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.path not in {"", "/"}
-        or parsed.query
+        or not onfinality
+        and (parsed.path not in {"", "/"} or parsed.query or "%" in endpoint or "?" in endpoint)
         or parsed.fragment
         or parsed.netloc.endswith(":")
         or (port is not None and not 1 <= port <= 65_535)

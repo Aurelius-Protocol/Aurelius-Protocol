@@ -16,10 +16,11 @@ GH200 evaluator (`first_incumbent`, rank 1, CE loss-recovered 0.971183), and the
 attests that result. Real WT is spent first; enabled sufficient synthetic WT is the fallback.
 Historical receipt compatibility is repaired, and the generic payout path previously finalized a non-burn weight commit on-chain. The current finalized effective row is burn; no realized miner payout is attributed to that commit. Full history
 catch-up, retention premium activation and the full recovery drill remain outstanding.
-A 10,000-alpha capital-conditioned policy is published in signed snapshot26.
-Its deployed backend grants zero capital across history gaps while
-preserving known debt. Current stake and WT deposits do not establish retained
-capital; the signed configuration remains authoritative. See [incentives](INCENTIVES.md).
+Retention tracking and sell-off penalties are suspended while RPC capacity is upgraded.
+A replacement policy is prepared to use current owned subnet alpha for payouts, with
+reference principal10,000alpha and no age requirement or exit penalty. It requires its
+separate signed activation; historical snapshot27 alone does not activate this replacement.
+WT payments remain open. See [incentives](INCENTIVES.md).
 See [current blockers](lanes/lane1.md#current-participation-blockers) before transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in
@@ -212,6 +213,11 @@ aurelius-miner dashboard --port 8093
 ```
 
 ### Fund evaluations
+
+The cluster uses OnFinality for RPC. You can supply your own TLS OnFinality URL,
+including its API-key path/query, through `SUBSTRATE_URL` and `fund --endpoint`.
+Keep credentials private; operator credentials are never distributed to miners.
+
 
 The `fund` command supports the reviewed runtimes475 and477. The temporary launch
 purchases **1WT per alpha**, with exact fractional carry, and charges **10WT per SAE
