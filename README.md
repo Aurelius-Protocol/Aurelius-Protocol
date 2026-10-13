@@ -14,12 +14,13 @@ without a wallet or UID allowlist or extra signup. An existing miner deposited 1
 received 10 real WT and paid exactly one 10 real WT charge. Its reused SAE passed the trusted
 GH200 evaluator (`first_incumbent`, rank 1, CE loss-recovered 0.971183), and the public replay
 attests that result. Real WT is spent first; enabled sufficient synthetic WT is the fallback.
-Historical receipt compatibility is repaired, and the generic payout path previously finalized a non-burn weight commit on-chain. The current finalized effective row is burn; no realized miner payout is attributed to that commit. Full history
+Historical receipt compatibility is repaired. The generic current-alpha payout path finalized a positive commitment at9274691 and its exact effective row was verified at9274759. The chain emission record is positive; full wallet attribution was not reconciled. Full history
 catch-up, retention premium activation and the full recovery drill remain outstanding.
 Retention tracking and sell-off penalties are suspended while RPC capacity is upgraded.
-Signed snapshot28 enables current owned subnet alpha for payouts, with reference
+Signed snapshot29 enables current owned subnet alpha for payouts, with reference
 principal10,000alpha and no age requirement or exit penalty. The multiplier is
-S/(S+10000/19); paid scientific eligibility remains mandatory. Published policy,
+S/(S+10000/19); paid scientific eligibility remains mandatory. Validator base burn is70%,
+leaving30% before the current-alpha and scientific multiplier; withheld weight also goes to burn. Published policy,
 computed weights and realized emissions are separate checks.
 WT payments remain open. See [incentives](INCENTIVES.md).
 See [current blockers](lanes/lane1.md#current-participation-blockers) before transferring funds.

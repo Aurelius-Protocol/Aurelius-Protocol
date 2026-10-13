@@ -18,13 +18,13 @@ The immutable original histories, debt records, prior grant and encrypted backup
 the original anchor remains9261069. Neither current stake nor WT purchases invent past
 retention. Restarting or upgrading RPC does not automatically resume penalties.
 
-Signed snapshot28 enables **current owned subnet37 alpha**, with reference principal
-**10,000 alpha**, without an age requirement or exit-debt penalty. The matching validator authority is schema6; historical snapshot27 and its
+Signed snapshot29 enables **current owned subnet37 alpha**, with reference principal
+**10,000 alpha**, without an age requirement or exit-debt penalty. The matching validator authority is schema7; historical snapshot27 and its
 retention grant remain inactive. Check [authenticated current config](https://central.aureliusaligned.ai/api/config),
 charge receipts, published chain weights and realized emissions separately.
 
 The scientific lane remains `throne_only`: only an eligible scored champion has a positive
-scientific share. Base burn is0, the single-miner cap is1.0, and unused or economically withheld
+scientific share. Base burn is70%, the single-miner cap is1.0, and unused or economically withheld
 weight goes to burn. No wallet/UID allowlist or additional signup is required.
 
 ## Work-tokens: paying for evaluation
@@ -95,15 +95,15 @@ For Lane 1's current `throne_only` phase, only the champion has a positive score
 ladder score cap is **not** a second absolute payout cap: the allocation engine normalizes the
 eligible scores. With only the champion eligible, its scientific share is `1`. The separate
 lane-health `max_single_miner_share` caps its fraction of the lane budget. The selected
-cap is `1.0`, with base burn `0`. The champion's
+cap is `1.0`, with base burn `0.7`. The champion's
 scientific share is multiplied by its verified economic payout factor; a zero
 factor withholds its entire lane share to burn.
 
 Missing or stale results, unavailable required evidence and failed payout gates can leave no
 payable champion. Under the current `to_burn` policy, unused weight goes to the burn destination.
 Capital-withheld weight, if that mechanism is enabled, also goes to burn and is not redistributed
-to losing miners. A configured zero base burn does not guarantee that all computed weight pays
-miners. Published weights and actual on-chain alpha emissions must be observed separately.
+to losing miners. The configured70% base burn leaves30% before current-alpha and scientific conditioning.
+Withheld weight can increase effective burn above70%. Published weights and actual on-chain alpha emissions must be observed separately.
 
 ## Current-alpha payout multiplier
 
@@ -113,13 +113,13 @@ For current owned eligible subnet alpha `S` and reference `P = 10,000 alpha`:
 p = S / (S + P/19)
 ```
 
-| Owned alpha | Multiplier before scientific share and chain encoding |
-| --- | --- |
-| 0 | 0% |
-| 100 | About 16.0% |
-| 1,000 | About 65.5% |
-| 10,000 | 95% |
-| 100,000 | About 99.5% |
+| Owned alpha | Alpha multiplier | Sole eligible champion share after70% base burn |
+| --- | --- | --- |
+| 0 | 0% | 0% |
+| 100 | About 16.0% | About4.8% |
+| 1,000 | About 65.5% | About19.7% |
+| 10,000 | 95% | 28.5% |
+| 100,000 | About 99.5% | About29.84% |
 
 Only alpha owned by the registered hotkey's coldkey on that eligible hotkey counts.
 Delegated third-party stake, TAO-valued totals, treasury custody and WT balances do not.
