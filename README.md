@@ -16,6 +16,10 @@ GH200 evaluator (`first_incumbent`, rank 1, CE loss-recovered 0.971183), and the
 attests that result. Real WT is spent first; enabled sufficient synthetic WT is the fallback.
 Historical receipt compatibility is repaired, and the generic payout path has finalized a non-burn weight commit on-chain. Automatic reveal and effective payout observation are pending. Full history
 catch-up, retention premium activation and the full recovery drill remain outstanding.
+A 10,000-alpha capital-conditioned policy is prepared; governed publication is
+pending. Its deployed backend grants zero capital across history gaps while
+preserving known debt. Current stake and WT deposits do not establish retained
+capital; the signed configuration remains authoritative. See [incentives](INCENTIVES.md).
 See [current blockers](lanes/lane1.md#current-participation-blockers) before transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in

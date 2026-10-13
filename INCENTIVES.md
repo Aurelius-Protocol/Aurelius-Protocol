@@ -30,6 +30,15 @@ The capital and purchase-retention formulas below describe the adopted economic 
 apply only where the relevant signed policy and funding path enable them. In particular, they
 are **not additional capital requirements for the current unconditioned SAE competition**.
 
+A capital-conditioned launch policy with reference principal **10,000 alpha** is
+prepared, with governed publication still pending. Its backend is deployed. Until
+the original journal covers the exact finalized valuation block, it grants every
+eligible miner **zero capital and zero fresh floor**, preserving known debt and
+source history. Current stake, a WT deposit or an old lot alone cannot prove
+uninterrupted retention. This can send the entire lane allocation to burn.
+The signed configuration remains the activation authority; the current snapshot
+above still declares `none`.
+
 ## Work-tokens: paying for evaluation
 
 **Work-tokens (WT)** are prepaid credits in the coordination ledger, attached to
@@ -90,14 +99,14 @@ B_t = (1 - b) * a_t
 w_(m,t) = B_t * f_(m,t) * p_(m,t)
 ```
 
-Only eligible, fresh results supported by the required real charge and artifact evidence can
+Only eligible, fresh results supported by the required signed charge and artifact evidence can
 enter `q`. Submitting many copies does not multiply ownership of the winning result. A local
 training score or a bare approval label cannot create an eligible share.
 
 For Lane 1's current `throne_only` phase, only the champion has a positive score. The internal
 ladder score cap is **not** a second absolute payout cap: the allocation engine normalizes the
 eligible scores. With only the champion eligible, its scientific share is `1`. The separate
-lane-health `max_single_miner_share` caps its fraction of the lane budget. Version 24 declares
+lane-health `max_single_miner_share` caps its fraction of the lane budget. Version 25 declares
 that cap as `1.0`, with base burn `0` and capital mode `none`; an otherwise fully eligible
 champion can therefore receive the full allocated lane budget in the reward vector.
 
@@ -122,8 +131,10 @@ p = 0 if payout eligibility fails
 The second term is a fresh-principal floor that rises to 20% of the available lane share; it
 does not give every registered miner 20% of emissions. The reference sets `H = K_ref / 19`,
 where `K_ref` is the effective capital of `P` fresh principal at 30 days. Consequently,
-`K = K_ref` gives `K/(K+H) = 0.95`. Neither `P` nor a live capital requirement is chosen by
-this document; enabled signed policy supplies them.
+`K = K_ref` gives `K/(K+H) = 0.95`. The selected launch reference is **P = 10,000 alpha**,
+pending governed activation. This is a scaling target, not a registration minimum
+or a promise of rewards. The enabled signed policy supplies the live mode and
+reference; unattributed stake earns neither capital nor the fresh-principal floor.
 
 ### How effective capital ages
 
