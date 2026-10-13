@@ -10,7 +10,7 @@ SAE submission tools and the shared protocol they need.
 
 **Launch status (2026-10-13):** installation and CPU bundle checks are available, but this release
 does not yet provide a complete path for a new miner to compete. Pricing changes require 7,200 finalized blocks of notice. Public economics and deposit-address reads are live. Base-rate funding is open after the required notice;
-the backend rollout for registered-miner admission and a fresh paid SAE proof remain incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
+registered-miner admission is deployed. A fresh wallet-to-scored-SAE proof remains incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
 before training or transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in
@@ -206,7 +206,8 @@ aurelius-miner dashboard --port 8093
 
 The `fund` command supports the reviewed runtimes475 and477. The temporary launch
 purchases **1WT per alpha**, with exact fractional carry, and charges **10WT per SAE
-evaluation**. Full retention premium activation and the complete recovery drill are
+evaluation**. Charges use sufficient real WT first, then sufficient synthetic WT when enabled;
+the server never combines the balances. Full retention premium activation and the complete recovery drill are
 deferred. Authenticated funding terms report available after the original notice
 matured at finalized block9271373. The command refuses to sign while funding
 terms are unavailable. Run it

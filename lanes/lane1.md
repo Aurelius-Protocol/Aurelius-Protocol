@@ -429,13 +429,13 @@ Checked on **2026-10-13**:
 | Requirement | Current gap |
 | --- | --- |
 | Compatible signed schedule | Fixed in this branch: adjacent `C = W = 100` windows are supported. Overlapping or unaligned schedules remain refused. |
-| Public evaluation funding | The approved temporary launch uses10WT per SAE evaluation and1WT per alpha with exact carry. Premium and the full recovery drill are deferred; the original notice matured at9271373 and hotkey-authenticated funding terms report available. See [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). |
-| Registered-miner admission | Registered-hotkey admission is implemented with finalized ownership and paid-result verification, but its live authority selection/loop rollout remains pending. No extra signup or trusted-key setup is required. |
-| Economics read | Live: a hotkey-signed `POST /api/miner/economics` returned HTTP 200 and passed the miner client's signed-config and account checks. Unsigned requests return HTTP 401. The funding read reports base conversion available. |
+| Public evaluation funding | The approved temporary launch uses10WT per SAE evaluation and1WT per alpha with exact carry. Charges use real WT first, then enabled sufficient synthetic WT, without combining balances. Premium and the full recovery drill are deferred; the original notice matured at9271373 and hotkey-authenticated funding terms report available. See [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). |
+| Registered-miner admission | Registered-hotkey admission is deployed with finalized ownership and paid-result verification. No extra signup or trusted-key setup is required. |
+| Economics read | Live: a hotkey-signed `POST /api/miner/economics` returned HTTP 200 and passed the miner client's signed-config and account checks. Unsigned requests return HTTP 401. The funding read reports base conversion available. An existing miner’s signed purchase receipt confirms10alpha credited10realWT with zero carry; this is not a fresh-wallet scored proof. |
 | Deposit-address lookup | Live: `GET /api/deposit_address` returns HTTP 200 with the subnet 37 treasury address. Address discovery alone does not enable work-token purchases; real deposits have been unpaused after notice maturity. |
 
 The config and public verdict routes return JSON, and artifact ingress has a live backend.
-Those checks do not establish a successful funded submission from a new wallet. The registered-miner rollout and fresh paid scored proof remain outstanding. Confirm
+Those checks do not establish a successful funded submission from a new wallet. A fresh real-funded scored proof remains outstanding. Confirm
 a signed WT purchase receipt before preparing a paid submission.
 
 ### Read the finalized chain head
