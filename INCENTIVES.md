@@ -191,11 +191,13 @@ The receipt fixes the rate and consumed lots at purchase time; later aging does 
 past purchase. A lot that exits and returns starts a new retention clock; retained internal moves
 and supported coldkey swaps preserve its history.
 
-The selected launch terms for subnet 37 are **1 base WT/alpha**, **10 WT per SAE
-evaluation**, and the **full retention purchase premium above**. A temporary flat-rate
-purchase launch is not selected. These requirements do not establish an active purchase
-quote: verified mainnet lot history, an enabled tariff and the purchase/receipt path must
-be available first.
+The operator selected a temporary base launch on2026-10-13: **1WT per alpha**,
+**10WT per SAE evaluation**, and exact fractional carry per beneficiary. Full
+retention premium activation and the complete recovery drill are deferred; history
+and encrypted backups continue. Base-mode purchases receive base credit and do
+not promise retroactive premium. Active authenticated funding terms must report
+`base_rate_v1`; the original7200-finalized-block notice remains mandatory. The
+retention design above describes the later premium policy, not this temporary rate.
 
 ### Evaluation funding and price changes
 

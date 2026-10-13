@@ -1,5 +1,6 @@
 """Authenticated SN37 funding terms. Server data cannot replace shipped trust roots."""
 
+import hashlib
 import re
 import secrets
 import time
@@ -17,6 +18,17 @@ from subnet.shared.ss58 import ss58_decode
 
 TREASURY = "5Gx14QffqwC8wNHv4wUvfCfE2zAUYDNvF9Z7LjNY81WQx7iL"
 CHAIN_ID = "bittensor-mainnet:" + GENESIS_HASH[2:]
+BASE_PURCHASE_POLICY_DIGEST = hashlib.sha256(
+    canonical_bytes(
+        {
+            "purchase_policy": "sn37-base-1wt-v1",
+            "genesis_hash": GENESIS_HASH,
+            "netuid": 37,
+            "alpha_rao_per_work_token": 1_000_000_000,
+            "rounding": "exact_fractional_carry_per_beneficiary",
+        }
+    )
+).hexdigest()
 
 
 def read_funding(base_url, *, hotkey, signer, config_pubkey, fetch=request_json, now=None):
@@ -76,6 +88,8 @@ def read_funding(base_url, *, hotkey, signer, config_pubkey, fetch=request_json,
             ):
                 raise ValueError("unavailable")
         else:
+            if terms.get("retention") not in {"quadratic_fresh_lots_v3", "base_rate_v1"}:
+                raise ValueError("unknown purchase policy")
             active = resolve(entries["price_policy"], result["finalized_block"], shipped_catalog())
             policy = active["policy"]
             if (
@@ -96,7 +110,7 @@ def read_funding(base_url, *, hotkey, signer, config_pubkey, fetch=request_json,
                         "price_policy_digest": active["policy_digest"],
                         "base_alpha_rao_per_work_token": 1_000_000_000,
                         "evaluation_work_tokens": 10,
-                        "retention": "quadratic_fresh_lots_v3",
+                        "retention": terms["retention"],
                         "fractional_carry": "beneficiary",
                         "refundable": False,
                         "runtime_spec_version": 475,
@@ -165,6 +179,18 @@ def verified_deposit(response, deposit_key, *, receipt_pubkey=SN37_RECEIPT_SIGNI
                 bytes.fromhex(row["signature_hex"]), canonical_bytes(receipt)
             )
             identity = response["identity"]
+            base = receipt.get("purchase_policy") == "sn37-base-1wt-v1"
+            digest_keys = (
+                ("price_policy_digest", "purchase_policy_digest")
+                if base
+                else ("price_policy_digest", "commitment_policy_digest", "commitment_state_digest")
+            )
+            if base and (
+                receipt.get("purchase_policy_digest") != BASE_PURCHASE_POLICY_DIGEST
+                or receipt.get("retention_multiple") != "1"
+                or "commitment_state_digest" in receipt
+            ):
+                raise ValueError("base purchase proof")
             if (
                 type(receipt["receipt_version"]) is not int
                 or receipt["receipt_version"] != 4
@@ -177,11 +203,7 @@ def verified_deposit(response, deposit_key, *, receipt_pubkey=SN37_RECEIPT_SIGNI
                 or any(
                     type(receipt.get(key)) is not str
                     or not re.fullmatch(r"[0-9a-f]{64}", receipt[key])
-                    for key in (
-                        "price_policy_digest",
-                        "commitment_policy_digest",
-                        "commitment_state_digest",
-                    )
+                    for key in digest_keys
                 )
                 or any(
                     type(receipt.get(key)) is not str

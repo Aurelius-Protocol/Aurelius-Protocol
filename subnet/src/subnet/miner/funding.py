@@ -29,6 +29,13 @@ from subnet.shared.ss58 import ss58_decode
 
 METADATA_SHA256 = "e181ddacd13d1050e82a2afea8e58ba5d3fc84504fa92d2884c91df8c9dd8020"
 CODE_HASH = "0x557634c8c31bc639ea6552e297dcfb781cd7d9bdd491a5352c151305db33d3a0"
+RUNTIME_PROFILES = {
+    475: (METADATA_SHA256, CODE_HASH),
+    477: (
+        "1d9a056217f440400df497ad70d4a6a6148abc19871d1b28e52464c507c11260",
+        "0x18b52484d9c5d7523f704c86b17b2ab959fffbc6edb6766a77e9877f0ad19387",
+    ),
+}
 MAX_U64 = 2**64 - 1
 
 
@@ -55,7 +62,7 @@ def amount_rao(value):
 
 def transfer_call(hotkey, amount):
     require(type(amount) is int and 0 < amount < MAX_U64, "invalid alpha amount or move-all")
-    # Native runtime475 metadata: SubtensorModule(7).transfer_stake(86), AccountId32 x2,
+    # Reviewed475/477 metadata: SubtensorModule(7).transfer_stake(86), AccountId32 x2,
     # NetUid u16 x2 and AlphaBalance u64. No wrapper, proxy, encrypted call or move-all.
     return (
         bytes.fromhex("0756")
@@ -141,23 +148,73 @@ def chain_scope(rpc):
     snapshot = rpc.snapshot()
     require(
         snapshot.genesis_hash == GENESIS_HASH
-        and snapshot.runtime_spec_version == 475
+        and type(snapshot.runtime_spec_version) is int
+        and snapshot.runtime_spec_version in RUNTIME_PROFILES
+        and type(snapshot.transaction_version) is int
         and snapshot.transaction_version == 1
         and snapshot.chain == "Bittensor",
         "unreviewed funding chain/runtime",
     )
+    metadata_sha256, code_hash = RUNTIME_PROFILES[snapshot.runtime_spec_version]
     require(
-        rpc.call("state_getStorageHash", ["0x3a636f6465", snapshot.head_hash]) == CODE_HASH,
+        rpc.call("state_getStorageHash", ["0x3a636f6465", snapshot.head_hash]) == code_hash,
         "runtime code differs",
     )
     metadata = rpc.call("state_getMetadata", [snapshot.head_hash])
     require(
         isinstance(metadata, str)
         and metadata.startswith("0x")
-        and hashlib.sha256(bytes.fromhex(metadata[2:])).hexdigest() == METADATA_SHA256,
+        and hashlib.sha256(bytes.fromhex(metadata[2:])).hexdigest() == metadata_sha256,
         "runtime metadata differs",
     )
     return snapshot
+
+
+def retained_runtime(unsigned):
+    version = unsigned.get("spec_version") if type(unsigned) is dict else None
+    require(
+        type(version) is int and version in RUNTIME_PROFILES, "unreviewed retained funding runtime"
+    )
+    return version
+
+
+def matched_execution(rpc, match, version):
+    """A matched signature must execute under its prepared exact parent and post profile."""
+    height, block_hash = match["block_number"], match["block_hash"]
+    require(type(height) is int and height > 0, "invalid matched funding height")
+    require(rpc.call("chain_getBlockHash", [height]) == block_hash, "funding finality differs")
+    header = rpc.call("chain_getHeader", [block_hash])
+    parent = rpc.call("chain_getBlockHash", [height - 1])
+    require(
+        type(header) is dict
+        and isinstance(header.get("number"), str)
+        and re.fullmatch(r"0x[0-9a-fA-F]+", header["number"]) is not None
+        and int(header["number"], 16) == height
+        and header.get("parentHash") == parent,
+        "funding execution parent differs",
+    )
+    metadata_sha256, code_hash = RUNTIME_PROFILES[version]
+    for digest in (parent, block_hash):
+        runtime = rpc.call("state_getRuntimeVersion", [digest])
+        require(
+            type(runtime) is dict
+            and type(runtime.get("specVersion")) is int
+            and runtime["specVersion"] == version
+            and type(runtime.get("transactionVersion")) is int
+            and runtime["transactionVersion"] == 1,
+            "matched funding runtime differs",
+        )
+        require(
+            rpc.call("state_getStorageHash", ["0x3a636f6465", digest]) == code_hash,
+            "matched funding runtime code differs",
+        )
+        metadata = rpc.call("state_getMetadata", [digest])
+        require(
+            isinstance(metadata, str)
+            and metadata.startswith("0x")
+            and hashlib.sha256(bytes.fromhex(metadata[2:])).hexdigest() == metadata_sha256,
+            "matched funding runtime metadata differs",
+        )
 
 
 def transfer_event_index(events, prepared, extrinsic_index):
@@ -257,7 +314,7 @@ def observe(client, rpc, journal, response):
         prepared["unsigned"],
         expected_address=prepared["coldkey"],
         expected_genesis_hash=GENESIS_HASH,
-        expected_spec_version=475,
+        expected_spec_version=retained_runtime(prepared["unsigned"]),
         expected_transaction_version=1,
         expected_period=64,
         expected_tip=0,
@@ -330,6 +387,7 @@ def observe(client, rpc, journal, response):
             "reason": "observe_same_intent; never automatically resubmit",
         }
     match = matches[0]
+    matched_execution(rpc, match, authority.spec_version)
     snapshot_at = client.at(match["block_number"])
     events = snapshot_at.query(("System", "Events"), [])
     if hasattr(events, "value"):
@@ -430,7 +488,7 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
             and plan.fee.netuid == 0
             and type(plan.fee.rao) is int
             and 0 <= plan.fee.rao <= max_fee_rao
-            and plan.call.spec_version == 475
+            and plan.call.spec_version == snapshot.runtime_spec_version
             and plan.call.data == transfer_call(hotkey, alpha_rao),
             "planned transfer/fee differs from exact authority",
         )
@@ -467,7 +525,7 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
             unsigned.to_dict(),
             expected_address=coldkey,
             expected_genesis_hash=GENESIS_HASH,
-            expected_spec_version=475,
+            expected_spec_version=snapshot.runtime_spec_version,
             expected_transaction_version=1,
             expected_period=64,
             expected_tip=0,
@@ -475,7 +533,8 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
         )
         latest = chain_scope(rpc)
         require(
-            authority.era_current <= latest.block_number <= authority.scan_end_block,
+            authority.spec_version == latest.runtime_spec_version
+            and authority.era_current <= latest.block_number <= authority.scan_end_block,
             "prepared transfer is ahead of finality or expired",
         )
         validate_era_chain_anchor(

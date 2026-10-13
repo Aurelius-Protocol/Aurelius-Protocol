@@ -50,6 +50,53 @@ def test_transfer_is_one_exact_native_mainnet_call():
     assert amount_rao(str(Decimal("10.125"))) == 10_125_000_000
 
 
+@pytest.mark.parametrize("version", [475, 477])
+@pytest.mark.parametrize(
+    "fault", [None, "parent", "number", "runtime", "code", "metadata", "upgrade", "canonical"]
+)
+def test_finalized_funding_binds_parent_and_post_execution(version, fault):
+    parent = "0x" + "11" * 32
+    block = "0x" + "22" * 32
+    metadata = b"reviewed metadata"
+    monkeypatch_profile = (
+        funding.hashlib.sha256(metadata).hexdigest(),
+        funding.RUNTIME_PROFILES[version][1],
+    )
+    from unittest.mock import patch
+
+    def call(method, params):
+        digest = params[-1]
+        if method == "chain_getBlockHash":
+            return (
+                "0x" + "33" * 32 if fault == "canonical" else (parent if params == [99] else block)
+            )
+        if method == "chain_getHeader":
+            return {
+                "parentHash": block if fault == "parent" else parent,
+                "number": "0x65" if fault == "number" else "0x64",
+            }
+        if method == "state_getRuntimeVersion":
+            return {
+                "specVersion": 478
+                if fault == "runtime"
+                else (477 if fault == "upgrade" and digest == block else version),
+                "transactionVersion": 1,
+            }
+        if method == "state_getStorageHash":
+            return parent if fault == "code" else monkeypatch_profile[1]
+        if method == "state_getMetadata":
+            return "0x00" if fault == "metadata" else "0x" + metadata.hex()
+        raise AssertionError(method)
+
+    rpc = SimpleNamespace(call=call)
+    with patch.dict(funding.RUNTIME_PROFILES, {version: monkeypatch_profile}):
+        if fault is None or (fault == "upgrade" and version == 477):
+            funding.matched_execution(rpc, {"block_number": 100, "block_hash": block}, version)
+        else:
+            with pytest.raises(FundingRefused):
+                funding.matched_execution(rpc, {"block_number": 100, "block_hash": block}, version)
+
+
 def test_native_move_all_sentinel_is_never_authorized():
     with pytest.raises(FundingRefused, match="move-all"):
         transfer_call(ss58_encode(bytes([1]) * 32), 2**64 - 1)
@@ -146,7 +193,7 @@ def test_finalized_success_alone_never_proves_the_purchase(fault):
         funding.transfer_event_index(events, prepared, 7)
 
 
-def flow(tmp_path, monkeypatch):
+def flow(tmp_path, monkeypatch, version=475):
     pair = keypair_from_seed(b"f" * 32)
     coldkey = ss58_encode(pair[0])
     hotkey = ss58_encode(bytes([2]) * 32)
@@ -155,7 +202,7 @@ def flow(tmp_path, monkeypatch):
     era_hash = "0x" + "cd" * 32
     included = bytes.fromhex("45021c0000")
     signed = (
-        (475).to_bytes(4, "little")
+        version.to_bytes(4, "little")
         + (1).to_bytes(4, "little")
         + bytes.fromhex(funding.GENESIS_HASH[2:])
         + bytes.fromhex(era_hash[2:])
@@ -172,7 +219,7 @@ def flow(tmp_path, monkeypatch):
         "tip_asset_id": None,
         "genesis_hash": funding.GENESIS_HASH,
         "era_block_hash": era_hash,
-        "spec_version": 475,
+        "spec_version": version,
         "transaction_version": 1,
         "metadata_hash": None,
         "payload": "0x" + (call + included + signed).hex(),
@@ -184,7 +231,7 @@ def flow(tmp_path, monkeypatch):
             "genesisHash": funding.GENESIS_HASH,
             "method": "0x" + call.hex(),
             "nonce": "0x00000007",
-            "specVersion": "0x000001db",
+            "specVersion": "0x" + version.to_bytes(4, "big").hex(),
             "tip": "0x" + "00" * 16,
             "transactionVersion": "0x00000001",
             "era": "0x4502",
@@ -239,7 +286,7 @@ def flow(tmp_path, monkeypatch):
                 signer="coldkey",
                 signer_address=coldkey,
                 fee=SimpleNamespace(netuid=0, rao=5),
-                call=SimpleNamespace(spec_version=475, data=call),
+                call=SimpleNamespace(spec_version=version, data=call),
             )
 
         def prepare_call(self, *args, **kwargs):
@@ -262,7 +309,11 @@ def flow(tmp_path, monkeypatch):
             SwapRuntimeApi=SimpleNamespace(current_alpha_price="price"),
         ),
     )
-    monkeypatch.setattr(funding, "chain_scope", lambda rpc: SimpleNamespace(block_number=100))
+    monkeypatch.setattr(
+        funding,
+        "chain_scope",
+        lambda rpc: SimpleNamespace(block_number=100, runtime_spec_version=version),
+    )
 
     class Rpc:
         def call(self, method, params):
@@ -389,3 +440,69 @@ def test_blocked_credit_or_encumbered_stake_never_signs(tmp_path, monkeypatch, f
     assert "unlock" not in calls
     assert "prepare" not in calls
     assert "broadcast" not in calls
+
+
+@pytest.mark.parametrize("version", [475, 477])
+def test_reviewed_funding_runtime_preserves_one_shot_ambiguous_submission(
+    tmp_path, monkeypatch, version
+):
+    client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
+    with pytest.raises(FundingRefused, match="ambiguous"):
+        funding.fund(client, wallet, execute=True, **args)
+    assert calls.count("broadcast") == 1
+    assert args["journal"].read("prepared")["unsigned"]["spec_version"] == version
+
+
+def test_upgrade_during_preparation_refuses_before_unlock_or_sign(tmp_path, monkeypatch):
+    client, wallet, calls, args = flow(tmp_path, monkeypatch)
+    snapshots = iter(
+        [
+            SimpleNamespace(block_number=100, runtime_spec_version=475),
+            SimpleNamespace(block_number=100, runtime_spec_version=477),
+        ]
+    )
+    monkeypatch.setattr(funding, "chain_scope", lambda rpc: next(snapshots))
+    with pytest.raises(FundingRefused, match="prepared transfer"):
+        funding.fund(client, wallet, execute=True, **args)
+    assert "unlock" not in calls and "broadcast" not in calls
+
+
+@pytest.mark.parametrize("version", [475, 477])
+@pytest.mark.parametrize(
+    "fault", [None, "metadata", "code", "unknown", "float", "transaction", "genesis"]
+)
+def test_funding_scope_requires_exact_reviewed_identity(monkeypatch, version, fault):
+    metadata = b"reviewed unit metadata"
+    monkeypatch.setitem(
+        funding.RUNTIME_PROFILES,
+        version,
+        (funding.hashlib.sha256(metadata).hexdigest(), "0x" + "ab" * 32),
+    )
+    snapshot = SimpleNamespace(
+        genesis_hash=funding.GENESIS_HASH,
+        runtime_spec_version=version,
+        transaction_version=1,
+        chain="Bittensor",
+        head_hash="0x" + "cd" * 32,
+    )
+    if fault == "unknown":
+        snapshot.runtime_spec_version = 478
+    elif fault == "float":
+        snapshot.runtime_spec_version = float(version)
+    elif fault == "transaction":
+        snapshot.transaction_version = 2
+    elif fault == "genesis":
+        snapshot.genesis_hash = "0x" + "00" * 32
+    rpc = SimpleNamespace(
+        snapshot=lambda: snapshot,
+        call=lambda method, params: (
+            ("0x" + "00" * 32 if fault == "code" else "0x" + "ab" * 32)
+            if method == "state_getStorageHash"
+            else "0x" + (metadata + (b"x" if fault == "metadata" else b"")).hex()
+        ),
+    )
+    if fault is None:
+        assert funding.chain_scope(rpc) is snapshot
+    else:
+        with pytest.raises(FundingRefused):
+            funding.chain_scope(rpc)

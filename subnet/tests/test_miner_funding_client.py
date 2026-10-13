@@ -193,3 +193,48 @@ def test_signed_own_receipt_confirms_exact_deposit_and_forgery_never_confirms():
     row["receipt"]["tokens_credited"] += 1
     with pytest.raises(ReadUnavailable, match="invalid_deposit_receipt"):
         verified_deposit(response, "exact-key", receipt_pubkey=public)
+
+
+def test_explicit_base_terms_keep_signed_price_and_fixed_destination():
+    _, response, args = prepared_response()
+    response["terms"]["retention"] = "base_rate_v1"
+    assert read_funding("https://example.test", **args) == response
+    response["terms"]["evaluation_work_tokens"] = 11
+    with pytest.raises(ReadUnavailable):
+        read_funding("https://example.test", **args)
+
+
+def test_signed_base_receipt_names_exact_policy_without_claiming_history():
+    from subnet.miner.funding_client import BASE_PURCHASE_POLICY_DIGEST
+
+    _, response, _ = prepared_response()
+    key = Ed25519PrivateKey.from_private_bytes(bytes([48]) * 32)
+    public = key.public_key().public_bytes_raw().hex()
+    receipt = {
+        "receipt_version": 4,
+        "kind": "deposit",
+        "deposit_key": "base-key",
+        **response["identity"],
+        "genesis_hash": GENESIS_HASH,
+        "tariff_version": TARIFF_VERSION,
+        "rate_version": TARIFF_VERSION,
+        "denomination": "alpha",
+        "alpha_amount_rao": 10_500_000_000,
+        "tokens_credited": 10,
+        "base_work_tokens_per_alpha": "1",
+        "price_policy_digest": "a" * 64,
+        "purchase_policy": "sn37-base-1wt-v1",
+        "purchase_policy_digest": BASE_PURCHASE_POLICY_DIGEST,
+        "retention_multiple": "1",
+        "carry_before": "0",
+        "carry_after": "1/2",
+    }
+    row = {"receipt": receipt, "signature_hex": key.sign(canonical_bytes(receipt)).hex()}
+    response["account"]["receipts"]["real"] = [row]
+    assert verified_deposit(response, "base-key", receipt_pubkey=public) == receipt
+    for field, value in [("purchase_policy_digest", "b" * 64), ("retention_multiple", "20")]:
+        changed = {**receipt, field: value}
+        row["receipt"] = changed
+        row["signature_hex"] = key.sign(canonical_bytes(changed)).hex()
+        with pytest.raises(ReadUnavailable):
+            verified_deposit(response, "base-key", receipt_pubkey=public)

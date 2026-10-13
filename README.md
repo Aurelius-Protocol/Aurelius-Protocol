@@ -204,8 +204,12 @@ aurelius-miner dashboard --port 8093
 
 ### Fund evaluations
 
-The `fund` command is included, but public funding is still awaiting the backend rollout.
-It refuses to sign when the API or funding terms are unavailable. Once funding opens, run it
+The `fund` command supports the reviewed runtimes475 and477. The temporary launch
+purchases **1WT per alpha**, with exact fractional carry, and charges **10WT per SAE
+evaluation**. Full retention premium activation and the complete recovery drill are
+deferred. The backend is deploying this profile and preserves the original notice
+activation at finalized block9271373. The command refuses to sign while funding
+terms are unavailable. Once funding opens, run it
 on your wallet machine with alpha staked on subnet 37 under your registered serving hotkey.
 The funding wallet's coldkey must own that hotkey; keep TAO available for chain fees.
 The command checks unlocked alpha and registration collateral, and requires a transfer worth

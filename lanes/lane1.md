@@ -424,13 +424,13 @@ training or official scientific evaluation command in this public miner package.
 
 ### Current participation blockers
 
-Checked on **2026-10-11**:
+Checked on **2026-10-13**:
 
 | Requirement | Current gap |
 | --- | --- |
 | Compatible signed schedule | Fixed in this branch: adjacent `C = W = 100` windows are supported. Overlapping or unaligned schedules remain refused. |
-| Public evaluation funding | Launch requires 10 WT per SAE evaluation, 1 base WT/alpha and the full retention premium described in [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). Verified mainnet lot history and purchase/receipt integration remain incomplete; bootstrap credits are not public funding. |
-| Registered-miner admission | The live backend still pins the original miner. A source change admits registered hotkeys with finalized ownership and paid-result verification; its backend rollout is pending. No extra signup flow is planned. |
+| Public evaluation funding | The approved temporary launch uses10WT per SAE evaluation and1WT per alpha with exact carry. Premium and the full recovery drill are deferred; the backend rollout and original notice at9271373 must complete before authenticated terms report available. See [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). |
+| Registered-miner admission | Registered-hotkey admission is implemented with finalized ownership and paid-result verification, but its live authority selection/loop rollout remains pending. No extra signup or trusted-key setup is required. |
 | Economics read | Live: a hotkey-signed `POST /api/miner/economics` returned HTTP 200 and passed the miner client's signed-config and account checks. Unsigned requests return HTTP 401. The response still reports purchase conversion unavailable. |
 | Deposit-address lookup | Live: `GET /api/deposit_address` returns HTTP 200 with the subnet 37 treasury address. Address discovery alone does not enable work-token purchases; real deposits remain paused. |
 
