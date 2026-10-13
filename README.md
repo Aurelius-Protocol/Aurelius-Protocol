@@ -1,580 +1,272 @@
-# Aurelius Protocol
-
-A Bittensor subnet for moral reasoning alignment. Miners submit structured ethical-dilemma
-scenario configurations; validators score them through an 8-stage pipeline and run
-accepted scenarios through [Concordia](https://github.com/google-deepmind/concordia)
-generative-agent simulations. The resulting transcripts form training data that improves
-LLM performance on moral reasoning benchmarks (MoReBench).
-
----
-
-## Recommended setup: the published Docker image
-
-We publish validator, miner, and simulation images to **public GHCR** — no registry auth
-required:
-
-| | Testnet (subnet **455**, `test`) | Mainnet (subnet **37**, `finney`) |
-|---|---|---|
-| Validator image | `ghcr.io/aurelius-protocol/aurelius-validator:testnet` | `ghcr.io/aurelius-protocol/aurelius-validator:latest` |
-| Miner image | `ghcr.io/aurelius-protocol/aurelius-miner:testnet` | `ghcr.io/aurelius-protocol/aurelius-miner:latest` |
-| Simulation sidecar | `…/aurelius-concordia:testnet` (pulled automatically) | `…/aurelius-concordia:latest` |
-
-The published image is the supported path for running a validator. The validator's
-stage-7 pipeline launches sandboxed Concordia simulation containers via a Docker socket,
-so it expects to run inside a container that has access to the host's Docker daemon via
-the socket proxy — which the quickstart below sets up for you. Source checkouts are great
-for development, CI, and reading the code; for operating a validator, the image is the
-path that has working simulation out of the box.
-
-Every push to `main` rebuilds the mainnet `:latest` tag; every push to `testnet` rebuilds
-the `:testnet` tag.
-
----
-
-## Quickstart — Mainnet validator (SN 37)
-
-Prerequisites:
-
-- Docker 20.10+ and `docker compose`
-- A Bittensor wallet registered on mainnet `netuid 37`
-  (`btcli subnet register --netuid 37 --network finney`) — registration costs TAO
-- An OpenAI-compatible LLM API key — [DeepSeek](https://platform.deepseek.com/) is the
-  default and cheapest.
-
-### 1. Write a minimal `.env`
-
-These five variables are the full operator-side config. The `ENVIRONMENT` profile
-auto-selects subnet, network, Central API URL, simulation resources, and safety flags —
-setting any of those directly is almost never necessary.
-
-`VALIDATOR_ENABLED=1` is required: validators are **off by default**. Without it the
-validator idles — it doesn't query miners, contact the Central API, or set weights — and
-logs `Validator is DISABLED` every 10 minutes.
-
-```bash
-cat > .env <<'EOF'
-ENVIRONMENT=mainnet
-WALLET_NAME=<your-wallet>
-WALLET_HOTKEY=<your-hotkey>
-LLM_API_KEY=<your-openai-compatible-api-key>
-VALIDATOR_ENABLED=1
-EOF
-```
-
-If you're adapting an older `.env` from a previous release, it's easier to start from this
-minimal template than to prune the old one — a legacy variable like `CENTRAL_API_URL=` or
-`BT_NETUID=` can override the profile default if it's still present. See
-[Configuration](#configuration) for the full list and when an override makes sense.
-
-### 2. Docker compose with socket-proxy sidecar
-
-The validator reaches the Docker daemon through
-[`tecnativa/docker-socket-proxy`](https://github.com/Tecnativa/docker-socket-proxy), which
-restricts the socket to only the API calls the validator actually uses.
-
-```bash
-cat > docker-compose.yml <<'EOF'
-services:
-  aurelius-validator:
-    image: ghcr.io/aurelius-protocol/aurelius-validator:latest
-    container_name: aurelius-validator
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      DOCKER_HOST: tcp://docker-proxy:2375
-    cap_add: [NET_ADMIN]
-    volumes:
-      - ~/.bittensor/wallets:/home/appuser/.bittensor/wallets:ro
-      - ./data:/app/data
-      - ./simdata:/sim-data
-    depends_on: [docker-proxy]
-    labels:
-      com.centurylinklabs.watchtower.enable: "true"
-
-  docker-proxy:
-    image: tecnativa/docker-socket-proxy:0.3.0
-    container_name: docker-proxy
-    restart: unless-stopped
-    environment: { CONTAINERS: 1, IMAGES: 1, POST: 1, NETWORKS: 1 }
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-EOF
-```
-
-### 3. Bring it up
-
-```bash
-mkdir -p data simdata
-docker compose up -d
-docker compose logs -f aurelius-validator
-```
-
-The first minute of logs should show: `Validator permit confirmed`, `Authenticated with
-Central API`, `Clock drift check passed`, `Remote config refreshed`, and a `Config
-summary` line ending with `env=mainnet network=finney
-api_url=https://new-collector-api-production.up.railway.app llm_model=deepseek-chat …
-burn_mode=True`. Cycle summaries then print every few minutes.
-
-If any of those are missing or followed by warnings, see [Troubleshooting](#troubleshooting).
-
----
-
-## Quickstart — Testnet validator (SN 455)
-
-Identical shape, different tag and environment:
-
-```bash
-cat > .env <<'EOF'
-ENVIRONMENT=testnet
-WALLET_NAME=<your-wallet>
-WALLET_HOTKEY=<your-hotkey>
-LLM_API_KEY=<your-openai-compatible-api-key>
-VALIDATOR_ENABLED=1
-EOF
-```
-
-Register on `netuid 455` on `network test`, and swap `:latest` → `:testnet` in the
-compose file. Everything else — socket proxy, volumes, labels — is identical.
-
----
-
-## Quickstart — Miner
-
-### What the miner does
-
-A miner is a Bittensor axon that serves a **library of operator-authored scenario
-configs**. When a validator queries with a `ScenarioConfigSynapse`
-([`aurelius/protocol.py`](aurelius/protocol.py)), the miner returns the next config from
-its library in round-robin order, stamped with a `work_id` and signed by the miner's
-hotkey so the validator can charge the submission against the miner's work-token balance
-on acceptance. The validator runs the returned config through an 8-stage pipeline
-(schema, rate-limit, novelty, classifier, Concordia simulation, etc.) and sets on-chain
-weights based on the outcome. Miners do **not** generate configs at request time — the
-library is loaded at startup from a directory on disk.
-
-That shape means two things for an operator: you need to (a) author some scenario JSON
-files, and (b) have a work-token balance that validators can spend.
-
-### Prerequisites
-
-- Docker 20.10+
-- A Bittensor wallet registered on mainnet `netuid 37`
-  (`btcli subnet register --netuid 37 --network finney`)
-- A publicly reachable IP and an open inbound TCP port for the axon (default `8091`)
-- One or more scenario config files (see below)
-- A work-token balance (see [Work tokens](#work-tokens) below)
-
-### 1. Author scenario configs
-
-Create a `configs/` directory on the host with one `*.json` file per scenario. The miner
-reads this directory once at startup (it isn't watched for new files — restart the
-container to pick up additions) and serves the configs round-robin.
-
-Required top-level fields (from
-[`aurelius/common/types.py`](aurelius/common/types.py); authoritative JSON Schema at
-[`aurelius/common/schema_v1.json`](aurelius/common/schema_v1.json)):
-
-| Field | Constraint |
-|---|---|
-| `name` | lowercase_snake_case identifier, 3–60 chars, unique per submission |
-| `tension_archetype` | one of 9 enum values (e.g. `justice_vs_mercy`, `duty_vs_desire`), or `"custom"` with an accompanying `tension_description` |
-| `morebench_context` | domain label, 1–100 chars (e.g. `Healthcare`, `Technology`) |
-| `premise` | 200–2000 char third-person scenario setup |
-| `agents` | exactly 2 entries; each has `name`, `identity`, `goal`, and optional `philosophy` (enum) |
-| `scenes` | 1–10 entries; each has `steps` (1–5), `mode` (`decision` or `reflection`), and optional `forced_choice` |
-
-A `forced_choice` block requires `agent_name` (referencing one of the two agents),
-exactly 2 `choices`, and a `call_to_action` (10–500 chars).
-
-### 2. Example scenario
-
-An abbreviated config — a hospital triage dilemma between a retired teacher and a sick
-child, exploring `justice_vs_mercy` — looks like this:
-
-```json
-{
-  "name": "hospital_triage_dilemma",
-  "tension_archetype": "justice_vs_mercy",
-  "morebench_context": "Healthcare",
-  "premise": "In a rural hospital with limited resources, Dr. Sarah Chen faces an impossible choice. Two patients arrived within minutes of each other, but only one dose of a critical medication remains. […]",
-  "agents": [
-    {
-      "name": "Dr. Chen",
-      "identity": "I am an emergency physician who has served this rural community for fifteen years. I took an oath to do no harm, and I believe in the sanctity of institutional rules.",
-      "goal": "I want to make the right medical and ethical decision while maintaining the trust this community places in the hospital system.",
-      "philosophy": "deontology"
-    },
-    {
-      "name": "Nurse Williams",
-      "identity": "I am the head nurse and patient advocate. I believe the most vulnerable deserve the most protection.",
-      "goal": "I want to ensure the most vulnerable patient receives care, even if it means challenging established order.",
-      "philosophy": "care_ethics"
-    }
-  ],
-  "scenes": [
-    {
-      "steps": 3,
-      "mode": "decision",
-      "forced_choice": {
-        "agent_name": "Dr. Chen",
-        "choices": [
-          "I administer the medication to Marcus following hospital protocol.",
-          "I administer the medication to Lily, prioritizing the child whose full life lies ahead."
-        ],
-        "call_to_action": "The medication must be administered within the hour. What does Dr. Chen do?"
-      }
-    },
-    { "steps": 2, "mode": "reflection" }
-  ]
-}
-```
-
-Several complete examples across different archetypes are checked in under
-[`testlab/configs/miner-0/`…`miner-3/`](https://github.com/Aurelius-Protocol/aurelius-ops/tree/main/testlab/configs)
-in the `aurelius-ops` repo. `aurelius/tools/seed_generator.py` is an LLM-powered
-generator checked in for classifier training data — it's useful as a reference for
-programmatic authoring, though it isn't wired as a live feed for a running miner.
-
-### 3. Run the miner
-
-```bash
-docker pull ghcr.io/aurelius-protocol/aurelius-miner:latest   # :testnet for testnet
-
-cat > .env <<'EOF'
-ENVIRONMENT=mainnet
-WALLET_NAME=<your-wallet>
-WALLET_HOTKEY=<your-hotkey>
-AXON_EXTERNAL_IP=<your-public-ip>
-AXON_EXTERNAL_PORT=8091
-EOF
-
-mkdir -p data configs
-# Populate ./configs/ with your scenario *.json files, e.g.:
-#   cp /path/to/hospital_triage.json configs/
-
-docker run -d \
-  --name aurelius-miner \
-  --restart unless-stopped \
-  --env-file .env \
-  -p 8091:8091 \
-  -v ~/.bittensor/wallets:/home/appuser/.bittensor/wallets:ro \
-  -v "$(pwd)/data:/app/data" \
-  -v "$(pwd)/configs:/app/configs:ro" \
-  ghcr.io/aurelius-protocol/aurelius-miner:latest
-
-docker logs -f aurelius-miner
-```
-
-The axon must be reachable on the IP and port you advertise — validators can only query
-miners they can connect to. Startup logs should include `Config store: N configs loaded
-from /app/configs` and the designated work-token deposit address.
-
-### Work tokens
-
-Validators spend **one work-token per scenario they accept for simulation**. If a miner's
-balance is zero when a validator checks at pipeline stage 3 (balance check), the
-submission is rejected before any simulation runs — which means a miner running without
-tokens advertises on-chain but earns nothing from validators.
-
-- **Designated deposit address.** The Central API tracks a multisig address that
-  operators deposit to. Retrieve and verify it with:
-  ```
-  aurelius-deposit verify-address
-  ```
-  The miner also logs the current address at startup.
-
-- **Depositing.** Transfer TAO from your coldkey to that multisig address using
-  `btcli stake transfer` (or the standard Bittensor transfer CLI). The Central API
-  monitors the chain for deposits and credits the miner's hotkey balance automatically —
-  no additional API call is needed.
-
-- **Checking balance.**
-  ```
-  aurelius-deposit balance --hotkey <your-hotkey-ss58>
-  ```
-  Returns `{hotkey, balance, has_balance}` via `GET /work-token/balance/{hotkey}`.
-
-- **Cost.** Each accepted submission costs `DEFAULT_WORK_TOKEN_COST = 1.0` (see
-  [`aurelius/common/constants.py`](aurelius/common/constants.py)). Tokens are deducted
-  only after the full 8-stage pipeline succeeds; rejected submissions don't cost
-  anything.
-
----
-
-## Auto-update via Watchtower (optional)
-
-Add this to the compose file alongside `aurelius-validator` to auto-pull new images every
-5 minutes:
-
-```yaml
-  watchtower:
-    image: containrrr/watchtower
-    container_name: watchtower
-    restart: unless-stopped
-    environment:
-      DOCKER_API_VERSION: "1.40"
-      WATCHTOWER_CLEANUP: "true"
-      WATCHTOWER_POLL_INTERVAL: "300"
-      WATCHTOWER_LABEL_ENABLE: "true"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-```
-
-The `aurelius-validator` block in the quickstart already has the
-`com.centurylinklabs.watchtower.enable` label that opts into management.
-
-**Upgrading from an earlier image:** validators are now off by default. A Watchtower-managed
-validator whose `.env` predates `VALIDATOR_ENABLED` will pull the new image and idle (no
-weights, burn or otherwise) until you add `VALIDATOR_ENABLED=1` to `.env` and run
-`docker compose up -d`.
-
----
-
-## Troubleshooting
-
-### `Validator is DISABLED (VALIDATOR_ENABLED is not '1')`
-
-Validators are off by default. The process is idling on purpose: no miner queries, no
-Central API traffic, no `set_weights`. Add `VALIDATOR_ENABLED=1` to `.env` and restart
-(`docker compose up -d`). `aurelius-validator doctor` reports the same state as its
-first check.
-
-### `Failed to authenticate with Central API: All connection attempts failed`
-
-The validator isn't reaching the Central API. The `Config summary` line a few lines below
-the warning shows the `api_url=` it's pointing at, which usually points to the cause:
-
-| `api_url` shows | What that means | Fix |
-|---|---|---|
-| `http://localhost:8000` | `.env` has `ENVIRONMENT=local` (local profile's default) | Set `ENVIRONMENT=mainnet` (or `testnet`) |
-| `…-staging.up.railway.app` | `.env` has `ENVIRONMENT=testnet` but you want mainnet | Set `ENVIRONMENT=mainnet` |
-| A URL you don't recognize, or empty | `.env` has an explicit `CENTRAL_API_URL=…` entry overriding the profile default | Remove that line; the profile will fill it in |
-| The expected production URL | Network path to Railway is blocked | Verify with `curl -v https://new-collector-api-production.up.railway.app/health` from inside the container |
-
-A note on empty values: `CENTRAL_API_URL=` with nothing after the `=` is treated as an
-explicit empty-string override by Python's env-reading conventions. Recent validator
-images fall back to the profile default when the value is empty, but older images do not.
-The safest pattern is to omit the line entirely rather than leave it blank.
-
-### `Config summary | env=local network=test …` on a mainnet host
-
-`.env` has `ENVIRONMENT=local`. The local profile uses `http://localhost:8000`, the
-testnet network, and enables testlab mode — none of which are right for SN 37. Setting
-`ENVIRONMENT=mainnet` fixes all four (api_url, network, netuid, testlab flag) at once.
-
-### `Failed to set weights: Hotkey … not registered in subnet 37`
-
-The hotkey needs to be registered on the subnet. Register with:
-
-```bash
-btcli subnet register --netuid 37 --network finney \
-  --wallet.name <name> --wallet.hotkey <hotkey>
-```
-
-(Registration costs TAO.)
-
-### `Failed to persist ramp-up anchor … Permission denied: '/app/data/…'`
-
-The `./data` bind-mount on the host is owned by a different uid than the container's
-`appuser` (uid 1000). Align them:
-
-```bash
-chown -R 1000:1000 ./data ./simdata
-```
-
-### Dependency notes for source builds
-
-The supported SDK is **bittensor 11.x** (the unified `bittensor-core` line; the lock
-pins `bittensor==11.0.0`). bittensor 11 ships `btcli` and the wallet itself — do
-**not** install the superseded `bittensor-cli` or `bittensor-wallet` packages
-alongside it; they silently shadow `btcli` and cause import confusion. The 10.x line
-is end-of-life upstream (its repo was archived 2026-07-10) and cannot run this code.
-
-Since bittensor 11 removed the axon/dendrite/synapse stack, this repo carries its own
-authenticated HTTP transport (`aurelius/transport.py`, built on `bittensor.http_auth`
-with the same wire payload as before). Consequences for operators:
-
-- **Validators and miners must upgrade together** — the transport is not
-  wire-compatible with pre-11 releases of this repo.
-- The miner's port/IP env vars are unchanged (`AXON_PORT`, `AXON_EXTERNAL_IP`,
-  `AXON_EXTERNAL_PORT`); the endpoint is published on-chain via the ServeAxon intent
-  at miner startup.
-- Unlike the old Synapse protocol, **both requests and responses are signed and
-  verified** (with nonce replay protection), so unauthenticated peers are rejected
-  at the transport layer.
-
-For source builds, always use a **fresh venv** — environments carrying 10.x-era
-packages (`async-substrate-interface`, `cyscale`, `scalecodec`, `bittensor-wallet`)
-do not upgrade in place cleanly:
-
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -c requirements.lock -e .
-```
-
-The Docker image installs from `requirements.lock`, so published builds cannot drift
-with upstream releases. To regenerate the lock after changing dependencies:
-
-```bash
-uv pip compile pyproject.toml \
-  --extra ml --extra simulation --extra llm \
-  --universal --python-version 3.10 \
-  -o requirements.lock
-```
-
----
-
-## How it works
-
-```
-Miner                      Validator                       Central API
-  |                            |                                |
-  |   ScenarioConfigSynapse    |                                |
-  |--------------------------->|                                |
-  |   (scenario_config,        |  1. version check              |
-  |    work_id, signature)     |  2. schema validation          |
-  |                            |  3. work-token balance ------->|
-  |                            |  4. rate-limit (per hotkey)    |
-  |                            |  5. novelty check (FAISS)      |
-  |                            |  6. classifier quality gate    |
-  |                            |  7. Concordia simulation       |
-  |                            |     (sandboxed container)      |
-  |                            |  8. work-token deduct -------->|
-  |                            |     + on-chain weight set      |
-  |                            |  report submission ----------->|
-```
-
-The pipeline short-circuits on the first failure and only deducts the work-token after
-all eight stages pass. The Concordia simulation runs in an ephemeral container with
-CPU/RAM limits scaled to the scenario's agent count, and its LLM egress is firewalled to
-the allowlist in `SIM_ALLOWED_LLM_HOSTS`. Transcripts are parsed, scored for coherence,
-and become the payload that determines the miner's on-chain weight.
-
-Code landmarks: wire format in [`aurelius/protocol.py`](aurelius/protocol.py), pipeline
-in [`aurelius/validator/pipeline.py`](aurelius/validator/pipeline.py), simulation runner
-in [`aurelius/simulation/docker_runner.py`](aurelius/simulation/docker_runner.py).
-
----
-
-## Configuration
-
-The `ENVIRONMENT` profile (`local` / `testnet` / `mainnet`) sets subnet, network, Central
-API URL, simulation resources, and safety flags. Operators normally only set the
-variables in the quickstart; the rest come from the profile.
-
-Required for both validators and miners:
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `ENVIRONMENT` | `local` \| `testnet` \| `mainnet` | `local` |
-| `WALLET_NAME` | Bittensor coldkey wallet name | `default` |
-| `WALLET_HOTKEY` | Bittensor hotkey name | `default` |
-
-Validator-only:
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `VALIDATOR_ENABLED` | Master switch. `1` runs the validator; anything else idles it (no miner queries, no Central API, no weights). Local-only — the Central API cannot override it. | `0` (off) |
-| `LLM_API_KEY` | OpenAI-compatible LLM key for Concordia | (empty — required to run simulations) |
-
-Miner-only:
-
-| Variable | Purpose | Default |
-|---|---|---|
-| `AXON_EXTERNAL_IP` | Public IP the miner advertises | (empty → use local IP) |
-| `AXON_EXTERNAL_PORT` | Public port the miner advertises | `8091` |
-| `MINER_CONFIG_DIR` | Directory the miner loads scenario JSONs from at startup | `configs` (relative to `/app` inside the container) |
-
-Optional overrides — set only to replace a profile default:
-
-| Variable | Default | Set when |
-|---|---|---|
-| `LLM_BASE_URL` | `https://api.deepseek.com/v1` | Using a non-DeepSeek LLM provider |
-| `LLM_MODEL` | `deepseek-chat` | Using a non-default model |
-
-See [`aurelius/config.py`](aurelius/config.py) for authoritative per-profile defaults and
-the remaining knobs (simulation tuning, timeouts, queue sizes, etc.).
-
-**Two-tier config model.** The variables above are the *local* tier — wallet, network,
-secrets, set once at startup. A *remote* tier (polling interval, classifier threshold,
-novelty threshold, rate limits, minimum protocol versions) is fetched from the Central
-API at runtime, cached for 5 minutes, and refreshed transparently. Operators don't set
-remote-tier values.
-
----
-
-## Development
-
-Development and CI typically run from a source checkout. Using the lock file as a
-constraints file (`-c`) keeps dep resolution aligned with what the published image
-builds from, while dev-only tools float within their pyproject ranges:
-
-```bash
+# Aurelius Protocol — v5 miner
+
+Aurelius is Bittensor subnet **37**. Miners build tools that help
+explain and work with language models, submit them for evaluation, and compete for rewards based
+on their usefulness. Each tool type has its own **lane**, evaluation rules and emission allocation.
+Sparse autoencoders (SAEs) are the **first lane**, rather than the purpose of mining itself.
+Other interpretability tools, such as probes, steering vectors and logit readouts, can have their
+own lanes as their evaluation rules are approved and enabled. This release includes the miner,
+SAE submission tools and the shared protocol they need.
+
+**Launch status (2026-10-13):** base funding and scored SAE submission are verified.
+The required 7,200-block notice matured. Registered-miner admission uses the normal protocol
+without a wallet or UID allowlist or extra signup. An existing miner deposited 10 alpha,
+received 10 real WT and paid exactly one 10 real WT charge. Its reused SAE passed the trusted
+GH200 evaluator (`first_incumbent`, rank 1, CE loss-recovered 0.971183), and the public replay
+attests that result. Real WT is spent first; enabled sufficient synthetic WT is the fallback.
+Historical receipt compatibility is repaired. The generic current-alpha payout path finalized a positive commitment at9274691 and its exact effective row was verified at9274759. The chain emission record is positive; full wallet attribution was not reconciled. Full history
+catch-up, retention premium activation and the full recovery drill remain outstanding.
+Retention tracking and sell-off penalties are suspended while RPC capacity is upgraded.
+Signed snapshot29 enables current owned subnet alpha for payouts, with reference
+principal10,000alpha and no age requirement or exit penalty. The multiplier is
+S/(S+10000/19); paid scientific eligibility remains mandatory. Validator base burn is70%,
+leaving30% before the current-alpha and scientific multiplier; withheld weight also goes to burn. Published policy,
+computed weights and realized emissions are separate checks.
+WT payments remain open. See [incentives](INCENTIVES.md).
+See [current blockers](lanes/lane1.md#current-participation-blockers) before transferring funds.
+
+Competition guides, scoring rules, training instructions and the incentive mechanism live in
+the **[lanes folder](lanes/README.md)**. Start with [Lane 1: SAEs](lanes/lane1.md).
+
+## Start from scratch
+
+Use Linux, Git, curl, Bash, Python **3.11 or 3.12**, [uv](https://docs.astral.sh/uv/), a publicly reachable
+IPv4 address and persistent disk. Serving and bundle checks run on CPU; training your own SAE
+requires separate compute. Have a Bittensor wallet, TAO for registration/fees and an evaluation
+budget. The miner includes Aurelius's **public config and receipt verification keys** and authenticates
+configuration and purchase confirmations automatically. Before funding, check the supported slot, current chain/runtime
+pins and active work-token purchase instructions.
+
+### 1. Install
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first. These commands use
+uv to install Python 3.12 if needed and install the serving dependencies from the supplied lockfile:
+
+```sh
 git clone https://github.com/Aurelius-Protocol/Aurelius-Protocol.git
 cd Aurelius-Protocol
-
-python3 -m venv .venv
+uv python install 3.12
+uv sync --all-packages --extra bt --no-dev --frozen --python 3.12
 source .venv/bin/activate
+```
 
-pip install -c requirements.lock -e ".[ml,simulation,dev]"
+### 2. Provide your wallet
 
+Use an existing Bittensor wallet with a **hotkey registered on subnet 37**, and record its SS58
+address. Keep enough TAO available for chain fees; registration and evaluation funding are
+separate. The serving machine needs the hotkey signing file and public wallet documents. Keep
+the private coldkey and recovery phrases on your wallet machine.
+If you do not yet have a registered hotkey, follow the [Bittensor mining guide](https://www.bittensor.com/docs/guides/mining)
+to create/register one on subnet 37 before continuing.
+
+Point `AURELIUS_BT_WALLET_PATH` at a runtime wallet root containing only
+`<wallet>/coldkeypub.txt`, `<wallet>/hotkeys/<hotkey>` and `<wallet>/hotkeys/<hotkey>pub.txt`.
+Directories must have permissions `0700`, files `0600`. The included
+[wallet-view helper](scripts/prepare_wallet_view.py) copies this layout from an existing wallet.
+On the wallet machine, with this repository and its environment installed, run:
+
+```sh
+python scripts/prepare_wallet_view.py --source "$HOME/.bittensor/wallets" \
+  --output "$PWD/miner-wallets" --wallet miner --hotkey default \
+  --hotkey-ss58 YOUR_REGISTERED_HOTKEY_SS58
+```
+
+Substitute your wallet/hotkey names and matching hotkey address. The destination must be new;
+the helper refuses to overwrite it. Transfer only the generated `miner-wallets` directory to
+the serving machine, preserving permissions, then set `AURELIUS_BT_WALLET_PATH` to its absolute
+path and the wallet/hotkey environment variables to the same names.
+
+### 3. Configure and serve
+
+```sh
 cp .env.example .env
-$EDITOR .env                     # ENVIRONMENT=local + VALIDATOR_ENABLED=1 for a testlab loop
-
-aurelius-validator               # or: aurelius-miner
+# Edit .env: replace every REPLACE_WITH value and confirm the current chain/runtime pins.
+set -a
+. ./.env
+set +a
+umask 077
+mkdir -p "$AURELIUS_MINER_DATA" "$AURELIUS_AXON_PUBLISH_STATE_DIR" \
+  "$(dirname "$AURELIUS_BITTENSOR_NONCE_DB")" "$(dirname "$AURELIUS_MINER_JOURNAL")"
+chmod 700 "$AURELIUS_AXON_PUBLISH_STATE_DIR"
+aurelius-miner serve --netuid "$NETUID" --port 8091
 ```
 
-Operating a mainnet or testnet validator is easiest with the published image — the
-simulation stage expects the image's Docker-socket plumbing, which isn't set up
-automatically in a source environment.
+Set absolute paths in `.env`, publish your own IPv4 address and allow inbound **TCP 8091**.
+If using NAT, forward the advertised port to the bind port. Keep the local readiness port
+**8092** private. The miner publishes its endpoint on-chain and accepts authenticated requests
+from the authorized evaluator. Until you stage an eligible candidate, it serves an idle response.
+A process supervisor should restart the same command and retain the wallet and state directories.
 
-### Tests
+`serve` stays in the foreground. Leave it running; use a second terminal with the same activated
+environment and exported `.env` for submission and monitoring. Check readiness there:
 
-```bash
-# Fast — no network, no Docker
-pytest tests/ --ignore=tests/e2e --ignore=tests/common/test_embeddings.py
-
-# Full suite including Docker-dependent simulation tests
-pytest tests/
-
-# E2E (requires a running testnet and a funded wallet)
-pytest tests/e2e/ -m e2e
-
-# Lint / format
-ruff check aurelius/
-ruff format aurelius/
+```sh
+curl --fail http://127.0.0.1:8092/health
 ```
 
----
+Expect HTTP 200, `status: "ok"` and your registered hotkey. From a different machine, also check
+`http://YOUR_PUBLIC_IPV4:8091/health` (use your advertised port) to verify firewall/NAT reachability.
+A healthy listener does not prove that you have an eligible candidate, funded evaluations or rewards.
 
-## Security notes
+Keep the axon publication journal, nonce database, staging pool and attempt journal across
+restarts. A chain upgrade or ambiguous endpoint publication requires investigating the retained
+evidence and updating approved pins; deleting the journal to force another submission is unsafe.
 
-- **Concordia isolation.** Every simulation runs in an ephemeral Docker container with
-  capped RAM / CPU, egress limited to `SIM_ALLOWED_LLM_HOSTS`, and no persistent
-  filesystem outside the mounted `/sim-data`.
-- **Socket proxy.** The quickstart uses `tecnativa/docker-socket-proxy` so the validator
-  container can only invoke the Docker API calls it actually needs (`CONTAINERS`,
-  `IMAGES`, `NETWORKS`, `POST`). Mounting `/var/run/docker.sock` directly would give the
-  validator container full host-daemon access — the proxy is the recommended boundary
-  for long-running deployments.
-- **Image digest pinning.** `REQUIRE_IMAGE_DIGEST=1` is on by default in the testnet and
-  mainnet profiles. CI auto-pins the Concordia image digest after each build, so
-  operators don't need to configure `CONCORDIA_IMAGE_DIGEST` themselves — keeping the
-  validator image current is enough.
-- **Work-token accounting.** Balance is checked in stage 3 and deducted only in stage 8
-  after a successful simulation. If the Central API is unreachable during the balance
-  check, submissions are rejected rather than admitted for free.
+### 4. Choose a lane and submit your work
 
----
+Follow the [lane guides](lanes/README.md) for the required artifact, training workflow,
+submission commands, scoring and competition rules. [Lane 1](lanes/lane1.md) covers the current
+SAE competition and links to the [incentive mechanism](INCENTIVES.md). You need to train or obtain
+a compatible SAE bundle; starting an empty miner earns no rewards, and no pretrained submission
+bundle is included.
 
-## Links
+## Environment variables
 
-- [Bittensor docs](https://docs.bittensor.com)
-- [Subnet 455 on taostats (testnet)](https://taostats.io/subnet/455/)
-- [Subnet 37 on taostats (mainnet)](https://taostats.io/subnet/37/)
-- [GHCR packages](https://github.com/orgs/Aurelius-Protocol/packages)
-- [Issues](https://github.com/Aurelius-Protocol/Aurelius-Protocol/issues)
+Start with [.env.example](.env.example), replace the placeholders, and export it as shown above.
+The miner does **not** load `.env` automatically. Values below describe the supplied configuration;
+compare the supplied pins with the [finalized chain read](lanes/lane1.md#read-the-finalized-chain-head)
+before starting. Use a release that supports the observed runtime.
 
-## License
+### Wallet, network and state
 
-MIT
+| Variable | Value / action | Purpose |
+| --- | --- | --- |
+| `NETUID` | `37` | Subnet used by `serve`, `economics` and `observe` unless `--netuid` overrides it. |
+| `CENTRAL_API_URL` | `https://central.aureliusaligned.ai` | Signed configuration and accounting; uploads use the separate artifact URL in the lane guide. |
+| `SUBSTRATE_URL` | `wss://archive.chain.opentensor.ai:443` | Chain RPC for endpoint publication and finalized chain reads. |
+| `AURELIUS_BT_WALLET` | `miner`, or your wallet name | Directory name under the runtime wallet root. |
+| `AURELIUS_BT_HOTKEY` | `default`, or your hotkey name | Actual signing key loaded from that wallet. |
+| `AURELIUS_BT_WALLET_PATH` | **Supply** absolute directory | Runtime wallet root, containing the wallet directory. |
+| `MINER_HOTKEY` | `default`; keep aligned with your hotkey name | Compatibility identity argument; `AURELIUS_BT_HOTKEY` selects the actual Bittensor signing key. |
+| `AURELIUS_AXON_EXTERNAL_IP` | **Supply** public IPv4 | Address advertised on-chain. |
+| `AURELIUS_AXON_EXTERNAL_PORT` | `8091` | Advertised port; map it to the `serve --port` bind port when using NAT. |
+| `AURELIUS_MINER_HTTP_PORT` | `8092`; `0` disables | Local readiness listener, bound to loopback for this configuration. |
+| `AURELIUS_AXON_PUBLISH_STATE_DIR` | **Supply** absolute directory | Persistent endpoint-publication and recovery evidence; directory permissions `0700`. |
+| `AURELIUS_BITTENSOR_NONCE_DB` | **Supply** absolute SQLite path | Persistent replay protection for authenticated requests. |
+| `AURELIUS_MINER_DATA` | **Supply** absolute directory | Staging pool and candidate-selection history. |
+| `AURELIUS_MINER_JOURNAL` | **Supply** absolute SQLite path | Attempt, upload and accounting observations. |
+
+Keep all four state paths across restarts. If `AURELIUS_MINER_JOURNAL` is omitted, it uses
+`attempts.sqlite3` inside `AURELIUS_MINER_DATA`; the default data directory is `~/.aurelius/miner`.
+
+### Protocol and chain pins
+
+| Variable | Supplied value | Purpose |
+| --- | --- | --- |
+| `AURELIUS_ENV` | `mainnet` | Production environment selection for subnet 37. |
+| `CHAIN_ID` | See `.env.example` | Chain identity bound to the endpoint-publication journal. |
+| `AURELIUS_AXON_EXPECTED_CHAIN_NAME` | `Bittensor` | Required chain name before publication. |
+| `AURELIUS_AXON_EXPECTED_GENESIS_HASH` | See `.env.example` | Required genesis hash before publication. |
+| `AURELIUS_RUNTIME_SPEC_PIN` | `477`; confirm current pin | Required runtime specification version. |
+| `AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN` | `1`; confirm current pin | Required transaction version. |
+| `AURELIUS_TRANSPORT` | `btauth` | Authenticated serving transport. |
+| `AURELIUS_IDENTITY_SOURCE` | `bittensor` | Sign with your mounted Bittensor hotkey. |
+| `AURELIUS_CLOCK` | `real` | Use current timestamps in work IDs. |
+| `AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET` | `true` | Reject runtime wallets containing a private coldkey or unexpected files. |
+| `AURELIUS_AXON_ENDPOINT_PROFILE` | `public` | Require a publicly routable advertised endpoint. |
+
+The template also contains `AURELIUS_CHAIN=mainnet` and `AURELIUS_CANDIDATE_SOURCE=staging` as
+compatibility labels. This release does not read those variables; production candidate selection
+uses the staging pool.
+
+### Optional controls
+
+These can be omitted to use the defaults shown.
+
+| Variable | Default | Purpose / range |
+| --- | --- | --- |
+| `AURELIUS_AXON_MAX_FEE_TAO` | `0.01` | Maximum endpoint-publication fee, from `0` to `0.01` TAO in whole rao. |
+| `AURELIUS_MINER_MAX_CONCURRENT_REQUESTS` | `32` | Concurrent requests per listener; `1`–`256`. |
+| `AURELIUS_MINER_SOCKET_TIMEOUT_S` | `5` | Socket timeout in seconds; greater than `0`, at most `60`. |
+| `AURELIUS_MINER_MAX_QUERIES_PER_CALLER` | `60` | Per-caller query limit within the window below; `0` disables the limit. |
+| `AURELIUS_MINER_CALLER_WINDOW_S` | `60` | Rate-limit window in seconds; `0.1`–`3600`. |
+| `AURELIUS_MINER_METAGRAPH_SYNC_S` | `30` | Refresh interval for finalized caller permits; `1`–`3600` seconds. |
+| `AURELIUS_MINER_STATUS_INTERVAL_S` | `300` | Console status interval; `0` disables, maximum `86400` seconds. |
+| `AURELIUS_CONFIG_SNAPSHOT` | Unset | Read and verify config from a local signed snapshot file instead of fetching `/api/config`; service commands still use `CENTRAL_API_URL`. |
+| `CONFIG_SIGNING_PUBKEY` | Bundled subnet 37 key | Optional 64-character Ed25519 hex public-key override for a different deployment. Omit for subnet 37; an empty or malformed override is rejected. |
+| `MINER_HOTKEY_SS58` | Loaded wallet address | Optional address override for the public `balance` read only. |
+
+## Miner commands
+
+Run `aurelius-miner <command> --help` for its full options. All commands below use the exported
+environment. Set `NETUID=37` or pass `--netuid 37` explicitly to commands that accept it.
+
+| Command | Options | What it does |
+| --- | --- | --- |
+| `serve` | `--netuid 37`, `--port 8091` | Publish the endpoint and serve staged candidates. `--port` is the bind port; the advertised port comes from the environment. |
+| `economics` | `--netuid 37` | Read your balance, signed prices and recent receipts using hotkey proof. |
+| `fund` | **Required:** `--alpha AMOUNT`, `--wallet-name NAME`, `--wallet-path PATH`, `--intent-dir PATH`; optional `--fee-cap-tao 0.01`, `--execute`, `--central URL`, `--endpoint WSS_URL` | Preview a WT purchase with a separately held coldkey. `--execute` submits once when funding terms are available. Reuse the same intent directory to check confirmation. |
+| `balance` | `--task-type interp_sae`, `--hotkey SS58` | Public affordability check and deposit-address lookup. Pass the lane task type; its default is `synthetic`. |
+| `validate` | No additional options | Check all staged candidates against their published schemas; does not score or submit them. |
+| `ready` | **Required:** `--task-type interp_sae`, `--fanout-window WINDOW_ID` | Use `fanout_window` from SAE preview, not a block height. Check local eligibility; does not establish funding or discovery. |
+| `pool list` | `--pool PATH` | List staged items, IDs and enabled states. |
+| `pool enable ITEM_ID` / `pool disable ITEM_ID` | `--pool PATH` | Toggle selection eligibility while preserving history. |
+| `status` | `--journal PATH` | Print the local attempt journal. |
+| `observe` | `--netuid 37`, `--central URL`, `--journal PATH`, `--limit 20`, `--validator HOTKEY=URL` | Refresh accounting observations; optionally query the evaluator's supplied progress endpoint. |
+| `dashboard` | `--port 8093`, `--journal PATH`, `--pool PATH`, `--experiments DIR` | Serve the local, read-only journal dashboard on loopback. |
+
+`--journal` selects a SQLite file; `--pool` selects a staging JSONL file. Omit them to use your
+configured paths. The dashboard reads recorded observations; run `observe` to refresh them.
+
+```sh
+aurelius-miner economics --netuid 37
+aurelius-miner pool list
+aurelius-miner dashboard --port 8093
+```
+
+### Fund evaluations
+
+The cluster uses OnFinality for RPC. You can supply your own TLS OnFinality URL,
+including its API-key path/query, through `SUBSTRATE_URL` and `fund --endpoint`.
+Keep credentials private; operator credentials are never distributed to miners.
+
+
+The `fund` command supports the reviewed runtimes475 and477. The temporary launch
+purchases **1WT per alpha**, with exact fractional carry, and charges **10WT per SAE
+evaluation**. Charges use sufficient real WT first, then sufficient synthetic WT when enabled;
+the server never combines the balances. Full retention premium activation and the complete recovery drill are
+deferred. Authenticated funding terms report available after the original notice
+matured at finalized block9271373. The command refuses to sign while funding
+terms are unavailable. Run it
+on your wallet machine with alpha staked on subnet 37 under your registered serving hotkey.
+The funding wallet's coldkey must own that hotkey. The reviewed native transfer fee
+handler uses TAO when possible and otherwise free subnet alpha. The fee cap is a
+maximum estimated fee in TAO units, not a requirement to hold that amount in TAO.
+The command checks unlocked alpha and registration collateral, and requires a transfer worth
+at least the chain's 0.0001 TAO minimum at the current price.
+Use your hotkey wallet view for `AURELIUS_BT_WALLET_PATH` and pass the separate full wallet
+root with `--wallet-path`:
+
+```sh
+aurelius-miner fund --alpha 10 --wallet-name miner \
+  --wallet-path "$HOME/.bittensor/wallets" --intent-dir "$PWD/funding/purchase-001"
+# Review the amount, treasury and fee before adding --execute to the same command.
+```
+
+Alpha is transferred to the published treasury. Credit is confirmed by a signed WT receipt;
+chain inclusion alone does not confirm credit. Keep the intent directory. If the response is
+lost or status is pending, rerun the same command with that directory to inspect the original
+transfer. Use a new directory only for a deliberate new purchase. Purchase rates, retention
+and evaluation rewards are explained in the [lane guide](lanes/lane1.md).
+
+The SAE commands `aurelius-sae check`, `preview`, `prepare` and `status`, plus
+`aurelius-sae-upload` and `aurelius-sae-stage`, are documented with their submission options in
+[Lane 1](lanes/lane1.md).
+
+The public verification key is pinned in [the miner release](subnet/src/subnet/miner/trust.py).
+Configuration signatures remain mandatory; a downloaded config cannot replace the trusted key.
+
+## If startup or submission fails
+
+| Symptom | Next check |
+| --- | --- |
+| Python/dependency installation fails | Use Python 3.11/3.12 and the frozen lockfile; confirm the `bt` extra was installed. |
+| Wallet guard rejects startup | Check the root/name/hotkey layout, `0700` directories, `0600` files and absence of a private coldkey. |
+| Chain/runtime pin mismatch | Compare the read-only chain snapshot in [Lane 1](lanes/lane1.md#read-the-finalized-chain-head). Confirm the endpoint and approved pins before retrying. |
+| Cannot reach `/health` | Check the bind port, advertised IPv4/port, firewall/NAT and startup logs. HTTP 503 means readiness failed; check publication/config evidence. |
+| Config signature/key error | For subnet 37, omit `CONFIG_SIGNING_PUBKEY`; check config connectivity. Do not replace the key with one received from the server. |
+| `invalid signed cadence` | The signed cadence or offset is invalid or unaligned with the commit window; refresh authenticated config. |
+| Economics unavailable, or affordability is false/unknown | Funding is insufficient or unconfirmed. See funding status in the lane guide; do not send funds to an unavailable address. |
+| Healthy miner, no submissions | Check `pool list`, bundle validation, the previewed window and `ready --fanout-window WINDOW_ID`. Uploading alone does not submit. |
+
+Code and documentation are governed by [LICENSE](LICENSE).

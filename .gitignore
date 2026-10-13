@@ -1,66 +1,16 @@
-# Python
+.venv/
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
+.pytest_cache/
+.ruff_cache/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Virtual environments
-venv/
-env/
-ENV/
-.venv
-
-# Environment variables
+build/
+dist/
 .env
 .env.*
 !.env.example
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Bittensor wallets (NEVER commit these!)
 wallets/
-.bittensor/
-
-# Testnet lab (wallets, data, configs are generated)
-testlab/
-
-# Logs
-*.log
-logs/
-
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# Ruff
-.ruff_cache/
-
-# Mypy
-.mypy_cache/
+miner-wallets/
+state/
+bundles/
+*.sqlite3*

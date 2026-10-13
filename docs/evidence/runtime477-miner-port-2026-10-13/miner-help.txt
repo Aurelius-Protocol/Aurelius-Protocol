@@ -1,0 +1,25 @@
+usage: aurelius-miner [-h]
+                      {validate,balance,economics,ready,observe,pool,status,dashboard,deposit,fund,serve}
+                      ...
+
+positional arguments:
+  {validate,balance,economics,ready,observe,pool,status,dashboard,deposit,fund,serve}
+    validate            validate staged items against the published
+                        config_schema
+    balance             report affordability + the deposit address
+    economics           read own balance, signed prices and recent receipts
+    ready               check local candidate eligibility, not
+                        funding/discovery
+    observe             refresh charge/refund and validator-progress
+                        observations for recent attempts
+    pool                list or enable/disable staged items, preserving
+                        history
+    status              read the local attempt journal
+    dashboard           read-only localhost observation dashboard
+    deposit             resolve the deposit address (unlocks the coldkey)
+    fund                preview or submit one native-alpha WT purchase on
+                        subnet 37
+    serve               serve /v1/query (mint a fresh work_id per request)
+
+options:
+  -h, --help            show this help message and exit

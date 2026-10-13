@@ -1,0 +1,3 @@
+GH200 frozen public install, Ruff, import contracts, all348public tests and61installed wheel module imports pass. The reviewed native475/477fee handler prefers TAO and supports transfer_stake alpha fallback. The miner retains the exact estimated-fee cap and signature/intent guards but does not require the entire cap in free TAO. The user refusal happened before signing; a read-only public-key plan estimated383880rao, against1399264free rao. No transaction was signed by this check.
+
+Pinned primary source: https://github.com/RaoFoundation/subtensor/blob/5c6e83e2f4936f257234f246957f75684c35227c/pallets/transaction-fee/src/lib.rs (can_withdraw_fee/withdraw_fee, transfer_stake).

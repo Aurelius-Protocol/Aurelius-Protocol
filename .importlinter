@@ -1,0 +1,21 @@
+[importlinter]
+root_package = subnet
+
+[importlinter:contract:shared-independent]
+name = Shared protocol stays independent of miner, lanes and publication helpers
+type = forbidden
+source_modules =
+    subnet.shared
+forbidden_modules =
+    subnet.miner
+    subnet.lanes
+    subnet.operator
+
+[importlinter:contract:platform-not-lane]
+name = Miner platform and publication helpers do not import task lanes
+type = forbidden
+source_modules =
+    subnet.miner
+    subnet.operator
+forbidden_modules =
+    subnet.lanes
