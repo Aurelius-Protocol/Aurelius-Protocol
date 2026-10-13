@@ -252,8 +252,8 @@ on the fresh draw. An incumbent that does not make a paid commitment for the new
 The current `throne_only` phase gives a positive lane score only to the eligible rank-1 champion;
 lower ranks have no reward share. A candidate can be evaluated successfully and still earn zero.
 Payout then follows [the incentive mechanism](../INCENTIVES.md#from-scientific-winner-to-reward-weight),
-including freshness, ownership, charge evidence, burn and the signed lane-health cap. The prepared current-alpha successor also conditions the scientific share as described in
-[the current-alpha formula](../INCENTIVES.md#current-alpha-payout-multiplier); signed activation is separate.
+including freshness, ownership, charge evidence, burn and the signed lane-health cap. Signed snapshot28 conditions the scientific share using current owned alpha as described in
+[the current-alpha formula](../INCENTIVES.md#current-alpha-payout-multiplier).
 
 ## How to train a compatible SAE
 
@@ -430,7 +430,7 @@ Checked on **2026-10-13**:
 | --- | --- |
 | Compatible signed schedule | Fixed in this branch: adjacent `C = W = 100` windows are supported. Overlapping or unaligned schedules remain refused. |
 | Public evaluation funding | The approved temporary launch uses10WT per SAE evaluation and1WT per alpha with exact carry. Charges use real WT first, then enabled sufficient synthetic WT, without combining balances. Premium and the full recovery drill are deferred; the original notice matured at9271373 and hotkey-authenticated funding terms report available. See [INCENTIVES.md](../INCENTIVES.md#retention-based-work-token-purchase-design). |
-| Current-alpha payouts | Retention tracking and sell-off penalties are suspended. A separately governed replacement is prepared: finalized owned SN37 alpha uses S/(S+P/19), P10000, with coldkey/owned-hotkey shares and no age or debt penalty. Historical snapshot27 does not activate this replacement. Paid scientific eligibility remains mandatory; missing current stake evidence withholds the lane. See [incentives](../INCENTIVES.md#current-alpha-payout-multiplier). |
+| Current-alpha payouts | Retention tracking and sell-off penalties are suspended. Signed snapshot28 enables finalized owned SN37 alpha uses S/(S+P/19), P10000, with coldkey/owned-hotkey shares and no age or debt penalty. Historical snapshot27 and its retention grant remain inactive. Paid scientific eligibility remains mandatory; missing current stake evidence withholds the lane. See [incentives](../INCENTIVES.md#current-alpha-payout-multiplier). |
 | Registered-miner admission | Registered-hotkey admission is deployed with finalized ownership and paid-result verification. No extra signup or trusted-key setup is required. |
 | Economics read | Live: a hotkey-signed `POST /api/miner/economics` returned HTTP 200 and passed the miner client's signed-config and account checks. Unsigned requests return HTTP 401. The funding read reports base conversion available. An existing miner’s signed purchase receipt confirms10alpha credited10realWT with zero carry; the reused candidate has one verified 10 real WT charge, with synthetic WT unchanged. Its trusted GH200 evaluation passed: `first_incumbent`, rank1, CE loss-recovered0.9711829627622187, battery top1=0.7833785714285714 and absorption0.008329502490552953. The public replay is evaluator-attested and the paid attempt is finalized. |
 | Deposit-address lookup | Live: `GET /api/deposit_address` returns HTTP 200 with the subnet 37 treasury address. Address discovery alone does not enable work-token purchases; real deposits have been unpaused after notice maturity. |

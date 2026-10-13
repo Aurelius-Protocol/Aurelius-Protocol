@@ -17,9 +17,10 @@ attests that result. Real WT is spent first; enabled sufficient synthetic WT is 
 Historical receipt compatibility is repaired, and the generic payout path previously finalized a non-burn weight commit on-chain. The current finalized effective row is burn; no realized miner payout is attributed to that commit. Full history
 catch-up, retention premium activation and the full recovery drill remain outstanding.
 Retention tracking and sell-off penalties are suspended while RPC capacity is upgraded.
-A replacement policy is prepared to use current owned subnet alpha for payouts, with
-reference principal10,000alpha and no age requirement or exit penalty. It requires its
-separate signed activation; historical snapshot27 alone does not activate this replacement.
+Signed snapshot28 enables current owned subnet alpha for payouts, with reference
+principal10,000alpha and no age requirement or exit penalty. The multiplier is
+S/(S+10000/19); paid scientific eligibility remains mandatory. Published policy,
+computed weights and realized emissions are separate checks.
 WT payments remain open. See [incentives](INCENTIVES.md).
 See [current blockers](lanes/lane1.md#current-participation-blockers) before transferring funds.
 

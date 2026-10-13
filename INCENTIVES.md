@@ -18,10 +18,9 @@ The immutable original histories, debt records, prior grant and encrypted backup
 the original anchor remains9261069. Neither current stake nor WT purchases invent past
 retention. Restarting or upgrading RPC does not automatically resume penalties.
 
-The prepared replacement uses **current owned subnet37 alpha**, with reference principal
-**10,000 alpha**, without an age requirement or exit-debt penalty. It needs separate signed
-activation and matching validator authority. Historical signed snapshot27 does not activate
-this replacement. Check [authenticated current config](https://central.aureliusaligned.ai/api/config),
+Signed snapshot28 enables **current owned subnet37 alpha**, with reference principal
+**10,000 alpha**, without an age requirement or exit-debt penalty. The matching validator authority is schema6; historical snapshot27 and its
+retention grant remain inactive. Check [authenticated current config](https://central.aureliusaligned.ai/api/config),
 charge receipts, published chain weights and realized emissions separately.
 
 The scientific lane remains `throne_only`: only an eligible scored champion has a positive
