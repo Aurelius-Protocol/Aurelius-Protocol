@@ -8,10 +8,15 @@ Other interpretability tools, such as probes, steering vectors and logit readout
 own lanes as their evaluation rules are approved and enabled. This release includes the miner,
 SAE submission tools and the shared protocol they need.
 
-**Launch status (2026-10-13):** installation and CPU bundle checks are available, but this release
-does not yet provide a complete path for a new miner to compete. Pricing changes require 7,200 finalized blocks of notice. Public economics and deposit-address reads are live. Base-rate funding is open after the required notice;
-registered-miner admission is deployed without a wallet or UID allowlist. A signed existing-miner receipt confirms 10 alpha credited 10 real WT, and its reused candidate incurred one 10 real WT charge. Scoring is pending the finalized seed at block 9271808. See [current blockers](lanes/lane1.md#current-participation-blockers)
-before training or transferring funds.
+**Launch status (2026-10-13):** base funding and scored SAE submission are verified.
+The required 7,200-block notice matured. Registered-miner admission uses the normal protocol
+without a wallet or UID allowlist or extra signup. An existing miner deposited 10 alpha,
+received 10 real WT and paid exactly one 10 real WT charge. Its reused SAE passed the trusted
+GH200 evaluator (`first_incumbent`, rank 1, CE loss-recovered 0.971183), and the public replay
+attests that result. Real WT is spent first; enabled sufficient synthetic WT is the fallback.
+On-chain payout activation remains blocked by historical receipt validation. Full history
+catch-up, retention premium activation and the full recovery drill remain outstanding.
+See [current blockers](lanes/lane1.md#current-participation-blockers) before transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in
 the **[lanes folder](lanes/README.md)**. Start with [Lane 1: SAEs](lanes/lane1.md).
