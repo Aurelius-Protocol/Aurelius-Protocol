@@ -435,7 +435,7 @@ Checked on **2026-10-13**:
 | Deposit-address lookup | Live: `GET /api/deposit_address` returns HTTP 200 with the subnet 37 treasury address. Address discovery alone does not enable work-token purchases; real deposits have been unpaused after notice maturity. |
 
 The config and public verdict routes return JSON, and artifact ingress has a live backend.
-Those checks do not establish a successful funded submission from a new wallet. The operator accepts this existing-miner proof with generic registered admission; a new registration was not performed. This completes the accepted funded/scored submission proof; protocol score/weight is0 while payout activation remains blocked by historical receipt validation. Full history catch-up, premium activation and the full recovery drill remain outstanding. Confirm
+Those checks do not establish a successful funded submission from a new wallet. The operator accepts this existing-miner proof with generic registered admission; a new registration was not performed. This completes the accepted funded/scored submission proof; the protocol result score/weight is0, with payout shares derived from the evaluator-attested ladder. Historical receipt compatibility is repaired; the generic payout path finalized a non-burn weight commit at9272280/extrinsic7. Automatic reveal and effective payout observation remain pending. Full history catch-up, premium activation and the full recovery drill remain outstanding. Confirm
 a signed WT purchase receipt before preparing a paid submission.
 
 ### Read the finalized chain head

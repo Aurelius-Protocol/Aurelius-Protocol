@@ -14,7 +14,7 @@ without a wallet or UID allowlist or extra signup. An existing miner deposited 1
 received 10 real WT and paid exactly one 10 real WT charge. Its reused SAE passed the trusted
 GH200 evaluator (`first_incumbent`, rank 1, CE loss-recovered 0.971183), and the public replay
 attests that result. Real WT is spent first; enabled sufficient synthetic WT is the fallback.
-On-chain payout activation remains blocked by historical receipt validation. Full history
+Historical receipt compatibility is repaired, and the generic payout path has finalized a non-burn weight commit on-chain. Automatic reveal and effective payout observation are pending. Full history
 catch-up, retention premium activation and the full recovery drill remain outstanding.
 See [current blockers](lanes/lane1.md#current-participation-blockers) before transferring funds.
 
