@@ -10,7 +10,7 @@ SAE submission tools and the shared protocol they need.
 
 **Launch status (2026-10-13):** installation and CPU bundle checks are available, but this release
 does not yet provide a complete path for a new miner to compete. Pricing changes require 7,200 finalized blocks of notice. Public economics and deposit-address reads are live. Base-rate funding is open after the required notice;
-registered-miner admission is deployed. A fresh wallet-to-scored-SAE proof remains incomplete. See [current blockers](lanes/lane1.md#current-participation-blockers)
+registered-miner admission is deployed without a wallet or UID allowlist. A signed existing-miner receipt confirms 10 alpha credited 10 real WT, and its reused candidate incurred one 10 real WT charge. Scoring is pending the finalized seed at block 9271808. See [current blockers](lanes/lane1.md#current-participation-blockers)
 before training or transferring funds.
 
 Competition guides, scoring rules, training instructions and the incentive mechanism live in
