@@ -1,1 +1,0 @@
-GH200 Kubernetes frozen public installation:336tests pass, Ruff/import contracts pass, wheel build passes and a separate wheel-only environment imports61modules. Supports exact475/477 funding wire and explicit signed base-policy receipts. No local workstation application/build/test was run. This is public-package regression, not a real transfer or fresh-miner paid SAE proof.
