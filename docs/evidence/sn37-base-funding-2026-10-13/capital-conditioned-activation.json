@@ -1,5 +1,5 @@
 {
-  "observed_at": 1791880562,
+  "observed_at": 1791881026,
   "read_only": true,
   "live_existing_evaluator_session": true,
   "writer_lease_stolen": false,
@@ -22,18 +22,18 @@
       "history_gap_untracked": 6
     },
     "capital_refusal": null,
-    "current_block": 9273152,
+    "current_block": 9273169,
     "discovered": 6,
     "mode": "burn",
     "participants": 1,
     "private_rows_or_keys_exported": false,
-    "seq": 6406,
+    "seq": 6407,
     "snapshot_version": 26,
     "source_blocks": [
       9263317
     ],
     "state_digest": "40816c8a551b870113ee4a4cf590a68f98c9eee1efc29d839590b88ab66ca98f",
-    "valuation_block": 9273150,
+    "valuation_block": 9273160,
     "weight_refusal": null
   },
   "rollout": {
@@ -72,21 +72,43 @@
   "recovery_drill_completed": false,
   "realized_conditioned_miner_payout_observed": false,
   "finalized_effective_row": {
-    "block": 9273164,
-    "block_hash": "0x2a300acfc4fdbc5ce19a70bde14407b89ab8bc9ba6fb6bc9163d070f78ad8d72",
+    "block": 9273195,
+    "block_hash": "0xb71d794a3d4a1c474b3bd87b522ea44a28dfa40fdadffcfbdb40889de287d051",
     "row_verified": true,
     "burn_established": true,
     "finalized_row": {
       "200": 65535
     },
-    "intent_cycle": 502,
-    "intent_block": 9273057,
-    "last_update": 9273062,
+    "intent_cycle": 503,
+    "intent_block": 9273170,
+    "last_update": 9273175,
     "pending_owned_commitments": 1,
     "payout_observed": false,
     "read_only": true
   },
-  "new_capital_cycle_chain_submission_observed": false,
-  "live_cycle_set_on_chain": false,
-  "chain_observation_note": "Live capital cycle6406 admitted the intended burn vector; finalized burn row is from the preceding normal chain publication. No fresh capital-cycle commit or realized miner emission is claimed."
+  "new_capital_cycle_chain_submission_observed": true,
+  "live_cycle_set_on_chain": true,
+  "chain_observation_note": "Normal scheduled capital cycle6407 admitted zero factors and published burn commitment503, finalized9273175/extrinsic13. Effective row remains verified burn. Commit inclusion is separate from automatic reveal and realized miner emissions; none are claimed.",
+  "fresh_finalized_commit": {
+    "observed_at": 1791881026,
+    "cycle": 503,
+    "status": "finalized_exact_prepared_weight",
+    "operation": "set_weights",
+    "observation": {
+      "block_number": 9273175,
+      "block_hash": "0xcfbb010c53bcd800368ca1bdde0a71f286bf6dda50ce404db7073e782bcc6240",
+      "extrinsic_hash": "0xb69389b92abef3ae7211957af980a193bf1f8c1e9302002d363a1ee4bcb04000",
+      "extrinsic_index": 13,
+      "call_data_sha256": "60ea1df5fb4fdb3086129b9b90fe314e982286dd1a04cf076b73292a4cd6fc40"
+    },
+    "read_only": true,
+    "private_rows_or_keys_exported": false
+  },
+  "fresh_finalized_publication_revalidation": {
+    "cycle": 503,
+    "last_finalized_cycle_revalidates": true,
+    "observed_at": 1791881006,
+    "read_only": true,
+    "wallet_loaded": false
+  }
 }
