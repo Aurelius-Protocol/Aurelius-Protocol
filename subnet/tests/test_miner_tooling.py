@@ -24,6 +24,8 @@ def test_serve_reports_configuration_errors_without_a_traceback(monkeypatch, tmp
     monkeypatch.delenv("AURELIUS_ENV", raising=False)
     monkeypatch.delenv("AURELIUS_TRANSPORT", raising=False)
     monkeypatch.setenv("AURELIUS_MINER_JOURNAL", str(tmp_path / "attempts.sqlite3"))
+    monkeypatch.setenv("AURELIUS_MINER_DATA", str(tmp_path))
+    monkeypatch.setenv("AURELIUS_ACCEPT_INCENTIVES", "yes")
     assert cli.main(["serve"]) == 2
     err = capsys.readouterr().err
     assert "[aurelius-miner] cannot serve:" in err

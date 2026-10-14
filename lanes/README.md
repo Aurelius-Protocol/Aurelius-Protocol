@@ -7,6 +7,6 @@ readouts or other tools need their own published evaluation contract before they
 | Guide | Contents |
 | --- | --- |
 | [Lane 1: sparse autoencoders](lane1.md) | Current model and slot, artifact requirements, training, scoring math, incumbent competition and submission commands |
-| [Incentive mechanism](../INCENTIVES.md) | Work-token funding and charges, reward allocation, burn, capital conditioning and retention pricing |
+| [Incentive mechanism](../INCENTIVES.md) | Open-beta rules, reward allocation, stake-based payout, burn and work-tokens |
 
 For installation, wallet preparation and serving, see the [miner README](../README.md).
