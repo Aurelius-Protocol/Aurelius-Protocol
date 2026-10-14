@@ -11,6 +11,9 @@ The original v1 commands are: `deposit`, `balance`, `validate`, `serve` (plan §
 - `observe`: lane-agnostic refresh of charge/refund + validator-progress facts into the local
   journal (the dashboard's data source; absence of evidence stays unknown).
 
+`serve` and `fund` first require agreement to the current incentive terms (`subnet.miner.terms`):
+an interactive Y/N, `AURELIUS_ACCEPT_INCENTIVES=yes`, or `--accept-incentives`.
+
 The miner never authenticates a session and never calls the charge path (invariant 1); the
 `charge-path-single-import-site` contract now enumerates `subnet.miner.*` as a forbidden source.
 """
@@ -104,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
         "--execute", action="store_true", help="sign and submit; default is check-only"
     )
     fund.add_argument(
+        "--accept-incentives", action="store_true", help="agree to INCENTIVES.md non-interactively"
+    )
+    fund.add_argument(
         "--endpoint",
         default=os.environ.get(
             "SUBSTRATE_URL", "wss://bittensor-finney.api.onfinality.io/public-ws"
@@ -116,6 +122,9 @@ def main(argv: list[str] | None = None) -> int:
     serve = sub.add_parser("serve", help="serve /v1/query (mint a fresh work_id per request)")
     serve.add_argument("--netuid", type=int, default=int(os.environ.get("NETUID", "2")))
     serve.add_argument("--port", type=int, default=8091)
+    serve.add_argument(
+        "--accept-incentives", action="store_true", help="agree to INCENTIVES.md non-interactively"
+    )
 
     args = parser.parse_args(argv)
 
@@ -123,8 +132,10 @@ def main(argv: list[str] | None = None) -> int:
         import json
         from subnet.miner.funding import FundingRefused, run
         from subnet.miner.read_client import ReadUnavailable
+        from subnet.miner.terms import TermsNotAccepted, ensure_incentives_accepted
 
         try:
+            ensure_incentives_accepted(accept_flag=args.accept_incentives)
             result = run(
                 base_url=args.central,
                 endpoint=args.endpoint,
@@ -136,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                 execute=args.execute,
                 directory=args.intent_dir,
             )
-        except (FundingRefused, ReadUnavailable) as exc:
+        except (FundingRefused, ReadUnavailable, TermsNotAccepted) as exc:
             print(json.dumps({"status": "refused", "executed": False, "reason": str(exc)}))
             return 2
         print(json.dumps(result, indent=2))
@@ -181,8 +192,10 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault("AURELIUS_MINER_JOURNAL", str(data_dir() / "attempts.sqlite3"))
         hotkey_name = os.environ.get("MINER_HOTKEY", "miner-hotkey")
         from subnet.miner.serve import validate_miner_startup_posture
+        from subnet.miner.terms import ensure_incentives_accepted
 
         try:
+            ensure_incentives_accepted(accept_flag=args.accept_incentives)
             validate_miner_startup_posture()
             if _serve_mode() == "btauth":
                 # Bittensor v11: publish the endpoint on-chain, run application-owned btauth HTTP,
