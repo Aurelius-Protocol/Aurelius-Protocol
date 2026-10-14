@@ -51,20 +51,41 @@ The multiplier `p` grows with the subnet 37 alpha you currently hold, with dimin
 | 10,000 | 95% | 28.5% |
 | 100,000 | about 99.5% | about 29.8% |
 
-- Stake is read from finalized chain state at each valuation, every 10 blocks. Only the
-  current balance matters: how long you have held it, and where it came from, do not.
+- Stake is read from finalized chain state at each valuation, every 10 blocks. **For now**, only
+  the current balance matters; how long you have held it does not. This will change soon (see
+  [below](#coming-soon-how-long-you-hold-matters)).
 - **Only your own alpha counts:** alpha your coldkey owns on its registered hotkey. Stake
   delegated to you by others, TAO, and WT balances do not count.
 - **Your position is your coldkey.** Stake is grouped by coldkey and shared across that
   coldkey's eligible registered hotkeys in proportion to their stake, so running more hotkeys
   does not multiply it.
-- Selling or moving stake simply lowers your current balance; there is no exit penalty.
-  Buying work-tokens transfers alpha away, so it lowers your stake too.
+- Selling or moving stake currently just lowers your balance, with no exit penalty. Buying
+  work-tokens transfers alpha away, so it lowers your stake too.
 - If your stake cannot be read or verified for a valuation, that lane's share is withheld to
   burn for that valuation.
 
 Stake is an economic reward condition. It is not a registration minimum and does not lock
 your stake.
+
+## Coming soon: how long you hold matters
+
+The intended mechanism rewards miners who hold stake over time, not just at valuation time. It
+is built but **currently disabled**, and will be turned on soon. When it is enabled:
+
+- **Held stake gains weight.** Each alpha you stake earns more credit as you keep it. Credit
+  peaks after about 30 days, then settles gradually to a lower long-term level.
+- **Emissions count briefly.** Alpha earned through emissions counts at a lower rate that
+  fades over a few months.
+- **Transferred-in stake does not count.** Alpha moved to you from another coldkey earns no
+  credit.
+- **Selling has a cost.** Unstaking, moving alpha to another subnet or transferring it away
+  incurs an exit penalty. Any penalty your remaining stake can't cover becomes debt, and your
+  multiplier is zero until new stake repays it.
+- **Long-held alpha buys more WT.** Work-token purchases with long-held alpha will earn a
+  bonus, up to 20× after about a year.
+
+Details, including the exact parameters and how existing stake is treated when it turns on,
+will be published before activation.
 
 ## Work-tokens
 
