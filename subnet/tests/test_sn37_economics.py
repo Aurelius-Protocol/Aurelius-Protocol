@@ -7,8 +7,9 @@ from subnet.shared.sn37_economics import GENESIS_HASH, TARIFF_VERSION, selected_
 pytestmark = pytest.mark.shared
 
 
-@pytest.mark.parametrize("runtime", ["475", "477"])
-def test_reviewed_runtime_selects_the_same_retention_tariff(runtime):
+@pytest.mark.parametrize("runtime", ["475", "477", "479"])
+@pytest.mark.parametrize("unreviewed", ["478", "480"])
+def test_reviewed_runtime_selects_the_same_retention_tariff(runtime, unreviewed):
     scope = {
         "AURELIUS_ENV": "mainnet",
         "NETUID": "37",
@@ -18,7 +19,7 @@ def test_reviewed_runtime_selects_the_same_retention_tariff(runtime):
         "AURELIUS_RETENTION_PURCHASE_TARIFF": TARIFF_VERSION,
     }
     assert selected_tariff(scope) == TARIFF_VERSION
-    scope["AURELIUS_RUNTIME_SPEC_PIN"] = "478"
+    scope["AURELIUS_RUNTIME_SPEC_PIN"] = unreviewed
     with pytest.raises(ValueError, match="exact mainnet retention scope"):
         selected_tariff(scope)
     scope["AURELIUS_RUNTIME_SPEC_PIN"] = runtime

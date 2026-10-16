@@ -85,6 +85,11 @@ idle response; a healthy miner alone earns nothing.
 
 ## 4. Fund evaluations
 
+**Runtime 479 funding is currently unavailable pending server-side verification support.**
+The runtime-479 update supports serving and endpoint publication; `fund` continues to refuse
+unreviewed funding runtimes before unlocking or sending. A successful chain transfer alone
+does not establish WT credit.
+
 Evaluations are paid in work-tokens (WT), bought with subnet 37 alpha. Run `fund` on your
 **wallet machine**; the coldkey must own your registered hotkey.
 
@@ -145,7 +150,7 @@ as shown above.
 `AURELIUS_CLOCK`, `AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET`, `AURELIUS_AXON_ENDPOINT_PROFILE` and
 `AURELIUS_MINER_HTTP_PORT`.
 
-`AURELIUS_RUNTIME_SPEC_PIN` (`478`) and `AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN` (`1`) must
+`AURELIUS_RUNTIME_SPEC_PIN` (`479`) and `AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN` (`1`) must
 match the chain.
 After a chain upgrade, update this repository and its pins together; the miner refuses a mismatch.
 

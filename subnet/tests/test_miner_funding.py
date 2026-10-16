@@ -537,3 +537,21 @@ def test_alpha_fee_fallback_keeps_exact_fee_cap_before_unlock(tmp_path, monkeypa
         funding.fund(client, wallet, execute=True, **args)
     assert calls == ["plan"]
     assert args["journal"].read("prepared") is None
+
+
+def test_runtime479_funding_refuses_before_preparation_unlock_or_broadcast(tmp_path, monkeypatch):
+    real_scope = funding.chain_scope
+    client, wallet, calls, args = flow(tmp_path, monkeypatch, 477)
+    monkeypatch.setattr(funding, "chain_scope", real_scope)
+    args["rpc"] = SimpleNamespace(
+        snapshot=lambda: SimpleNamespace(
+            genesis_hash=funding.GENESIS_HASH,
+            runtime_spec_version=479,
+            transaction_version=1,
+            chain="Bittensor",
+        )
+    )
+    with pytest.raises(FundingRefused, match="unreviewed funding chain/runtime"):
+        funding.fund(client, wallet, execute=True, **args)
+    assert calls == []
+    assert args["journal"].read("submission") is None
