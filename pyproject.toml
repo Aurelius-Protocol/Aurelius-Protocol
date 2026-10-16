@@ -11,7 +11,7 @@ package = false
 members = ["subnet"]
 
 [dependency-groups]
-dev = ["subnet[bt]", "pytest==9.1.1", "ruff>=0.6,<1", "import-linter>=2.1,<3"]
+dev = ["subnet[bt]", "pytest==9.1.1", "scalecodec==1.2.12", "ruff>=0.6,<1", "import-linter>=2.1,<3"]
 
 [tool.uv.sources]
 subnet = { workspace = true }

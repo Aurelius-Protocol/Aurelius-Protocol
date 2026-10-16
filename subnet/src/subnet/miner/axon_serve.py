@@ -899,8 +899,9 @@ _SERVE_AXON_CALL_INDEX = "0x0704"
 # separate attributed metadata/byte proofs (ADR-0286); future eras still refuse.
 # Runtime467/468 are separately attributed and wire-tested in ADR-0290/0314.
 # Runtime473 is attributed and wire-tested in ADR-0339; runtime475 in ADR-0359.
+# Runtime479 has retained metadata and independent/native ServeAxon byte tests.
 _REVIEWED_SERVE_AXON_RUNTIME_SPECS = frozenset(
-    {432, 450, 452, 453, 458, 466, 467, 468, 473, 475, 477}
+    {432, 450, 452, 453, 458, 466, 467, 468, 473, 475, 477, 479}
 )
 
 

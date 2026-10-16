@@ -21,7 +21,7 @@ def selected_tariff(environment: Mapping[str, str]) -> str | None:
         selected == TARIFF_VERSION
         and environment.get("AURELIUS_ENV") == "mainnet"
         and environment.get("NETUID") == "37"
-        and environment.get("AURELIUS_RUNTIME_SPEC_PIN") in {"475", "477"}
+        and environment.get("AURELIUS_RUNTIME_SPEC_PIN") in {"475", "477", "479"}
         and environment.get("AURELIUS_FINALITY_EXPECTED_GENESIS_HASH") == GENESIS_HASH
         and environment.get("AURELIUS_RETENTION_PURCHASE_TARIFF") == TARIFF_VERSION
         and all(

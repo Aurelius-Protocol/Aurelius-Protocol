@@ -1,0 +1,237 @@
+{
+  "height": 9291893,
+  "block_hash": "0xdacc1983efedd6bc946266bbed222273d79bd4eb60e0da452f49ae7d1c6e7f21",
+  "genesis": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+  "runtime": {
+    "specName": "node-subtensor",
+    "implName": "node-subtensor",
+    "authoringVersion": 1,
+    "specVersion": 479,
+    "implVersion": 1,
+    "apis": [
+      [
+        "0xdf6acb689907609b",
+        5
+      ],
+      [
+        "0x37e397fc7c91f5e4",
+        2
+      ],
+      [
+        "0x40fe3ad401f8959a",
+        6
+      ],
+      [
+        "0xfbc577b9d747efd6",
+        1
+      ],
+      [
+        "0xd2bc9897eed08f15",
+        3
+      ],
+      [
+        "0xf78b278be53f454c",
+        2
+      ],
+      [
+        "0xdd718d5cc53262d4",
+        1
+      ],
+      [
+        "0xab3c0572291feb8b",
+        1
+      ],
+      [
+        "0xed99c5acb25eedf5",
+        3
+      ],
+      [
+        "0xbc9d89904f5b923f",
+        1
+      ],
+      [
+        "0x37c8bb1350a9a2a8",
+        4
+      ],
+      [
+        "0xf3ff14d5ab527059",
+        3
+      ],
+      [
+        "0x582211f65bb14b89",
+        6
+      ],
+      [
+        "0xe65b00e46cedd0aa",
+        2
+      ],
+      [
+        "0x68b66ba122c93fa7",
+        2
+      ],
+      [
+        "0x42e62be4a39e5b60",
+        1
+      ],
+      [
+        "0x806df4ccaa9ed485",
+        1
+      ],
+      [
+        "0x8375104b299b74c5",
+        2
+      ],
+      [
+        "0x5d1fbfbe852f2807",
+        1
+      ],
+      [
+        "0xc6886e2f8e598b0a",
+        1
+      ],
+      [
+        "0x43580abff6baab45",
+        5
+      ],
+      [
+        "0xc0de4984d112f3b4",
+        1
+      ],
+      [
+        "0xcbca25e39f142387",
+        2
+      ],
+      [
+        "0xa8b093e6508d9e9c",
+        1
+      ],
+      [
+        "0x1c4585bd5c707202",
+        1
+      ]
+    ],
+    "transactionVersion": 1,
+    "systemVersion": 1,
+    "stateVersion": 1
+  },
+  "parent_runtime": {
+    "specName": "node-subtensor",
+    "implName": "node-subtensor",
+    "authoringVersion": 1,
+    "specVersion": 479,
+    "implVersion": 1,
+    "apis": [
+      [
+        "0xdf6acb689907609b",
+        5
+      ],
+      [
+        "0x37e397fc7c91f5e4",
+        2
+      ],
+      [
+        "0x40fe3ad401f8959a",
+        6
+      ],
+      [
+        "0xfbc577b9d747efd6",
+        1
+      ],
+      [
+        "0xd2bc9897eed08f15",
+        3
+      ],
+      [
+        "0xf78b278be53f454c",
+        2
+      ],
+      [
+        "0xdd718d5cc53262d4",
+        1
+      ],
+      [
+        "0xab3c0572291feb8b",
+        1
+      ],
+      [
+        "0xed99c5acb25eedf5",
+        3
+      ],
+      [
+        "0xbc9d89904f5b923f",
+        1
+      ],
+      [
+        "0x37c8bb1350a9a2a8",
+        4
+      ],
+      [
+        "0xf3ff14d5ab527059",
+        3
+      ],
+      [
+        "0x582211f65bb14b89",
+        6
+      ],
+      [
+        "0xe65b00e46cedd0aa",
+        2
+      ],
+      [
+        "0x68b66ba122c93fa7",
+        2
+      ],
+      [
+        "0x42e62be4a39e5b60",
+        1
+      ],
+      [
+        "0x806df4ccaa9ed485",
+        1
+      ],
+      [
+        "0x8375104b299b74c5",
+        2
+      ],
+      [
+        "0x5d1fbfbe852f2807",
+        1
+      ],
+      [
+        "0xc6886e2f8e598b0a",
+        1
+      ],
+      [
+        "0x43580abff6baab45",
+        5
+      ],
+      [
+        "0xc0de4984d112f3b4",
+        1
+      ],
+      [
+        "0xcbca25e39f142387",
+        2
+      ],
+      [
+        "0xa8b093e6508d9e9c",
+        1
+      ],
+      [
+        "0x1c4585bd5c707202",
+        1
+      ]
+    ],
+    "transactionVersion": 1,
+    "systemVersion": 1,
+    "stateVersion": 1
+  },
+  "metadata_bytes": 359018,
+  "metadata_sha256": "075ee9614fee27fb83a44bda737f6803bd3f6642d57ab492321aa47dad359080",
+  "code_sha256": "d0ea4955e6b4366d8561038307d5e47572c1ad67664638402c8253cde26a84be",
+  "source_attribution": "configured-finalized-chain-and-two-independent-public-rpc-digest-match",
+  "corroborating_endpoints": [
+    "wss://entrypoint-finney.opentensor.ai:443",
+    "wss://archive.chain.opentensor.ai:443"
+  ]
+}
