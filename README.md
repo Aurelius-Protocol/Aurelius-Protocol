@@ -85,10 +85,9 @@ idle response; a healthy miner alone earns nothing.
 
 ## 4. Fund evaluations
 
-**Runtime 479 funding is currently unavailable pending server-side verification support.**
-The runtime-479 update supports serving and endpoint publication; `fund` continues to refuse
-unreviewed funding runtimes before unlocking or sending. A successful chain transfer alone
-does not establish WT credit.
+`fund` supports the reviewed mainnet runtime 479 and checks its exact code and metadata
+against the server's funding terms before unlocking or sending. Unknown runtimes refuse.
+A successful chain transfer alone does not establish WT credit; wait for the signed receipt.
 
 Evaluations are paid in work-tokens (WT), bought with subnet 37 alpha. Run `fund` on your
 **wallet machine**; the coldkey must own your registered hotkey.
