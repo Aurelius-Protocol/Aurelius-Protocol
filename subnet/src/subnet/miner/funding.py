@@ -16,6 +16,7 @@ import struct
 
 from subnet.bittensor_v11 import FinalizedRpc, load_wallet, open_subtensor, require_bittensor_v11
 from subnet.miner.funding_client import CHAIN_ID, TREASURY, read_funding, verified_deposit
+from subnet.miner.funding_runtime import RUNTIME_PROFILES
 from subnet.miner.trust import config_signing_pubkey
 from subnet.operator.prepared_extrinsic import (
     decoded_scan_candidate,
@@ -27,15 +28,6 @@ from subnet.shared.signing import verify
 from subnet.shared.sn37_economics import GENESIS_HASH
 from subnet.shared.ss58 import ss58_decode
 
-METADATA_SHA256 = "e181ddacd13d1050e82a2afea8e58ba5d3fc84504fa92d2884c91df8c9dd8020"
-CODE_HASH = "0x557634c8c31bc639ea6552e297dcfb781cd7d9bdd491a5352c151305db33d3a0"
-RUNTIME_PROFILES = {
-    475: (METADATA_SHA256, CODE_HASH),
-    477: (
-        "1d9a056217f440400df497ad70d4a6a6148abc19871d1b28e52464c507c11260",
-        "0x18b52484d9c5d7523f704c86b17b2ab959fffbc6edb6766a77e9877f0ad19387",
-    ),
-}
 MAX_U64 = 2**64 - 1
 
 
@@ -62,7 +54,7 @@ def amount_rao(value):
 
 def transfer_call(hotkey, amount):
     require(type(amount) is int and 0 < amount < MAX_U64, "invalid alpha amount or move-all")
-    # Reviewed475/477 metadata: SubtensorModule(7).transfer_stake(86), AccountId32 x2,
+    # Reviewed475/477/479 metadata: SubtensorModule(7).transfer_stake(86), AccountId32 x2,
     # NetUid u16 x2 and AlphaBalance u64. No wrapper, proxy, encrypted call or move-all.
     return (
         bytes.fromhex("0756")
@@ -421,6 +413,10 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
         )
         snapshot = chain_scope(rpc)
         require(
+            snapshot.runtime_spec_version == response["terms"]["runtime_spec_version"],
+            "funding terms runtime differs from finalized chain",
+        )
+        require(
             0 <= snapshot.block_number - response["finalized_block"] <= 64,
             "funding terms are ahead of chain or stale",
         )
@@ -567,8 +563,9 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
         journal.claim("signature", {"signature_hex": signature.hex()})
         latest = chain_scope(rpc)
         require(
-            latest.block_number <= authority.scan_end_block,
-            "mortal transfer expired before broadcast",
+            latest.runtime_spec_version == authority.spec_version
+            and latest.block_number <= authority.scan_end_block,
+            "mortal transfer runtime changed or expired before broadcast",
         )
         require(
             journal.claim(

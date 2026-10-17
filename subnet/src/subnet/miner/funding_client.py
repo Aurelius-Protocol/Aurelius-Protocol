@@ -8,6 +8,7 @@ import time
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from subnet.miner.read_client import ReadUnavailable, request_json
+from subnet.miner.funding_runtime import RUNTIME_PROFILES
 from subnet.miner.trust import SN37_RECEIPT_SIGNING_PUBKEY
 from subnet.shared.canonicalization import canonical_bytes
 from subnet.shared.config_snapshot import SnapshotInvalid, verify_snapshot
@@ -88,6 +89,9 @@ def read_funding(base_url, *, hotkey, signer, config_pubkey, fetch=request_json,
             ):
                 raise ValueError("unavailable")
         else:
+            runtime = terms.get("runtime_spec_version")
+            if type(runtime) is not int or runtime not in RUNTIME_PROFILES:
+                raise ValueError("unreviewed funding runtime")
             if terms.get("retention") not in {"quadratic_fresh_lots_v3", "base_rate_v1"}:
                 raise ValueError("unknown purchase policy")
             active = resolve(entries["price_policy"], result["finalized_block"], shipped_catalog())
@@ -113,7 +117,7 @@ def read_funding(base_url, *, hotkey, signer, config_pubkey, fetch=request_json,
                         "retention": terms["retention"],
                         "fractional_carry": "beneficiary",
                         "refundable": False,
-                        "runtime_spec_version": 475,
+                        "runtime_spec_version": runtime,
                         "transaction_version": 1,
                     }
                 )

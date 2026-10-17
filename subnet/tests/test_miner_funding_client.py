@@ -103,8 +103,10 @@ def prepared_response():
     return snapshot, response, args
 
 
-def test_signed_effective_policy_binds_real_purchase_terms():
+@pytest.mark.parametrize("version", [475, 477, 479])
+def test_signed_effective_policy_binds_real_purchase_terms(version):
     _, response, args = prepared_response()
+    response["terms"]["runtime_spec_version"] = version
     assert read_funding("https://example.test", **args) == response
 
 
@@ -128,6 +130,11 @@ def test_forged_config_refuses_funding_before_requesting_terms():
         ("genesis_hash", "0x" + "00" * 32),
         ("price_policy_digest", "b" * 64),
         ("runtime_spec_version", 476),
+        ("runtime_spec_version", 478),
+        ("runtime_spec_version", 480),
+        ("runtime_spec_version", 479.0),
+        ("runtime_spec_version", "479"),
+        ("runtime_spec_version", True),
         ("refundable", 0),
         ("transaction_version", True),
     ],
@@ -195,8 +202,10 @@ def test_signed_own_receipt_confirms_exact_deposit_and_forgery_never_confirms():
         verified_deposit(response, "exact-key", receipt_pubkey=public)
 
 
-def test_explicit_base_terms_keep_signed_price_and_fixed_destination():
+@pytest.mark.parametrize("version", [475, 477, 479])
+def test_explicit_base_terms_keep_signed_price_and_fixed_destination(version):
     _, response, args = prepared_response()
+    response["terms"]["runtime_spec_version"] = version
     response["terms"]["retention"] = "base_rate_v1"
     assert read_funding("https://example.test", **args) == response
     response["terms"]["evaluation_work_tokens"] = 11
