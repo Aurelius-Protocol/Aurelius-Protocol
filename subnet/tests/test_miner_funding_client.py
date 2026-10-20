@@ -103,7 +103,7 @@ def prepared_response():
     return snapshot, response, args
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 def test_signed_effective_policy_binds_real_purchase_terms(version):
     _, response, args = prepared_response()
     response["terms"]["runtime_spec_version"] = version
@@ -133,6 +133,9 @@ def test_forged_config_refuses_funding_before_requesting_terms():
         ("runtime_spec_version", 478),
         ("runtime_spec_version", 480),
         ("runtime_spec_version", 479.0),
+        ("runtime_spec_version", 481.0),
+        ("runtime_spec_version", 482),
+        ("runtime_spec_version", "481"),
         ("runtime_spec_version", "479"),
         ("runtime_spec_version", True),
         ("refundable", 0),
@@ -202,7 +205,7 @@ def test_signed_own_receipt_confirms_exact_deposit_and_forgery_never_confirms():
         verified_deposit(response, "exact-key", receipt_pubkey=public)
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 def test_explicit_base_terms_keep_signed_price_and_fixed_destination(version):
     _, response, args = prepared_response()
     response["terms"]["runtime_spec_version"] = version

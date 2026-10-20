@@ -54,7 +54,7 @@ def amount_rao(value):
 
 def transfer_call(hotkey, amount):
     require(type(amount) is int and 0 < amount < MAX_U64, "invalid alpha amount or move-all")
-    # Reviewed475/477/479 metadata: SubtensorModule(7).transfer_stake(86), AccountId32 x2,
+    # Reviewed475/477/479/481 metadata: SubtensorModule(7).transfer_stake(86), AccountId32 x2,
     # NetUid u16 x2 and AlphaBalance u64. No wrapper, proxy, encrypted call or move-all.
     return (
         bytes.fromhex("0756")
