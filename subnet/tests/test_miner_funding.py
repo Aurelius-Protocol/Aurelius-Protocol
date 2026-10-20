@@ -50,7 +50,7 @@ def test_transfer_is_one_exact_native_mainnet_call():
     assert amount_rao(str(Decimal("10.125"))) == 10_125_000_000
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 @pytest.mark.parametrize(
     "fault", [None, "parent", "number", "runtime", "code", "metadata", "upgrade", "canonical"]
 )
@@ -352,7 +352,7 @@ def test_native_transfer_minimum_refuses_before_wallet_unlock(tmp_path, monkeypa
     assert args["journal"].read("prepared") is None
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 def test_preview_never_unlocks_signs_or_prepares(tmp_path, monkeypatch, version):
     client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
     result = funding.fund(client, wallet, execute=False, **args)
@@ -362,7 +362,7 @@ def test_preview_never_unlocks_signs_or_prepares(tmp_path, monkeypatch, version)
     assert list((tmp_path / "intent").iterdir()) == []
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 def test_dropped_submission_reuses_intent_for_observation_without_resigning(
     tmp_path, monkeypatch, version
 ):
@@ -450,7 +450,7 @@ def test_blocked_credit_or_encumbered_stake_never_signs(tmp_path, monkeypatch, f
     assert "broadcast" not in calls
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 def test_reviewed_funding_runtime_preserves_one_shot_ambiguous_submission(
     tmp_path, monkeypatch, version
 ):
@@ -461,7 +461,7 @@ def test_reviewed_funding_runtime_preserves_one_shot_ambiguous_submission(
     assert args["journal"].read("prepared")["unsigned"]["spec_version"] == version
 
 
-@pytest.mark.parametrize("version,successor", [(475, 477), (477, 479), (479, 480)])
+@pytest.mark.parametrize("version,successor", [(475, 477), (477, 479), (479, 481), (481, 482)])
 def test_upgrade_during_preparation_refuses_before_unlock_or_sign(
     tmp_path, monkeypatch, version, successor
 ):
@@ -478,7 +478,7 @@ def test_upgrade_during_preparation_refuses_before_unlock_or_sign(
     assert "unlock" not in calls and "broadcast" not in calls
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 @pytest.mark.parametrize(
     "fault", [None, "metadata", "code", "unknown", "float", "transaction", "genesis"]
 )
@@ -519,7 +519,7 @@ def test_funding_scope_requires_exact_reviewed_identity(monkeypatch, version, fa
             funding.chain_scope(rpc)
 
 
-@pytest.mark.parametrize("version", [475, 477, 479])
+@pytest.mark.parametrize("version", [475, 477, 479, 481])
 @pytest.mark.parametrize("free_rao", [0, 4, 5, 1_399_264])
 def test_fee_cap_does_not_require_free_tao_reserve(tmp_path, monkeypatch, version, free_rao):
     client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
@@ -595,16 +595,17 @@ def test_upgrade_after_signing_never_claims_or_broadcasts_submission(tmp_path, m
 
 
 @pytest.mark.parametrize("fault", [None, "code", "metadata"])
-def test_runtime479_flow_checks_pinned_bytes_before_unlock(tmp_path, monkeypatch, fault):
+@pytest.mark.parametrize("version", [479, 481])
+def test_reviewed_flow_checks_pinned_bytes_before_unlock(tmp_path, monkeypatch, fault, version):
     real_scope = funding.chain_scope
-    client, wallet, calls, args = flow(tmp_path, monkeypatch, 479)
+    client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
     monkeypatch.setattr(funding, "chain_scope", real_scope)
     from pathlib import Path
 
-    raw = (Path(__file__).parent / "fixtures/runtime479/metadata.scale").read_bytes()
+    raw = (Path(__file__).parent / f"fixtures/runtime{version}/metadata.scale").read_bytes()
     snapshot = SimpleNamespace(
         genesis_hash=funding.GENESIS_HASH,
-        runtime_spec_version=479,
+        runtime_spec_version=version,
         transaction_version=1,
         chain="Bittensor",
         head_hash="0x" + "cd" * 32,
@@ -616,7 +617,7 @@ def test_runtime479_flow_checks_pinned_bytes_before_unlock(tmp_path, monkeypatch
             return snapshot.head_hash
         assert params[-1] == snapshot.head_hash
         if method == "state_getStorageHash":
-            return "0x" + "00" * 32 if fault == "code" else funding.RUNTIME_PROFILES[479][1]
+            return "0x" + "00" * 32 if fault == "code" else funding.RUNTIME_PROFILES[version][1]
         assert method == "state_getMetadata"
         return "0x" + (raw + (b"x" if fault == "metadata" else b"")).hex()
 
