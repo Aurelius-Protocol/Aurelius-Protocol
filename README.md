@@ -122,6 +122,69 @@ aurelius-sae status --refresh --accounting --netuid 37
 This shows your verdict and its explanation, measured scores, your ladder rank, and whether a
 charge or refund was recorded.
 
+## Optional automatic winner renewal
+
+The standard miner does not renew just because it is online or has WT. You can opt in to
+`aurelius-sae renew` below. Keep `aurelius-miner serve` running separately.
+
+**Holding the incumbent title is free:** empty epochs retain it until a challenger wins under
+the comparison rules. Reference comparisons do not charge the incumbent. **Earning rewards
+requires eligibility:** the current paid result stays fresh for 3,600 blocks (about 12 hours
+at 12 seconds/block). There is a conditional, bounded 48-hour payout grace; it is not a new
+paid result or a promise of uninterrupted rewards. Another accepted evaluation currently costs
+10 WT, even if it loses. Automatic renewal does not change these rules.
+
+After your first winning evaluation, use the JSON output saved from `aurelius-sae prepare`
+(the same artifact, original slot/epoch and your hotkey). Save the original prepare
+command's output with `> prepared.json` when staging that submission:
+
+```sh
+# Keep this persistent state on disk; the directory must already exist.
+mkdir -p "$AURELIUS_MINER_DATA/renewal"
+aurelius-sae renew init \
+  --state "$AURELIUS_MINER_DATA/renewal/state.json" \
+  --candidate prepared.json --bundle "$BUNDLE" --hotkey "$HOTKEY_SS58" \
+  --max-wt 100 --max-price-wt 10 --lead-blocks 1200
+
+# Run alongside serve; supervise/restart this process as you do the miner.
+aurelius-sae renew run --state "$AURELIUS_MINER_DATA/renewal/state.json"
+```
+
+`--max-wt 100` authorizes **at most 100 WT of additional renewal submissions** for this plan;
+the original submission is excluded. At 10 WT each, that is at most ten renewal attempts.
+It is a lifetime cap, not a daily allowance. Each attempt reserves the maximum signed announced
+price (including a queued change) **before staging**. `--max-price-wt 10` refuses higher prices.
+Refunds, failed attempts, unknown outcomes and restarts do not replenish the reserved budget.
+Status reports reserved authorization, which can exceed actual charges when admission fails.
+The cap covers this plan only: manual submissions and other plans are separate. Use one plan
+per hotkey/pool; keep its state, journal, and bundle across restarts. Do not delete state to
+restart a stopped/exhausted plan: that would create a new spending authorization.
+
+Every 300 seconds by default, renewal checks finalized chain state, signed configuration/prices,
+funding, the exact winning result and recent incumbent evidence. It stages the same bundle for a
+new window through the ordinary submission path. It never buys WT, signs with a coldkey, charges
+locally, crowns a winner or changes weights. The serving miner and normal validator perform the
+usual signed submission and server-side charge.
+
+The default lead is 1,200 blocks (about four hours). The public helper uses the original
+commitment start as a **conservative lower bound** for result freshness, so it may renew earlier
+than the actual payout deadline. It is not a precise 12-hour billing timer. Evaluation latency,
+missed polls and unavailable evidence can still create gaps; grace is not used to reset a timer.
+A missing/non-winning seed never starts paid work. Once staged, it waits for that result before
+another reservation. A failed/non-winning renewal or evaluation timeout stops the plan for review;
+missing chain/config/price/title evidence holds staging. A different observed incumbent stops it.
+
+```sh
+aurelius-sae renew status --state "$AURELIUS_MINER_DATA/renewal/state.json"
+aurelius-sae renew stop --state "$AURELIUS_MINER_DATA/renewal/state.json"
+# Alternative to a long-running process: run this every five minutes using your scheduler.
+aurelius-sae renew run --once --state "$AURELIUS_MINER_DATA/renewal/state.json"
+```
+
+`stop` disables its currently staged candidate and preserves every reservation. It cannot cancel
+a work authorization already served or a charge already accepted. Interrupted/unknown attempts
+remain reserved for manual review. Protect the state directory like your miner journal.
+
 ## Environment variables
 
 Start from [.env.example](.env.example). The miner does **not** load `.env` by itself; export it

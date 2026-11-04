@@ -20,6 +20,15 @@ For the current competition, see [Lane 1: SAEs](lanes/lane1.md).
 > The miner asks you to agree to these terms before `serve` or `fund`, and asks again when the
 > terms are re-versioned.
 
+## Winner renewal
+
+Retaining the incumbent title costs no recurring WT: the title stays until a challenger wins.
+Paid result freshness and payout eligibility are separate. Normal freshness is currently 3,600
+blocks (about 12 hours), with a conditional, bounded 48-hour payout grace. Renewing normal
+eligibility requires another accepted evaluation, currently 10 WT; a scientific loss still
+spends WT. There is no automatic subscription charge. You can explicitly enable the
+[automatic renewal helper with a persistent lifetime WT cap](README.md#optional-automatic-winner-renewal).
+
 ## How rewards are decided
 
 1. **Science.** Only eligible, fresh results with the required signed charge and artifact
