@@ -247,7 +247,8 @@ dominates: `max(0.0025, 0.003) = 0.003`.
 If the throne is vacant, eligible candidates are considered by descending CE, with deterministic
 commit-order tie handling. A first incumbent must meet the coronation floor and pass its battery
 floor; there is no free crown for being the only submission. A present incumbent keeps competing
-on the fresh draw. An incumbent that does not make a paid commitment for the new epoch vacates.
+on the fresh draw as a free reference. Empty epochs retain the verified incumbent until a
+challenger wins. Title retention does not renew paid payout eligibility.
 
 The current `throne_only` phase gives a positive lane score only to the eligible rank-1 champion;
 lower ranks have no reward share. A candidate can be evaluated successfully and still earn zero.
@@ -528,8 +529,9 @@ Look for your exact artifact/epoch, verdict reason, ladder rank and charge/refun
 `first_incumbent` or `decisive_ce` can establish a crown; `ce_not_better`,
 `ce_gap_below_epsilon` or `tiebreak_incumbent_holds` can be completed evaluations with no crown.
 Pending, unavailable or an infrastructure error is not a pass. Keep the attempt journal and
-artifact files across restarts. Each later epoch needs its own eligible paid commitment; a
-past crown is not a perpetual reward entitlement. Current result freshness is 3,600 blocks,
-but freshness does not substitute for the lane's epoch-presence requirement.
+artifact files across restarts. A past crown retains the title but is not a perpetual reward entitlement. Current result
+freshness is 3,600 blocks; a conditional, bounded 48-hour payout grace does not create a new
+paid result. Renewing normal eligibility requires another paid evaluation, currently 10 WT.
+See [automatic renewal and its WT cap](../README.md#optional-automatic-winner-renewal).
 
 Return to [lane guides](README.md), [incentives](../INCENTIVES.md) or [miner setup](../README.md).

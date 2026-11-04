@@ -16,6 +16,13 @@ from .stage import build_candidate, selectable_slot_policy
 
 
 def main(argv=None):
+    import sys
+
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "renew":
+        from .renewal import main as renew
+
+        return renew(argv[1:])
     parser = argparse.ArgumentParser(prog="aurelius-sae")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("check", "preview", "prepare"):
@@ -35,6 +42,7 @@ def main(argv=None):
             command.add_argument("--stage", action="store_true")
             command.add_argument("--pool")
             command.add_argument("--journal")
+    sub.add_parser("renew", help="opt-in automatic renewal with a persistent WT cap")
     status = sub.add_parser("status")
     status.add_argument("--journal")
     status.add_argument("--refresh", action="store_true")
