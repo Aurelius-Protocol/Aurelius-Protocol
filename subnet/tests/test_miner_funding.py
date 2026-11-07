@@ -50,7 +50,7 @@ def test_transfer_is_one_exact_native_mainnet_call():
     assert amount_rao(str(Decimal("10.125"))) == 10_125_000_000
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 488])
 @pytest.mark.parametrize(
     "fault", [None, "parent", "number", "runtime", "code", "metadata", "upgrade", "canonical"]
 )

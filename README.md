@@ -85,7 +85,7 @@ idle response; a healthy miner alone earns nothing.
 
 ## 4. Fund evaluations
 
-`fund` supports reviewed mainnet runtime 481 and retained 475/477/479 profiles. It checks
+`fund` supports reviewed mainnet runtime 488 and retained 475/477/479/481 profiles. It checks
 the exact code and metadata against the server's funding terms before unlocking or sending.
 Unknown runtimes refuse.
 A successful chain transfer alone does not establish WT credit; wait for the signed receipt.

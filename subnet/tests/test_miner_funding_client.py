@@ -103,7 +103,7 @@ def prepared_response():
     return snapshot, response, args
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 488])
 def test_signed_effective_policy_binds_real_purchase_terms(version):
     _, response, args = prepared_response()
     response["terms"]["runtime_spec_version"] = version
