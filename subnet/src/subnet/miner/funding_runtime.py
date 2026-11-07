@@ -1,7 +1,7 @@
 """Reviewed SN37 funding identities shared by terms validation and chain execution.
 
 Code pins are the node's :code storage hashes (BLAKE2b-256), not raw WASM SHA256.
-Runtime481 matches the attributed metadata fixture and the deployed deposit verifier.
+Runtime488 matches the independently attributed metadata fixture and reviewed funding codec.
 Unknown runtimes need their own review before they can authorize a purchase.
 """
 
@@ -21,5 +21,9 @@ RUNTIME_PROFILES = {
     481: (
         "4dc0d25bc11d1ea15118b433ba34e78f40ae2bfbaa188757e6f67f0a3240266a",
         "0x5fb504c1c793a3ddb5456f189ddef98b5146853aea6ff998501f1b6c6eb720bc",
+    ),
+    488: (
+        "66804d7b7f326f3285f900a1533df30c17ffa1d2855a5c3f3559ae05471446b7",
+        "0x3147daab804046184359d8a929cb333d75f490323b9e1327887a172c64eafa94",
     ),
 }
