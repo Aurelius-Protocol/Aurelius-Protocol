@@ -11,7 +11,7 @@ from scalecodec.type_registry import load_type_registry_preset
 
 from subnet.miner.funding import FundingRefused, RUNTIME_PROFILES, chain_scope, transfer_call
 from subnet.miner.funding_client import TREASURY
-from subnet.operator.prepared_extrinsic import BITTENSOR_V11_SIGNED_EXTENSIONS
+from subnet.miner.prepared_extrinsic import BITTENSOR_V11_SIGNED_EXTENSIONS
 from subnet.shared.sn37_economics import GENESIS_HASH
 from subnet.shared.ss58 import ss58_encode
 

@@ -7,7 +7,6 @@ import os
 import subprocess
 import sys
 import threading
-from contextlib import contextmanager
 from io import BytesIO
 from types import SimpleNamespace
 
@@ -59,7 +58,7 @@ from subnet.axon_protocol import (
 )
 from subnet.shared.signing import keypair_from_seed, sign
 from subnet.shared.ss58 import ss58_encode
-from subnet.operator.prepared_extrinsic import (
+from subnet.miner.prepared_extrinsic import (
     BITTENSOR_V11_SIGNED_EXTENSIONS,
     PreparedExtrinsicError,
     scan_resolution_evidence,
@@ -440,7 +439,7 @@ def test_already_exact_axon_needs_no_mutation_acknowledgement(tmp_path):
 
 
 def test_publish_evidence_rejects_same_size_in_place_mutation_while_reading(tmp_path, monkeypatch):
-    from subnet.operator import evidence_reader
+    from subnet.miner import evidence_reader
 
     path = tmp_path / "finalized.json"
     original = b'{"generation":"aaaaaaaa"}\n'
@@ -1407,155 +1406,93 @@ def _install_external_recovery_harness(monkeypatch, root, *, include_match=True)
     )
     subtensor = Subtensor()
 
-    def publish(*, custody=None, claim=None):
+    def publish():
         return subject._guarded_external_publish(
             bt,
             wallet,
             455,
             subtensor,
-            root if custody is None else custody,
+            root,
             external_ip="172.30.55.10",
             external_port=8090,
-            runtime452_action_claim=claim,
         )
 
     return subject, publish, state
 
 
-def _runtime452_journal_double(subject, monkeypatch, root):
-    """Unit storage double only; Linux tests separately prove the root recorder protocol."""
+def _lose_acknowledgement_after_record(subject, monkeypatch, name):
+    """The process dies after one durable record is written and before its caller hears of it:
+    the record is on disk, the acknowledgement never arrives."""
 
-    claim = SimpleNamespace(
-        actor="miner-0",
-        action=subject.RUNTIME452_SERVE_AXON_ACTION,
-        claim_index=1,
-        claim_sha256="a" * 64,
-        generation_marker_sha256="b" * 64,
-        burn_handoff_sha256="c" * 64,
-        netuid=455,
-        endpoint_ip="172.30.55.10",
-        endpoint_port=8090,
-        chain_endpoint="wss://test.example:443",
-        chain_name="Bittensor",
-        genesis_hash=_EXTERNAL_GENESIS,
-        runtime_spec_version=432,
-        transaction_version=1,
-        signer_hotkey_ss58=_EXTERNAL_MINER_SS58,
-        signer_coldkey_ss58="5Coldkey",
-    )
-    monkeypatch.setenv("AURELIUS_ENV", subject.RUNTIME452_PROFILE_ID)
-    monkeypatch.setattr(
-        subject,
-        "RUNTIME452_ACTION_SIGNERS",
-        {"miner-0": {"hotkey_ss58": _EXTERNAL_MINER_SS58, "coldkey_ss58": "5Coldkey"}},
-    )
-    custody = object.__new__(subject.Runtime452ActionJournalCustody)
-    custody.path = root
-    custody.claim = claim
-    control = {"active": False, "fault": None}
+    real_claim = subject._claim_json
+    armed = True
 
-    @contextmanager
-    def locked():
-        assert control["active"] is False
-        control["active"] = True
-        try:
-            yield
-        finally:
-            control["active"] = False
+    def claim_json(path, value):
+        nonlocal armed
+        real_claim(path, value)
+        if armed and path.name == name:
+            armed = False
+            raise AxonPublishError(f"planted acknowledgement loss after {name}")
 
-    def exists(name):
-        assert control["active"]
-        return (root / name).exists()
-
-    def read_json(name):
-        assert control["active"]
-        return subject._strict_json_object(root / name)
-
-    def claim_bytes(name, payload):
-        assert control["active"]
-        if (root / name).exists():
-            assert (root / name).read_bytes() == payload
-            return "already_exact"
-        subject._claim_json(root / name, json.loads(payload))
-        fault = control["fault"]
-        if (
-            (fault == "after_scan" and name == "scan-resolution-1.json")
-            or (fault == "after_final" and name == "finalized.json")
-            or (fault == "lost_submission_ack" and name == "submission-claim-1.json")
-        ):
-            control["fault"] = None
-            raise subject.Runtime452ActionJournalError("planted durable-record ACK loss")
-        if fault == "already_submission_ack" and name == "submission-claim-1.json":
-            control["fault"] = None
-            return "already_exact"
-        return "claimed_exact"
-
-    custody.locked = locked
-    custody.revalidate = lambda: None
-    custody.exists = exists
-    custody.read_json = read_json
-    custody.claim_bytes = claim_bytes
-    return custody, claim, control
+    monkeypatch.setattr(subject, "_claim_json", claim_json)
 
 
-@pytest.mark.parametrize("matched", [False, True])
-def test_runtime452_axon_scan_crash_preserves_baseline_after_chain_advances(
-    monkeypatch, tmp_path, matched
-):
+def test_axon_scan_crash_preserves_baseline_after_chain_advances(monkeypatch, tmp_path):
     subject, publish, state = _install_external_recovery_harness(
-        monkeypatch, tmp_path, include_match=matched
+        monkeypatch, tmp_path, include_match=True
     )
-    custody, claim, control = _runtime452_journal_double(subject, monkeypatch, tmp_path)
     with pytest.raises(AxonPublishError, match="submission is ambiguous"):
-        publish(custody=custody, claim=claim)
-    assert control["active"] is False
+        publish()
     state["height"] = 164
-    control["fault"] = "after_scan"
-    with pytest.raises(AxonPublishError, match="cannot be claimed"):
-        publish(custody=custody, claim=claim)
+    _lose_acknowledgement_after_record(subject, monkeypatch, "scan-resolution-1.json")
+    with pytest.raises(AxonPublishError, match="acknowledgement loss after scan-resolution-1.json"):
+        publish()
     path = tmp_path / "scan-resolution-1.json"
     retained = path.read_bytes()
     assert not (tmp_path / "finalized.json").exists()
     state["height"] = 165
-    if matched:
-        result = publish(custody=custody, claim=claim)
-        assert result["status"] == "recovered_from_prepared_era"
-    else:
-        with pytest.raises(AxonPublishError, match="no second signed extrinsic"):
-            publish(custody=custody, claim=claim)
+    result = publish()
+    assert result["status"] == "recovered_from_prepared_era"
     assert path.read_bytes() == retained
     assert json.loads(retained)["finalized_block_number"] == 164
     assert state["plans"] == state["prepares"] == state["signs"] == state["submits"] == 1
     assert not (tmp_path / "authority-2.json").exists()
 
 
-@pytest.mark.parametrize("fault", ["lost_submission_ack", "already_submission_ack"])
-def test_runtime452_axon_retained_claim_ack_is_scan_only(monkeypatch, tmp_path, fault):
+def test_lost_submission_acknowledgement_never_resubmits_the_claimed_attempt(monkeypatch, tmp_path):
     subject, publish, state = _install_external_recovery_harness(monkeypatch, tmp_path)
-    custody, claim, control = _runtime452_journal_double(subject, monkeypatch, tmp_path)
-    control["fault"] = fault
-    with pytest.raises(AxonPublishError):
-        publish(custody=custody, claim=claim)
-    assert (tmp_path / "submission-claim-1.json").exists()
+    _lose_acknowledgement_after_record(subject, monkeypatch, "submission-claim-1.json")
+    with pytest.raises(
+        AxonPublishError, match="acknowledgement loss after submission-claim-1.json"
+    ):
+        publish()
+    claim_path = tmp_path / "submission-claim-1.json"
+    retained = claim_path.read_bytes()
     assert state["submits"] == 0
     state["height"] = 164
-    with pytest.raises(AxonPublishError, match="no second signed extrinsic"):
-        publish(custody=custody, claim=claim)
+    # Attempt one keeps its claim and is only scanned: it is never signed or submitted again.
+    # A second attempt is prepared, then refused before anything more is signed: its era is not
+    # fresh beyond the first attempt's.
+    with pytest.raises(PreparedExtrinsicError, match="not fresh beyond the original mortal era"):
+        publish()
+    assert claim_path.read_bytes() == retained
+    assert state["signs"] == 1
     assert state["submits"] == 0
-    assert state["plans"] == state["prepares"] == state["signs"] == 1
+    assert (tmp_path / "authority-2.json").exists()
+    assert not (tmp_path / "signature-2.json").exists()
+    assert not (tmp_path / "submission-claim-2.json").exists()
 
 
-def test_runtime452_axon_lost_final_ack_reproves_without_restamping(monkeypatch, tmp_path):
+def test_lost_final_acknowledgement_replays_the_record_without_restamping(monkeypatch, tmp_path):
     subject, publish, state = _install_external_recovery_harness(monkeypatch, tmp_path)
-    custody, claim, control = _runtime452_journal_double(subject, monkeypatch, tmp_path)
     state["submit_lost"] = False
-    control["fault"] = "after_final"
-    with pytest.raises(AxonPublishError, match="cannot be claimed"):
-        publish(custody=custody, claim=claim)
+    _lose_acknowledgement_after_record(subject, monkeypatch, "finalized.json")
+    with pytest.raises(AxonPublishError, match="acknowledgement loss after finalized.json"):
+        publish()
     path = tmp_path / "finalized.json"
     retained = path.read_bytes()
     state["height"] = 165
-    assert publish(custody=custody, claim=claim) == json.loads(retained)
+    assert publish() == json.loads(retained)
     assert path.read_bytes() == retained
     assert state["plans"] == state["prepares"] == state["signs"] == state["submits"] == 1
 
@@ -1567,9 +1504,8 @@ def test_live_exact_endpoint_does_not_bless_forged_axon_terminal_lineage(
     monkeypatch, tmp_path, fault
 ):
     subject, publish, state = _install_external_recovery_harness(monkeypatch, tmp_path)
-    custody, claim, _control = _runtime452_journal_double(subject, monkeypatch, tmp_path)
     state["submit_lost"] = False
-    publish(custody=custody, claim=claim)
+    publish()
     path = tmp_path / "finalized.json"
     retained = json.loads(path.read_bytes())
     if fault == "schema":
@@ -1587,7 +1523,7 @@ def test_live_exact_endpoint_does_not_bless_forged_axon_terminal_lineage(
     path.write_bytes(subject._publish_json_payload(retained))
     state["height"] = 165
     with pytest.raises(AxonPublishError):
-        publish(custody=custody, claim=claim)
+        publish()
     assert state["plans"] == state["prepares"] == state["signs"] == state["submits"] == 1
 
 

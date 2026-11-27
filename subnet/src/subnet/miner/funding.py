@@ -18,7 +18,7 @@ from subnet.bittensor_v11 import FinalizedRpc, load_wallet, open_subtensor, requ
 from subnet.miner.funding_client import CHAIN_ID, TREASURY, read_funding, verified_deposit
 from subnet.miner.funding_runtime import RUNTIME_PROFILES
 from subnet.miner.trust import config_signing_pubkey
-from subnet.operator.prepared_extrinsic import (
+from subnet.miner.prepared_extrinsic import (
     decoded_scan_candidate,
     validate_unsigned_dict,
     validate_era_chain_anchor,

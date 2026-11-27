@@ -11,7 +11,7 @@ from subnet.miner.funding import FundingJournal, FundingRefused, amount_rao, tra
 from subnet.miner.funding_client import TREASURY
 from subnet.shared.ss58 import ss58_encode
 from subnet.shared.signing import keypair_from_seed, sign
-from subnet.operator.prepared_extrinsic import BITTENSOR_V11_SIGNED_EXTENSIONS
+from subnet.miner.prepared_extrinsic import BITTENSOR_V11_SIGNED_EXTENSIONS
 import subnet.miner.funding as funding
 
 pytestmark = pytest.mark.miner
