@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """The clock seam (testlab design §4): every timestamp the subnet mints flows through here.
 
 CONTRACT (capsule header)

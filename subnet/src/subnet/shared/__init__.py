@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """subnet.shared — canonicalization, identities, envelope, and signing (App F / §3).
 
 CONTRACT (capsule header, plan §13)

@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Closed, versioned SAE diagnostic measurements. Advisory; never an outcome authority.
 
 Only fixed measurement identifiers, finite numbers, bounded strings and enums cross the public

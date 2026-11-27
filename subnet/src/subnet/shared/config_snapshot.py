@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 r"""Pure verification of a signed operator config snapshot (§9.2), milestone 1.8.
 
 CONTRACT (capsule header)

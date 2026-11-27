@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Structural guard for least-privilege Bittensor hotkey wallet views.
 
 CONTRACT (capsule header)

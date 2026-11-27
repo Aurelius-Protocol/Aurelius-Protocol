@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Local SAE inspection and schedule preview. No keys, network, execution or economic writes.
 
 Uses the production byte/ABI validators; readiness describes this bundle and policy snapshot,

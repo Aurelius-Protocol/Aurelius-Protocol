@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Domain-separated, short-lived authorization for one miner-owned read. No session or spend."""
 
 import re

@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Offline, content-addressed import for the M6 SAE referee asset set.
 
 This operator command has no network client.  It accepts only a local preseed whose four

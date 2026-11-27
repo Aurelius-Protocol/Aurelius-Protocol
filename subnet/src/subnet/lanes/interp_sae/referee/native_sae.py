@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Closed SAE-Lens 6.46 native-forge ABI and descriptor-only inference loader.
 
 This deliberately admits the reviewed native export profile, not every historical SAE-Lens

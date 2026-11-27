@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """fanout_window derivation (shared library, spec §3.2).
 
 CONTRACT (capsule header)

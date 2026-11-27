@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """SS58 address codec (minimal, substrate-standard).
 
 CONTRACT (capsule header)

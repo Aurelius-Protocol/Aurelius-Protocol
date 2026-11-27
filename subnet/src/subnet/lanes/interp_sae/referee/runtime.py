@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Trusted, offline SAE scoring runtime for the v5 referee (R7/S7/S10).
 
 The module intentionally has no import-time ML dependency.  Miner bundles are inspected as the

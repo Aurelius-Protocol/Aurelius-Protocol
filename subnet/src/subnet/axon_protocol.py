@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """The validator↔miner request constants for Bittensor v11 btauth HTTP.
 
 CONTRACT (capsule header)

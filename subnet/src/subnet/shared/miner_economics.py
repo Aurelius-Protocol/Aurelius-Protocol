@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Short-lived, miner-owned economics read capability. No session or spending authority."""
 
 import re
