@@ -1,0 +1,36 @@
+name: checks
+
+# The miner's own checks: lint, format, import contracts and the test suite, on every pull
+# request and on every push to main. Installs exactly what the README tells a miner to install,
+# plus the development group the tests need.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --all-packages --extra bt --frozen
+      - name: Lint
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync ruff format --check .
+          uv run --no-sync lint-imports
+      - name: Test
+        run: uv run --no-sync python -m pytest subnet/tests -p no:cacheprovider
