@@ -4,7 +4,7 @@ The public `aurelius-miner fund` command admits runtime488/transaction1 using
 the exact reviewed metadata SHA256 and `:code` storage BLAKE2b-256 hash.
 The retained475/477/479/481 funding profiles remain available.
 
-On 2026-11-07, an isolated GH200 arm64 Kubernetes Job verified:
+On 2026-11-07, an isolated arm64 machine verified:
 
 - **506 tests passed** against source and **506 passed** against a separately
   installed wheel. The wheel imported funding from its own `site-packages`.
