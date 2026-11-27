@@ -1,4 +1,4 @@
-"""Miner-side uploader for the SN455 artifact ingress (ADR-0205 §2): ``PUT /v1/artifacts``.
+"""Miner-side uploader for the artifact ingress: ``PUT /v1/artifacts``.
 
 CONTRACT (capsule header)
 - Signs the exact step-3 artifact-upload bytes with the miner HOTKEY

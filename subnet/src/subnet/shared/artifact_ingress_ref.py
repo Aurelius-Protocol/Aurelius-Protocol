@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 r"""aurelius-artifact:// ingress ref grammar (path-free artifact upload ingress).
 
 CONTRACT (capsule header)
@@ -16,9 +15,9 @@ CONTRACT (capsule header)
   matches before a trailing newline; Central's `@ingress_artifact_ref` carries the identical
   `\A...\z` anchors, and the two grammars changed together (shared shape table, both suites).
 
-The ss58 codec is imported lazily (mirroring `sn455_artifact_delivery._hotkey`): cold GPU
-supervisors import lane declarations before their admission gate, and the address codec
-belongs to actual artifact validation, not module initialization.
+The ss58 codec is imported lazily: importers may load this module before any artifact is
+validated, and the address codec belongs to actual artifact validation, not module
+initialization.
 """
 
 from __future__ import annotations

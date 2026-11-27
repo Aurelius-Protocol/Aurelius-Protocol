@@ -26,7 +26,6 @@ from subnet.miner.config_schema import SchemaUnavailable, load_published_entries
 from subnet.miner.staging import ELIGIBLE_FANOUT_WINDOW, StagingPool
 from subnet.shared.artifact_ingress_ref import is_aurelius_artifact_ref, parse_aurelius_artifact_ref
 from subnet.shared.windows import AUTHORITATIVE_WINDOW_BLOCKS
-from subnet.shared.sn455_artifact_delivery import Sn455ArtifactAdmission, require_artifact_admission
 
 TASK_TYPE = "interp_sae"
 SCHEMA_VERSION = 2
@@ -357,32 +356,18 @@ def build_candidate(
     sparsity_target: str,
     policy: Mapping[str, Any],
     window_blocks: int = AUTHORITATIVE_WINDOW_BLOCKS,
-    local_artifact_admission: Sn455ArtifactAdmission | None = None,
-    miner_hotkey: str | None = None,
     ref_hotkey: str | None = None,
 ) -> dict[str, Any]:
     """Build the exact flat v2 candidate from cfg.json, S4 bytes, and one signed slot policy.
 
-    ``ref_hotkey`` (optional, non-local mode only) refuses an ingress ref naming another hotkey.
+    ``ref_hotkey`` (optional) refuses an ingress ref naming another hotkey.
     """
 
-    if local_artifact_admission is None:
-        if miner_hotkey is not None:
-            raise StageError("miner_hotkey requires explicit local artifact admission")
-        # Optional operator identity for the ingress-locator equality check (never a payment
-        # fact): an aurelius-artifact:// artifact_ref must name exactly this hotkey.
-        expected_hotkey = (
-            None if ref_hotkey is None else _bounded_string(ref_hotkey, "ref_hotkey", maximum=128)
-        )
-    else:
-        if artifact_ref is not None:
-            raise StageError("local artifact_ref is derived from bytes, not supplied by the caller")
-        if ref_hotkey is not None:
-            raise StageError("ref_hotkey applies only to the hf:// or aurelius-artifact:// path")
-        try:
-            require_artifact_admission(local_artifact_admission)
-        except ValueError as exc:
-            raise StageError(str(exc)) from exc
+    # Optional operator identity for the ingress-locator equality check (never a payment
+    # fact): an aurelius-artifact:// artifact_ref must name exactly this hotkey.
+    expected_hotkey = (
+        None if ref_hotkey is None else _bounded_string(ref_hotkey, "ref_hotkey", maximum=128)
+    )
     if not isinstance(policy, Mapping):
         raise StageError("slot policy must be an object")
     if policy.get("_slot_id") != slot_id or _SLOT_ID_RE.fullmatch(slot_id) is None:
@@ -505,16 +490,7 @@ def build_candidate(
     inference_architecture = (
         "jumprelu" if architecture in {"batchtopk", "matryoshka_batchtopk"} else architecture
     )
-    if local_artifact_admission is None:
-        selected_ref = _admitted_artifact_ref(artifact_ref, digest=digest, hotkey=expected_hotkey)
-    else:
-        try:
-            selected_ref = local_artifact_admission.ref_for(miner_hotkey, digest)
-            export = local_artifact_admission.require_export(miner_hotkey, digest)
-            if sum(obj.size_bytes for obj in export.objects) != size_bytes:
-                raise ValueError("bundle size differs from the admitted local export")
-        except ValueError as exc:
-            raise StageError(str(exc)) from exc
+    selected_ref = _admitted_artifact_ref(artifact_ref, digest=digest, hotkey=expected_hotkey)
     config: dict[str, Any] = {
         "slot_id": slot_id,
         "slot_epoch": _nonnegative_int(slot_epoch, "slot_epoch"),
