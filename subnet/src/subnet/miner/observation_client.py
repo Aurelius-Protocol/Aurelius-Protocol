@@ -135,6 +135,7 @@ def progress(
                 "fanout_window_mismatch",
                 "foreign_charge_already_committed",
                 "refused_before_charge",
+                "refused_before_commit",
                 "discarded",
             }
             or row["evaluation"] not in {"pending", "dispatched", "not_observed"}
