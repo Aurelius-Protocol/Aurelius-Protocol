@@ -1,8 +1,8 @@
 """Reviewed SN37 funding identities shared by terms validation and chain execution.
 
 Code pins are the node's :code storage hashes (BLAKE2b-256), not raw WASM SHA256.
-Runtime488 matches the independently attributed metadata fixture and reviewed funding codec.
-Unknown runtimes need their own review before they can authorize a purchase.
+Runtime488 and runtime497 match the independently attributed metadata fixtures and reviewed
+funding codecs. Unknown runtimes need their own review before they can authorize a purchase.
 """
 
 RUNTIME_PROFILES = {
@@ -26,4 +26,14 @@ RUNTIME_PROFILES = {
         "66804d7b7f326f3285f900a1533df30c17ffa1d2855a5c3f3559ae05471446b7",
         "0x3147daab804046184359d8a929cb333d75f490323b9e1327887a172c64eafa94",
     ),
+    497: (
+        "d54cab26911b8c2d840b5bc0534945e43d43cf7be23266d5100f9c0c64ecdd4e",
+        "0x1ef826aebed0d77300b7da09d4e3b23ad507317d72c8c01d827537643dbf2c15",
+    ),
 }
+
+# The transaction version is part of a runtime's code, and the coldkey signs it inside every
+# funding transfer. Each reviewed runtime carries the version its capture recorded: 1 through
+# runtime488, and 2 from runtime494 on. A chain, a retained intent or a server that names
+# another version for one of these runtimes is refused.
+RUNTIME_TRANSACTION_VERSIONS = {475: 1, 477: 1, 479: 1, 481: 1, 488: 1, 497: 2}

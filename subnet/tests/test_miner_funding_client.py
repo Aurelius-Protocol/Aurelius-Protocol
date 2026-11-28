@@ -8,6 +8,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from subnet.miner.funding_client import CHAIN_ID, TREASURY, read_funding, verified_deposit
+from subnet.miner.funding_runtime import RUNTIME_TRANSACTION_VERSIONS
 from subnet.miner.read_client import ReadUnavailable
 from subnet.miner.serve import WorkIdMinter
 from subnet.shared.canonicalization import canonical_bytes
@@ -103,11 +104,21 @@ def prepared_response():
     return snapshot, response, args
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481, 488])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 488, 497])
 def test_signed_effective_policy_binds_real_purchase_terms(version):
     _, response, args = prepared_response()
     response["terms"]["runtime_spec_version"] = version
+    response["terms"]["transaction_version"] = RUNTIME_TRANSACTION_VERSIONS[version]
     assert read_funding("https://example.test", **args) == response
+
+
+@pytest.mark.parametrize("version,other", [(475, 2), (481, 2), (488, 2), (497, 1)])
+def test_terms_naming_another_transaction_version_than_the_reviewed_one_refuse(version, other):
+    _, response, args = prepared_response()
+    response["terms"]["runtime_spec_version"] = version
+    response["terms"]["transaction_version"] = other
+    with pytest.raises(ReadUnavailable, match="invalid_funding_terms"):
+        read_funding("https://example.test", **args)
 
 
 def test_forged_config_refuses_funding_before_requesting_terms():
@@ -135,6 +146,8 @@ def test_forged_config_refuses_funding_before_requesting_terms():
         ("runtime_spec_version", 479.0),
         ("runtime_spec_version", 481.0),
         ("runtime_spec_version", 482),
+        ("runtime_spec_version", 496),
+        ("runtime_spec_version", 498),
         ("runtime_spec_version", "481"),
         ("runtime_spec_version", "479"),
         ("runtime_spec_version", True),
@@ -205,10 +218,11 @@ def test_signed_own_receipt_confirms_exact_deposit_and_forgery_never_confirms():
         verified_deposit(response, "exact-key", receipt_pubkey=public)
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 497])
 def test_explicit_base_terms_keep_signed_price_and_fixed_destination(version):
     _, response, args = prepared_response()
     response["terms"]["runtime_spec_version"] = version
+    response["terms"]["transaction_version"] = RUNTIME_TRANSACTION_VERSIONS[version]
     response["terms"]["retention"] = "base_rate_v1"
     assert read_funding("https://example.test", **args) == response
     response["terms"]["evaluation_work_tokens"] = 11

@@ -8,7 +8,10 @@ import time
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from subnet.miner.read_client import ReadUnavailable, request_json
-from subnet.miner.funding_runtime import RUNTIME_PROFILES
+from subnet.miner.funding_runtime import (
+    RUNTIME_PROFILES,
+    RUNTIME_TRANSACTION_VERSIONS,
+)
 from subnet.miner.trust import SN37_RECEIPT_SIGNING_PUBKEY
 from subnet.shared.canonicalization import canonical_bytes
 from subnet.shared.config_snapshot import SnapshotInvalid, verify_snapshot
@@ -118,7 +121,7 @@ def read_funding(base_url, *, hotkey, signer, config_pubkey, fetch=request_json,
                         "fractional_carry": "beneficiary",
                         "refundable": False,
                         "runtime_spec_version": runtime,
-                        "transaction_version": 1,
+                        "transaction_version": RUNTIME_TRANSACTION_VERSIONS[runtime],
                     }
                 )
                 or resolve(

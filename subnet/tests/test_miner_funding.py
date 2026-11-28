@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -9,12 +10,18 @@ import pytest
 
 from subnet.miner.funding import FundingJournal, FundingRefused, amount_rao, transfer_call
 from subnet.miner.funding_client import TREASURY
+from subnet.shared.canonicalization import canonical_bytes
 from subnet.shared.ss58 import ss58_encode
 from subnet.shared.signing import keypair_from_seed, sign
 from subnet.miner.prepared_extrinsic import BITTENSOR_V11_SIGNED_EXTENSIONS
 import subnet.miner.funding as funding
 
 pytestmark = pytest.mark.miner
+
+
+def other_transaction_version(version):
+    """The transaction version a reviewed runtime does not carry: 1 and 2 name each other."""
+    return 1 if funding.RUNTIME_TRANSACTION_VERSIONS[version] == 2 else 2
 
 
 @pytest.mark.parametrize(
@@ -50,9 +57,20 @@ def test_transfer_is_one_exact_native_mainnet_call():
     assert amount_rao(str(Decimal("10.125"))) == 10_125_000_000
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481, 488])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 488, 497])
 @pytest.mark.parametrize(
-    "fault", [None, "parent", "number", "runtime", "code", "metadata", "upgrade", "canonical"]
+    "fault",
+    [
+        None,
+        "parent",
+        "number",
+        "runtime",
+        "transaction",
+        "code",
+        "metadata",
+        "upgrade",
+        "canonical",
+    ],
 )
 def test_finalized_funding_binds_parent_and_post_execution(version, fault):
     parent = "0x" + "11" * 32
@@ -76,11 +94,14 @@ def test_finalized_funding_binds_parent_and_post_execution(version, fault):
                 "number": "0x65" if fault == "number" else "0x64",
             }
         if method == "state_getRuntimeVersion":
+            transaction = funding.RUNTIME_TRANSACTION_VERSIONS[version]
             return {
                 "specVersion": 480
                 if fault == "runtime" or (fault == "upgrade" and digest == block)
                 else version,
-                "transactionVersion": 1,
+                "transactionVersion": (
+                    other_transaction_version(version) if fault == "transaction" else transaction
+                ),
             }
         if method == "state_getStorageHash":
             return parent if fault == "code" else monkeypatch_profile[1]
@@ -197,13 +218,14 @@ def flow(tmp_path, monkeypatch, version=475):
     pair = keypair_from_seed(b"f" * 32)
     coldkey = ss58_encode(pair[0])
     hotkey = ss58_encode(bytes([2]) * 32)
+    transaction_version = funding.RUNTIME_TRANSACTION_VERSIONS[version]
     calls = []
     call = transfer_call(hotkey, 10_000_000_000)
     era_hash = "0x" + "cd" * 32
     included = bytes.fromhex("45021c0000")
     signed = (
         version.to_bytes(4, "little")
-        + (1).to_bytes(4, "little")
+        + transaction_version.to_bytes(4, "little")
         + bytes.fromhex(funding.GENESIS_HASH[2:])
         + bytes.fromhex(era_hash[2:])
         + b"\x00"
@@ -220,7 +242,7 @@ def flow(tmp_path, monkeypatch, version=475):
         "genesis_hash": funding.GENESIS_HASH,
         "era_block_hash": era_hash,
         "spec_version": version,
-        "transaction_version": 1,
+        "transaction_version": transaction_version,
         "metadata_hash": None,
         "payload": "0x" + (call + included + signed).hex(),
         "included_in_extrinsic": "0x" + included.hex(),
@@ -233,7 +255,7 @@ def flow(tmp_path, monkeypatch, version=475):
             "nonce": "0x00000007",
             "specVersion": "0x" + version.to_bytes(4, "big").hex(),
             "tip": "0x" + "00" * 16,
-            "transactionVersion": "0x00000001",
+            "transactionVersion": "0x" + transaction_version.to_bytes(4, "big").hex(),
             "era": "0x4502",
             "version": 4,
             "signedExtensions": list(BITTENSOR_V11_SIGNED_EXTENSIONS),
@@ -352,7 +374,7 @@ def test_native_transfer_minimum_refuses_before_wallet_unlock(tmp_path, monkeypa
     assert args["journal"].read("prepared") is None
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 497])
 def test_preview_never_unlocks_signs_or_prepares(tmp_path, monkeypatch, version):
     client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
     result = funding.fund(client, wallet, execute=False, **args)
@@ -362,7 +384,7 @@ def test_preview_never_unlocks_signs_or_prepares(tmp_path, monkeypatch, version)
     assert list((tmp_path / "intent").iterdir()) == []
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 497])
 def test_dropped_submission_reuses_intent_for_observation_without_resigning(
     tmp_path, monkeypatch, version
 ):
@@ -377,15 +399,45 @@ def test_dropped_submission_reuses_intent_for_observation_without_resigning(
     assert calls == before
 
 
+@pytest.mark.parametrize("version", [475, 488, 497])
 def test_observation_refuses_a_changed_durable_signature_before_reading_chain(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, version
 ):
-    client, wallet, _, args = flow(tmp_path, monkeypatch)
+    # A retained intent is re-validated under the transaction version its runtime was
+    # reviewed at, whichever that is, before any chain read or signature check.
+    client, wallet, _, args = flow(tmp_path, monkeypatch, version)
     with pytest.raises(FundingRefused, match="ambiguous"):
         funding.fund(client, wallet, execute=True, **args)
+    prepared = args["journal"].read("prepared")
+    reviewed = funding.RUNTIME_TRANSACTION_VERSIONS[version]
+    assert prepared["unsigned"]["transaction_version"] == reviewed
     (tmp_path / "intent" / "signature.json").write_text(json.dumps({"signature_hex": "00" * 64}))
     with pytest.raises(FundingRefused, match="retained funding signature differs"):
         funding.observe(client, args["rpc"], args["journal"], args["response"])
+
+
+def test_a_retained_intent_naming_another_transaction_version_never_reaches_its_signature(
+    tmp_path, monkeypatch
+):
+    from subnet.miner.prepared_extrinsic import PreparedExtrinsicError
+
+    client, wallet, _, args = flow(tmp_path, monkeypatch, 497)
+    with pytest.raises(FundingRefused, match="ambiguous"):
+        funding.fund(client, wallet, execute=True, **args)
+    journal = args["journal"]
+    prepared = journal.read("prepared")
+    submission = journal.read("submission")
+    assert prepared["unsigned"]["included_in_signed_data"][10:18] == "02000000"
+    (tmp_path / "intent" / "prepared.json").unlink()
+    (tmp_path / "intent" / "submission.json").unlink()
+    prepared["unsigned"]["transaction_version"] = other_transaction_version(497)
+    journal.claim("prepared", prepared)
+    journal.claim(
+        "submission",
+        {**submission, "prepared_sha256": hashlib.sha256(canonical_bytes(prepared)).hexdigest()},
+    )
+    with pytest.raises(PreparedExtrinsicError, match="wrong chain/runtime identity"):
+        funding.observe(client, args["rpc"], journal, args["response"])
 
 
 def test_signed_unsubmitted_intent_resumes_without_repreparing_or_resigning(tmp_path, monkeypatch):
@@ -450,7 +502,7 @@ def test_blocked_credit_or_encumbered_stake_never_signs(tmp_path, monkeypatch, f
     assert "broadcast" not in calls
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 497])
 def test_reviewed_funding_runtime_preserves_one_shot_ambiguous_submission(
     tmp_path, monkeypatch, version
 ):
@@ -461,7 +513,9 @@ def test_reviewed_funding_runtime_preserves_one_shot_ambiguous_submission(
     assert args["journal"].read("prepared")["unsigned"]["spec_version"] == version
 
 
-@pytest.mark.parametrize("version,successor", [(475, 477), (477, 479), (479, 481), (481, 482)])
+@pytest.mark.parametrize(
+    "version,successor", [(475, 477), (477, 479), (479, 481), (481, 482), (497, 498)]
+)
 def test_upgrade_during_preparation_refuses_before_unlock_or_sign(
     tmp_path, monkeypatch, version, successor
 ):
@@ -478,7 +532,7 @@ def test_upgrade_during_preparation_refuses_before_unlock_or_sign(
     assert "unlock" not in calls and "broadcast" not in calls
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 497])
 @pytest.mark.parametrize(
     "fault", [None, "metadata", "code", "unknown", "float", "transaction", "genesis"]
 )
@@ -492,7 +546,7 @@ def test_funding_scope_requires_exact_reviewed_identity(monkeypatch, version, fa
     snapshot = SimpleNamespace(
         genesis_hash=funding.GENESIS_HASH,
         runtime_spec_version=version,
-        transaction_version=1,
+        transaction_version=funding.RUNTIME_TRANSACTION_VERSIONS[version],
         chain="Bittensor",
         head_hash="0x" + "cd" * 32,
     )
@@ -501,7 +555,7 @@ def test_funding_scope_requires_exact_reviewed_identity(monkeypatch, version, fa
     elif fault == "float":
         snapshot.runtime_spec_version = float(version)
     elif fault == "transaction":
-        snapshot.transaction_version = 2
+        snapshot.transaction_version = other_transaction_version(version)
     elif fault == "genesis":
         snapshot.genesis_hash = "0x" + "00" * 32
     rpc = SimpleNamespace(
@@ -519,7 +573,7 @@ def test_funding_scope_requires_exact_reviewed_identity(monkeypatch, version, fa
             funding.chain_scope(rpc)
 
 
-@pytest.mark.parametrize("version", [475, 477, 479, 481])
+@pytest.mark.parametrize("version", [475, 477, 479, 481, 497])
 @pytest.mark.parametrize("free_rao", [0, 4, 5, 1_399_264])
 def test_fee_cap_does_not_require_free_tao_reserve(tmp_path, monkeypatch, version, free_rao):
     client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
@@ -550,9 +604,9 @@ def test_alpha_fee_fallback_keeps_exact_fee_cap_before_unlock(tmp_path, monkeypa
     assert args["journal"].read("prepared") is None
 
 
-@pytest.mark.parametrize("version", [478, 480])
+@pytest.mark.parametrize("version,transaction", [(478, 1), (480, 1), (496, 2), (498, 2)])
 def test_unreviewed_funding_refuses_before_preparation_unlock_or_broadcast(
-    tmp_path, monkeypatch, version
+    tmp_path, monkeypatch, version, transaction
 ):
     real_scope = funding.chain_scope
     client, wallet, calls, args = flow(tmp_path, monkeypatch, 477)
@@ -561,7 +615,7 @@ def test_unreviewed_funding_refuses_before_preparation_unlock_or_broadcast(
         snapshot=lambda: SimpleNamespace(
             genesis_hash=funding.GENESIS_HASH,
             runtime_spec_version=version,
-            transaction_version=1,
+            transaction_version=transaction,
             chain="Bittensor",
         )
     )
@@ -595,7 +649,7 @@ def test_upgrade_after_signing_never_claims_or_broadcasts_submission(tmp_path, m
 
 
 @pytest.mark.parametrize("fault", [None, "code", "metadata"])
-@pytest.mark.parametrize("version", [479, 481])
+@pytest.mark.parametrize("version", [479, 481, 497])
 def test_reviewed_flow_checks_pinned_bytes_before_unlock(tmp_path, monkeypatch, fault, version):
     real_scope = funding.chain_scope
     client, wallet, calls, args = flow(tmp_path, monkeypatch, version)
@@ -606,7 +660,7 @@ def test_reviewed_flow_checks_pinned_bytes_before_unlock(tmp_path, monkeypatch, 
     snapshot = SimpleNamespace(
         genesis_hash=funding.GENESIS_HASH,
         runtime_spec_version=version,
-        transaction_version=1,
+        transaction_version=funding.RUNTIME_TRANSACTION_VERSIONS[version],
         chain="Bittensor",
         head_hash="0x" + "cd" * 32,
         block_number=100,

@@ -85,9 +85,9 @@ idle response; a healthy miner alone earns nothing.
 
 ## 4. Fund evaluations
 
-`fund` supports reviewed mainnet runtime 488 and retained 475/477/479/481 profiles. It checks
-the exact code and metadata against the server's funding terms before unlocking or sending.
-Unknown runtimes refuse.
+`fund` supports reviewed mainnet runtime 497 (transaction version 2) and retained
+475/477/479/481/488 profiles. It checks the exact code and metadata against the server's
+funding terms before unlocking or sending. Unknown runtimes refuse.
 A successful chain transfer alone does not establish WT credit; wait for the signed receipt.
 
 Evaluations are paid in work-tokens (WT), bought with subnet 37 alpha. Run `fund` on your
@@ -222,7 +222,7 @@ as shown above.
 `AURELIUS_CLOCK`, `AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET`, `AURELIUS_AXON_ENDPOINT_PROFILE` and
 `AURELIUS_MINER_HTTP_PORT`.
 
-`AURELIUS_RUNTIME_SPEC_PIN` (`479`) and `AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN` (`1`) must
+`AURELIUS_RUNTIME_SPEC_PIN` (`497`) and `AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN` (`2`) must
 match the chain.
 After a chain upgrade, update this repository and its pins together; the miner refuses a mismatch.
 
