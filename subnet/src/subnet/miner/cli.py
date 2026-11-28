@@ -1,9 +1,9 @@
 """Miner CLI entry point.
 
 The original v1 commands are: `deposit`, `balance`, `validate`, `serve` (plan §15.1).
-- `serve` (testlab long-running `miner` service): a `/v1/query` responder that mints a fresh,
-  real-sr25519-signed work_id per request; btauth readiness is exposed by the companion health
-  server on `AURELIUS_MINER_HTTP_PORT` (8092 in testlab), signing as `MINER_HOTKEY`.
+- `serve`: the long-running miner. It publishes its endpoint on chain and answers authenticated
+  `/v1/query` requests, each with a fresh real-sr25519-signed work_id, signing as `MINER_HOTKEY`.
+  Readiness is exposed by the companion health server on `AURELIUS_MINER_HTTP_PORT`.
 - `validate`: check staged items against the PUBLISHED config_schema (no lane import).
 - `balance`: a public affordability read + the deposit address (no session, no coldkey).
 - `deposit`: historical address read with optional local coldkey unlock.
@@ -24,12 +24,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-
-
-def _serve_mode() -> str:
-    """The shared wire seam: v11 ``btauth`` (publish endpoint + authenticated HTTP) or the
-    hermetic plain ``http`` responder."""
-    return os.environ.get("AURELIUS_TRANSPORT", "http")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -311,19 +305,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             ensure_incentives_accepted(accept_flag=args.accept_incentives)
             validate_miner_startup_posture()
-            if _serve_mode() == "btauth":
-                # Bittensor v11: publish the endpoint on-chain, run application-owned btauth HTTP,
-                # and keep :8092 for readiness + explicit testlab one-shot scenarios.
-                from subnet.miner.axon_serve import serve_axon_forever
+            # Bittensor v11: publish the endpoint on-chain, run application-owned btauth HTTP,
+            # and keep the health port for readiness.
+            from subnet.miner.axon_serve import serve_axon_forever
 
-                serve_axon_forever(hotkey_name=hotkey_name, netuid=args.netuid, port=args.port)
-                return 0
-            if _serve_mode() == "http":
-                from subnet.miner.serve import serve as serve_miner
-
-                serve_miner(hotkey_name=hotkey_name, port=args.port)
-                return 0
-            raise ValueError(f"unknown AURELIUS_TRANSPORT {_serve_mode()!r}")
+            serve_axon_forever(hotkey_name=hotkey_name, netuid=args.netuid, port=args.port)
+            return 0
         except KeyboardInterrupt:
             print("[aurelius-miner] serve interrupted", file=sys.stderr, flush=True)
             return 0

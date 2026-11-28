@@ -2,20 +2,21 @@
 real-sr25519-signed work_id per query.
 
 CONTRACT (capsule header)
-- In real ``staging`` mode the validator requests only an operator-defined task type/schema and the
-  miner selects the first eligible item from its own validated JSONL pool. Explicit ``inline``
-  mode preserves existing local/e2e fixtures. The selected config is canonicalized, assigned its
-  shared cost identity, and signed with an exact v2 work authorization bound to the authenticated
-  validator audience, its 64-hex request ID, and the authoritative fanout window. The nonce is
-  OS-random, so the same content still yields a DIFFERENT verifying work_id across restarts.
+- In ``staging`` mode the validator requests only an operator-defined task type and schema
+  version, and the miner selects its one eligible window-scoped item from its own validated JSONL
+  pool. The validator never supplies the candidate. The selected config is canonicalized, assigned
+  its shared cost identity, and signed with an exact v2 work authorization bound to the
+  authenticated validator audience, its 64-hex request ID, and the authoritative fanout window.
+  The nonce is OS-random, so the same content still yields a DIFFERENT verifying work_id across
+  restarts.
 - No lane import (the miner treats config as opaque data — contract `platform-not-lane`); no charge
   path (contract `charge-path-single-import-site`). The coldkey is never touched by serving.
-- Plain HTTP query bodies have a hard pre-read cap and socket deadline. A bounded server rejects
-  saturation instead of spawning unbounded threads. In real Bittensor environments the companion
-  HTTP server is health-only and loopback-bound; unauthenticated query requires the exact
-  testlab/localnet/observed-local-genesis posture.
-- Startup is posture-checked: real-chain serving requires btauth transport, Bittensor identity, real
-  time, hotkey-only wallet view, and a production-safe endpoint profile.
+- Query bodies have a hard pre-read cap and socket deadline. A bounded server rejects saturation
+  instead of spawning unbounded threads. Every query is authenticated: the server refuses to
+  expose ``/v1/query`` without a request authorizer. The companion HTTP server on the health port
+  is health-only and loopback-bound.
+- Startup is posture-checked: serving requires Bittensor identity, real time, a hotkey-only wallet
+  view, and an endpoint address the policy admits.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ import threading
 import time
 from collections.abc import Callable
 from decimal import Decimal, InvalidOperation
-from urllib.parse import urlsplit
 
 from subnet.bittensor_v11 import (
     BittensorV11Error,
@@ -56,8 +56,6 @@ DEFAULT_MAX_CONCURRENT_REQUESTS = 32
 HARD_MAX_CONCURRENT_REQUESTS = 256
 DEFAULT_SOCKET_TIMEOUT_S = Decimal("5")
 HARD_MAX_SOCKET_TIMEOUT_S = Decimal("60")
-_LOCAL_TESTLAB_SUBTENSOR_HOSTS = frozenset({"subtensor", "localhost", "127.0.0.1", "::1"})
-_LOCAL_TESTLAB_SUBTENSOR_PORT = 9944
 
 
 class QueryAuthorizationError(ValueError):
@@ -438,35 +436,8 @@ def minter_from_env(hotkey_name: str, *, clock: str = "frozen") -> WorkIdMinter:
     raise ValueError(f"unknown AURELIUS_IDENTITY_SOURCE {source!r}")
 
 
-def _local_testlab_substrate_endpoint(endpoint: object) -> bool:
-    """Recognize only the compiled local-node authority used by observe-once testlab."""
-
-    if (
-        not isinstance(endpoint, str)
-        or not endpoint
-        or not endpoint.isascii()
-        or any(not 0x21 <= ord(character) <= 0x7E for character in endpoint)
-    ):
-        return False
-    try:
-        parsed = urlsplit(endpoint)
-        port = parsed.port
-    except ValueError:
-        return False
-    return (
-        parsed.scheme == "ws"
-        and parsed.hostname in _LOCAL_TESTLAB_SUBTENSOR_HOSTS
-        and port == _LOCAL_TESTLAB_SUBTENSOR_PORT
-        and parsed.username is None
-        and parsed.password is None
-        and parsed.path in {"", "/"}
-        and not parsed.query
-        and not parsed.fragment
-    )
-
-
 def validate_miner_startup_posture(environ=None) -> None:
-    """Reject real-chain serving with deterministic identity or an HTTP-only wire.
+    """Reject serving with an incomplete chain identity, nonce store or publication state.
 
     Every independently checkable problem is collected first, so one restart reports the
     whole misconfiguration instead of one missing key per restart.
@@ -475,56 +446,32 @@ def validate_miner_startup_posture(environ=None) -> None:
     env = os.environ if environ is None else environ
     problems: list[str] = []
     environment = env.get("AURELIUS_ENV", "prod")
-    transport = env.get("AURELIUS_TRANSPORT", "http")
-    if transport == "http":
-        if not plain_query_allowed(env):
-            problems.append(
-                "AURELIUS_TRANSPORT=http requires AURELIUS_ENV=testlab, CHAIN_ID=localnet, "
-                "AURELIUS_AXON_EXPECTED_GENESIS_HASH=observe-once-testlab, and the compiled "
-                "local SUBSTRATE_URL authority"
-            )
-    elif transport != "btauth":
-        problems.append("AURELIUS_TRANSPORT must be 'http' or 'btauth'")
-    else:
-        for key in (
-            "AURELIUS_BITTENSOR_NONCE_DB",
-            "AURELIUS_AXON_PUBLISH_STATE_DIR",
-            "AURELIUS_AXON_EXPECTED_CHAIN_NAME",
-            "AURELIUS_AXON_EXPECTED_GENESIS_HASH",
-            "AURELIUS_RUNTIME_SPEC_PIN",
-            "CHAIN_ID",
-            "SUBSTRATE_URL",
-        ):
-            if not env.get(key):
-                problems.append(f"{key} is required in btauth miner mode")
-        if env.get("SUBSTRATE_URL"):
-            try:
-                validate_subtensor_endpoint(env["SUBSTRATE_URL"])
-            except BittensorV11Error as exc:
-                problems.append(f"SUBSTRATE_URL is invalid: {exc}")
-        runtime = env.get("AURELIUS_RUNTIME_SPEC_PIN")
-        if runtime and (not runtime.isascii() or not runtime.isdecimal() or int(runtime) <= 0):
-            problems.append("AURELIUS_RUNTIME_SPEC_PIN must be a positive decimal integer")
-        genesis = env.get("AURELIUS_AXON_EXPECTED_GENESIS_HASH")
-        if genesis:
-            local_observation = (
-                environment == "testlab"
-                and env.get("CHAIN_ID") == "localnet"
-                and genesis == "observe-once-testlab"
-            )
-            if local_observation and not _local_testlab_substrate_endpoint(
-                env.get("SUBSTRATE_URL")
-            ):
-                problems.append(
-                    "SUBSTRATE_URL must be the compiled local ws:// subtensor/loopback authority "
-                    "when AURELIUS_AXON_EXPECTED_GENESIS_HASH=observe-once-testlab"
-                )
-            if not local_observation and (
-                len(genesis) != 66
-                or not genesis.startswith("0x")
-                or any(character not in "0123456789abcdefABCDEF" for character in genesis[2:])
-            ):
-                problems.append("AURELIUS_AXON_EXPECTED_GENESIS_HASH must be an exact 32-byte hash")
+    for key in (
+        "AURELIUS_BITTENSOR_NONCE_DB",
+        "AURELIUS_AXON_PUBLISH_STATE_DIR",
+        "AURELIUS_AXON_EXPECTED_CHAIN_NAME",
+        "AURELIUS_AXON_EXPECTED_GENESIS_HASH",
+        "AURELIUS_RUNTIME_SPEC_PIN",
+        "CHAIN_ID",
+        "SUBSTRATE_URL",
+    ):
+        if not env.get(key):
+            problems.append(f"{key} is required to serve")
+    if env.get("SUBSTRATE_URL"):
+        try:
+            validate_subtensor_endpoint(env["SUBSTRATE_URL"])
+        except BittensorV11Error as exc:
+            problems.append(f"SUBSTRATE_URL is invalid: {exc}")
+    runtime = env.get("AURELIUS_RUNTIME_SPEC_PIN")
+    if runtime and (not runtime.isascii() or not runtime.isdecimal() or int(runtime) <= 0):
+        problems.append("AURELIUS_RUNTIME_SPEC_PIN must be a positive decimal integer")
+    genesis = env.get("AURELIUS_AXON_EXPECTED_GENESIS_HASH")
+    if genesis and (
+        len(genesis) != 66
+        or not genesis.startswith("0x")
+        or any(character not in "0123456789abcdefABCDEF" for character in genesis[2:])
+    ):
+        problems.append("AURELIUS_AXON_EXPECTED_GENESIS_HASH must be an exact 32-byte hash")
     if problems:
         raise ValueError("; ".join(problems))
     if environment == "testlab":
@@ -534,7 +481,6 @@ def validate_miner_startup_posture(environ=None) -> None:
     except (SchemaUnavailable, ValueError) as exc:
         problems.append(str(exc))
     expected = {
-        "AURELIUS_TRANSPORT": "btauth",
         "AURELIUS_IDENTITY_SOURCE": "bittensor",
         "AURELIUS_CLOCK": "real",
         "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
@@ -555,19 +501,6 @@ def validate_miner_startup_posture(environ=None) -> None:
         raise ValueError("; ".join(problems))
 
 
-def plain_query_allowed(environ=None) -> bool:
-    """Return whether an unauthenticated query route belongs to the exact local-only posture."""
-
-    env = os.environ if environ is None else environ
-    return (
-        env.get("AURELIUS_ENV") == "testlab"
-        and env.get("CHAIN_ID") == "localnet"
-        and env.get("AURELIUS_AXON_EXPECTED_GENESIS_HASH") == "observe-once-testlab"
-        and env.get("AURELIUS_TRANSPORT") in {"http", "btauth"}
-        and _local_testlab_substrate_endpoint(env.get("SUBSTRATE_URL"))
-    )
-
-
 def _handler(
     minter: WorkIdMinter,
     status=None,
@@ -579,6 +512,8 @@ def _handler(
     stats: ServingStats | None = None,
     rate_limiter: CallerRateLimiter | None = None,
 ):
+    if query_enabled and request_authorizer is None:
+        raise ValueError("the query route requires a request authorizer")
     resolve_candidate = candidate_resolver or candidate_for_request
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -632,16 +567,12 @@ def _handler(
                         stats.note_client_error()
                     self._json(400, {"error": "incomplete request body"})
                     return
-                caller_hotkey = None
-                if request_authorizer is not None:
-                    caller_hotkey = request_authorizer(
-                        self.headers, raw_body, method="POST", path=self.path
-                    )
-                    if not isinstance(caller_hotkey, str) or not caller_hotkey:
-                        raise QueryAuthorizationError(401, "authenticated caller is unavailable")
-                if rate_limiter is not None and not rate_limiter.allow(
-                    caller_hotkey or self.client_address[0]
-                ):
+                caller_hotkey = request_authorizer(
+                    self.headers, raw_body, method="POST", path=self.path
+                )
+                if not isinstance(caller_hotkey, str) or not caller_hotkey:
+                    raise QueryAuthorizationError(401, "authenticated caller is unavailable")
+                if rate_limiter is not None and not rate_limiter.allow(caller_hotkey):
                     if stats is not None:
                         stats.note_rate_limited()
                     self._json(429, {"error": "caller query rate exceeded"})
@@ -649,10 +580,7 @@ def _handler(
                 request = parse_canonical_json(raw_body)
                 if not isinstance(request, dict):
                     raise ValueError("task request must be an object")
-                if (
-                    caller_hotkey is not None
-                    and request.get("validator_hotkey_ss58") != caller_hotkey
-                ):
+                if request.get("validator_hotkey_ss58") != caller_hotkey:
                     raise QueryAuthorizationError(
                         403, "declared validator audience differs from authenticated caller"
                     )
@@ -797,8 +725,8 @@ def make_server(
     rate_limiter: CallerRateLimiter | None = None,
     serving_config: ServingConfig | None = None,
 ) -> BoundedThreadingHTTPServer:
-    """The plain HTTP surface (health + /v1/query). http mode serves it as THE server; btauth mode
-    runs it as a readiness-gated sidecar (ADR-0030)."""
+    """The HTTP surface: health, and ``/v1/query`` behind the request authorizer. It is THE
+    server on the advertised port, and a health-only sidecar on the health port (ADR-0030)."""
     if max_concurrent_requests is None:
         max_concurrent_requests = _server_limit_int(
             "AURELIUS_MINER_MAX_CONCURRENT_REQUESTS",
@@ -860,34 +788,3 @@ def make_server(
         socket_timeout_s=socket_timeout_s,
         stats=shared,
     )
-
-
-def serve(*, hotkey_name: str, port: int = 8091) -> None:
-    validate_miner_startup_posture()
-    serving_config = ServingConfig().start()
-    try:
-        _serve_http(hotkey_name=hotkey_name, port=port, serving_config=serving_config)
-    finally:
-        serving_config.close()
-
-
-def _serve_http(*, hotkey_name: str, port: int, serving_config: ServingConfig) -> None:
-    minter = minter_from_env(hotkey_name, clock=os.environ.get("AURELIUS_CLOCK", "frozen"))
-    stats = ServingStats()
-    print(f"[aurelius-miner] serving {minter.hotkey_ss58} on :{port} (/v1/query)", flush=True)
-    # the sidecar port stays bound in BOTH transport modes, so healthchecks and the one-shot
-    # scenario URLs never move when AURELIUS_TRANSPORT flips (pure env rollback, ADR-0030)
-    extra_port = int(os.environ.get("AURELIUS_MINER_HTTP_PORT", "0") or 0)
-    limiter = caller_rate_limiter()
-    if extra_port and extra_port != port:
-        threading.Thread(
-            target=make_server(
-                minter, extra_port, stats=stats, rate_limiter=limiter, serving_config=serving_config
-            ).serve_forever,
-            daemon=True,
-        ).start()
-        print(f"[aurelius-miner] http surface also on :{extra_port}", flush=True)
-    start_status_line(stats, "[aurelius-miner]")
-    make_server(
-        minter, port, stats=stats, rate_limiter=limiter, serving_config=serving_config
-    ).serve_forever()

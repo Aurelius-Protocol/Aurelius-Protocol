@@ -63,7 +63,6 @@ from subnet.miner.serve import (
     load_bittensor_wallet,
     make_server,
     minter_from_bittensor_wallet,
-    plain_query_allowed,
     start_status_line,
     validate_miner_startup_posture,
 )
@@ -2199,8 +2198,8 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
         bt = require_bittensor_v11()
     except ImportError as e:
         raise NotImplementedError(
-            "miner btauth mode needs the Bittensor SDK — install the optional `bt` extra "
-            "(the chain-bt image); AURELIUS_TRANSPORT=http needs none of this"
+            "the miner needs the Bittensor SDK — install the optional `bt` extra "
+            "(the chain-bt image)"
         ) from e
 
     serving_config = ServingConfig()
@@ -2282,22 +2281,20 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
         limiter = caller_rate_limiter()
         http_port = int(os.environ.get("AURELIUS_MINER_HTTP_PORT", "8092") or 0)
         if http_port:
-            query_enabled = plain_query_allowed()
-            bind_host = "0.0.0.0" if query_enabled else "127.0.0.1"
+            # Health only, loopback only: queries reach the miner on the authenticated port.
             sidecar = make_server(
                 minter,
                 http_port,
                 status=status,
-                query_enabled=query_enabled,
-                bind_host=bind_host,
+                query_enabled=False,
+                bind_host="127.0.0.1",
                 stats=stats,
                 rate_limiter=limiter,
                 serving_config=serving_config,
             )
             servers.append(sidecar)
             threading.Thread(target=sidecar.serve_forever, daemon=True).start()
-            mode = "health + /v1/query" if query_enabled else "health-only"
-            print(f"[miner:btauth] plain sidecar on {bind_host}:{http_port} ({mode})", flush=True)
+            print(f"[miner:btauth] health sidecar on 127.0.0.1:{http_port}", flush=True)
 
         authorizer = make_btauth_authorizer(bt, wallet, registered, nonce_store=nonce_store)
         authenticated = make_server(

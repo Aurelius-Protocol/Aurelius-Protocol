@@ -37,7 +37,6 @@ from subnet.miner.axon_serve import (
     serve_axon_forever,
 )
 from subnet.miner.candidates import candidate_for_request
-from subnet.miner.cli import _serve_mode
 from subnet.miner.serve import (
     BoundedThreadingHTTPServer,
     MAX_HTTP_QUERY_BYTES,
@@ -46,8 +45,6 @@ from subnet.miner.serve import (
     WorkIdMinter,
     _handler,
     make_server,
-    plain_query_allowed,
-    serve as serve_plain_http,
     validate_miner_startup_posture,
 )
 from subnet.miner.staging import ELIGIBLE_FANOUT_WINDOW, StagingPool
@@ -88,13 +85,6 @@ def _build(minter, config_json=_TASK_CONFIG, **overrides):
     return build_envelope_json(minter, "synthetic", 1, config_json, **values)
 
 
-def test_serve_mode_env_seam(monkeypatch):
-    monkeypatch.delenv("AURELIUS_TRANSPORT", raising=False)
-    assert _serve_mode() == "http"  # hermetic default
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "btauth")
-    assert _serve_mode() == "btauth"
-
-
 def test_module_import_is_bittensor_free():
     completed = subprocess.run(
         [
@@ -119,7 +109,7 @@ def test_btauth_mode_without_bt_is_a_clean_seam(monkeypatch, tmp_path):
     monkeypatch.setenv("AURELIUS_BITTENSOR_NONCE_DB", "/unused/nonces.sqlite3")
     monkeypatch.setenv("AURELIUS_AXON_PUBLISH_STATE_DIR", str(tmp_path / "axon-publish"))
     monkeypatch.setenv("AURELIUS_AXON_EXPECTED_CHAIN_NAME", "Development")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "observe-once-testlab")
+    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "0x" + "cd" * 32)
     monkeypatch.setenv("AURELIUS_RUNTIME_SPEC_PIN", "432")
     monkeypatch.setenv("CHAIN_ID", "localnet")
     monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
@@ -1987,7 +1977,8 @@ def test_make_server_status_seam():
             return 200, {"status": "ok"}
         return 503, {"status": "publishing"}
 
-    handler = _handler(minter, status=status).__new__(_handler(minter, status=status))
+    health_only = _handler(minter, status=status, query_enabled=False)
+    handler = health_only.__new__(health_only)
     handler.path = "/health"
     replies = []
     handler._json = lambda code, body: replies.append((code, body))
@@ -2007,7 +1998,8 @@ def test_health_reports_serving_counters_and_readiness_keeps_them():
     stats.note_auth_rejected()
     stats.note_saturated()
 
-    plain = _handler(minter, stats=stats).__new__(_handler(minter, stats=stats))
+    health_only = _handler(minter, stats=stats, query_enabled=False)
+    plain = health_only.__new__(health_only)
     plain.path = "/health"
     replies = []
     plain._json = lambda code, body: replies.append((code, body))
@@ -2020,7 +2012,9 @@ def test_health_reports_serving_counters_and_readiness_keeps_them():
     assert body["stats"]["last_caller_hotkey"] == "5" * 48
     assert body["stats"]["last_activity_at"] is not None
 
-    gated = _handler(minter, status=lambda: (503, {"status": "publishing"}), stats=stats)
+    gated = _handler(
+        minter, status=lambda: (503, {"status": "publishing"}), stats=stats, query_enabled=False
+    )
     handler = gated.__new__(gated)
     handler.path = "/health"
     handler._json = lambda c, b: replies.append((c, b))
@@ -2108,11 +2102,8 @@ def test_query_rate_limit_answers_429_and_counts():
     assert stats.snapshot()["rate_limited"] == 1
 
 
-@pytest.mark.parametrize("authenticated", [False, True], ids=["http", "btauth"])
 @pytest.mark.parametrize("shared_limiter", [False, True], ids=["default", "shared"])
-def test_make_server_constructs_and_enforces_caller_quota(
-    monkeypatch, authenticated, shared_limiter
-):
+def test_make_server_constructs_and_enforces_caller_quota(monkeypatch, shared_limiter):
     """Exercise the real factory without binding a port or starting a serving thread."""
     from subnet.miner.serve import CallerRateLimiter
 
@@ -2141,7 +2132,7 @@ def test_make_server_constructs_and_enforces_caller_quota(
         WorkIdMinter("miner-hotkey"),
         0,
         candidate_resolver=lambda value: value,
-        request_authorizer=(lambda *_args, **_kwargs: _VALIDATOR) if authenticated else None,
+        request_authorizer=lambda *_args, **_kwargs: _VALIDATOR,
         stats=stats,
         **kwargs,
     ) as server:
@@ -2162,7 +2153,23 @@ def test_make_server_constructs_and_enforces_caller_quota(
         assert stats.snapshot()["rate_limited"] == 1
 
 
-def test_http_sidecar_can_be_health_only_and_caps_query_bodies():
+def _authenticated_caller(*_args, **_kwargs):
+    return _VALIDATOR
+
+
+def test_the_query_route_requires_a_request_authorizer():
+    """No server is ever constructed that answers `/v1/query` to an unauthenticated caller."""
+
+    minter = WorkIdMinter("miner-hotkey")
+    with pytest.raises(ValueError, match="request authorizer"):
+        _handler(minter)
+    with pytest.raises(ValueError, match="request authorizer"):
+        make_server(minter, 0)
+    # A health-only server answers no query, so it needs none.
+    assert _handler(minter, query_enabled=False) is not None
+
+
+def test_the_health_surface_serves_no_queries_and_the_query_route_caps_bodies():
     minter = WorkIdMinter("miner-hotkey")
 
     def invoke(handler_cls, *, length, body=b""):
@@ -2179,7 +2186,13 @@ def test_http_sidecar_can_be_health_only_and_caps_query_bodies():
         404,
         {"error": "not found"},
     )
-    assert invoke(_handler(minter), length=MAX_HTTP_QUERY_BYTES + 1)[0] == 413
+    assert (
+        invoke(
+            _handler(minter, request_authorizer=_authenticated_caller),
+            length=MAX_HTTP_QUERY_BYTES + 1,
+        )[0]
+        == 413
+    )
 
 
 def test_partial_query_body_timeout_is_bounded_and_never_reaches_candidate_selection():
@@ -2191,6 +2204,7 @@ def test_partial_query_body_timeout_is_bounded_and_never_reaches_candidate_selec
     handler_cls = _handler(
         WorkIdMinter("miner-hotkey"),
         candidate_resolver=lambda value: candidates.append(value) or value,
+        request_authorizer=_authenticated_caller,
     )
     handler = handler_cls.__new__(handler_cls)
     handler.path = "/v1/query"
@@ -2232,101 +2246,45 @@ def test_bounded_http_server_rejects_saturation_without_starting_another_thread(
     assert request.closed is True
 
 
-def test_plain_query_requires_the_exact_local_chain_posture(monkeypatch):
-    local = {
-        "AURELIUS_ENV": "testlab",
-        "AURELIUS_TRANSPORT": "btauth",
-        "CHAIN_ID": "localnet",
-        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
-        "SUBSTRATE_URL": "ws://subtensor:9944",
-    }
-    assert plain_query_allowed(local) is True
-    for key, external in (
-        ("AURELIUS_ENV", "testnet-full"),
-        ("CHAIN_ID", "bittensor-testnet:external"),
-        ("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "0x" + "ab" * 32),
-        ("AURELIUS_TRANSPORT", "other"),
-    ):
-        assert plain_query_allowed(dict(local, **{key: external})) is False
+def test_startup_identifies_the_chain_by_an_exact_genesis_hash():
+    """No sentinel and no environment label stands in for a chain identity."""
 
-    with pytest.raises(ValueError, match="CHAIN_ID=localnet"):
-        validate_miner_startup_posture(
-            {
-                "AURELIUS_ENV": "testlab",
-                "AURELIUS_TRANSPORT": "http",
-                "CHAIN_ID": "bittensor-testnet:external",
-                "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "0x" + "ab" * 32,
-                "SUBSTRATE_URL": "wss://test.finney.opentensor.ai:443",
-            }
-        )
-
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "http")
-    monkeypatch.setenv("CHAIN_ID", "bittensor-testnet:external")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "0x" + "ab" * 32)
-    monkeypatch.setenv("SUBSTRATE_URL", "wss://test.finney.opentensor.ai:443")
-    with pytest.raises(ValueError, match="CHAIN_ID=localnet"):
-        serve_plain_http(hotkey_name="must-not-open", port=0)
-
-
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        "wss://test.finney.opentensor.ai:443",
-        "ws://test.finney.opentensor.ai:9944",
-        "ws://subtensor:9945",
-        "ws://subtensor.example:9944",
-        "ws://subtensor:9944/rpc",
-        "ws://operator@subtensor:9944",
-        "ws://subtensor:9944?network=testnet",
-        " ws://subtensor:9944",
-    ],
-)
-def test_observe_once_rejects_nonlocal_subtensor_authorities(endpoint):
     posture = {
         "AURELIUS_ENV": "testlab",
-        "AURELIUS_TRANSPORT": "btauth",
-        "AURELIUS_IDENTITY_SOURCE": "bittensor",
-        "AURELIUS_CLOCK": "real",
-        "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
         "AURELIUS_BITTENSOR_NONCE_DB": "/tmp/nonces.sqlite3",
         "AURELIUS_AXON_PUBLISH_STATE_DIR": "/tmp/axon-publish",
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Development",
-        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
         "AURELIUS_RUNTIME_SPEC_PIN": "432",
         "CHAIN_ID": "localnet",
-        "SUBSTRATE_URL": endpoint,
+        "SUBSTRATE_URL": "ws://subtensor:9944",
     }
+    for genesis in ("observe-once-testlab", "0x123", "0x" + "zz" * 32, "ab" * 32):
+        broken = dict(posture, AURELIUS_AXON_EXPECTED_GENESIS_HASH=genesis)
+        with pytest.raises(ValueError, match="AURELIUS_AXON_EXPECTED_GENESIS_HASH"):
+            validate_miner_startup_posture(broken)
 
-    assert plain_query_allowed(posture) is False
-    with pytest.raises(ValueError, match="SUBSTRATE_URL"):
-        validate_miner_startup_posture(posture)
 
-
-def test_observe_once_external_endpoint_fails_before_sdk_or_state_mutation(monkeypatch, tmp_path):
+def test_an_invalid_endpoint_fails_before_sdk_or_state_mutation(monkeypatch, tmp_path):
+    """The startup check runs before the SDK is imported or any state directory is created."""
     import subnet.miner.axon_serve as subject
 
     publish_dir = tmp_path / "must-not-be-created"
     values = {
         "AURELIUS_ENV": "testlab",
-        "AURELIUS_TRANSPORT": "btauth",
-        "AURELIUS_IDENTITY_SOURCE": "bittensor",
-        "AURELIUS_CLOCK": "real",
-        "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
         "AURELIUS_BITTENSOR_NONCE_DB": str(tmp_path / "must-not-open.sqlite3"),
         "AURELIUS_AXON_PUBLISH_STATE_DIR": str(publish_dir),
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Development",
-        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
+        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "0x" + "cd" * 32,
         "AURELIUS_RUNTIME_SPEC_PIN": "432",
-        "CHAIN_ID": "localnet",
-        "SUBSTRATE_URL": "wss://test.finney.opentensor.ai:443",
+        "CHAIN_ID": "development",
+        "SUBSTRATE_URL": "wss://operator@chain.example:443",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(
         subject,
         "require_bittensor_v11",
-        lambda: pytest.fail("SDK import must follow local-endpoint posture validation"),
+        lambda: pytest.fail("the SDK must not be imported before the posture is validated"),
     )
 
     with pytest.raises(ValueError, match="SUBSTRATE_URL"):
@@ -2481,7 +2439,6 @@ def test_miner_production_posture_rejects_development_seams():
     for key, bad in (
         ("CONFIG_SIGNING_PUBKEY", ""),
         ("CENTRAL_API_URL", ""),
-        ("AURELIUS_TRANSPORT", "http"),
         ("AURELIUS_IDENTITY_SOURCE", "deterministic"),
         ("AURELIUS_CLOCK", "frozen"),
         ("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET", "false"),
@@ -2497,14 +2454,3 @@ def test_miner_production_posture_rejects_development_seams():
         broken = dict(secure, **{key: bad})
         with pytest.raises(ValueError, match=key):
             validate_miner_startup_posture(broken)
-
-    # Explicit testlab is the only compatibility profile that may retain the HTTP responder.
-    validate_miner_startup_posture(
-        {
-            "AURELIUS_ENV": "testlab",
-            "AURELIUS_TRANSPORT": "http",
-            "CHAIN_ID": "localnet",
-            "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
-            "SUBSTRATE_URL": "ws://subtensor:9944",
-        }
-    )
