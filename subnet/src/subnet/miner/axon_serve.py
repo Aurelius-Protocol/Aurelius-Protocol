@@ -2205,9 +2205,7 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
     serving_config = ServingConfig()
     # Load once and bind BOTH btauth and application work-id signatures to this exact hotkey.
     wallet = load_bittensor_wallet(bt)
-    minter = minter_from_bittensor_wallet(
-        hotkey_name, wallet, clock=os.environ.get("AURELIUS_CLOCK", "frozen")
-    )
+    minter = minter_from_bittensor_wallet(hotkey_name, wallet)
     registered = RegisteredSet()
     external_ip = configured_external_ip or socket.gethostbyname(socket.gethostname())
     endpoint_policy = AxonEndpointPolicy.build(

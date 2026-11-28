@@ -256,7 +256,6 @@ class WorkIdMinter:
         self,
         hotkey_name: str,
         *,
-        clock: str = "frozen",
         hotkey_ss58: str | None = None,
         signer: Callable[[bytes], bytes] | None = None,
     ):
@@ -271,7 +270,6 @@ class WorkIdMinter:
             # this a callable avoids ever extracting or copying private key material.
             self.hotkey_ss58 = hotkey_ss58
             self._signer = signer
-        self._clock = clock
 
     def sign_observation(self, message: bytes) -> bytes:
         """Sign a domain-separated, read-only observation request using only the hotkey."""
@@ -346,8 +344,8 @@ class WorkIdMinter:
             task_type, schema_version, config, selected_cost_model_version, cost_class
         )
         nonce = self._next_nonce()
-        # clock seam: frozen in unit tests (freshness comes from the nonce), real in the live lane
-        ts = now_ts(self._clock)
+        # The wall clock. Freshness comes from the nonce and the window, never from a fixed time.
+        ts = now_ts()
         signature = self._signer(
             work_id_v2_signed_bytes(
                 content_hash=ch,
@@ -414,25 +412,23 @@ def load_bittensor_wallet(bt_module=None):
     )
 
 
-def minter_from_bittensor_wallet(
-    hotkey_name: str, wallet, *, clock: str = "frozen"
-) -> WorkIdMinter:
+def minter_from_bittensor_wallet(hotkey_name: str, wallet) -> WorkIdMinter:
     """Bind work-id authorship to the exact hotkey used by the Bittensor wallet."""
     hotkey = wallet.hotkey
     ss58 = str(hotkey.ss58_address)
     signer = getattr(hotkey, "sign", None)
     if not ss58 or not callable(signer):
         raise ValueError("Bittensor wallet hotkey must expose ss58_address and sign(message)")
-    return WorkIdMinter(hotkey_name, clock=clock, hotkey_ss58=ss58, signer=signer)
+    return WorkIdMinter(hotkey_name, hotkey_ss58=ss58, signer=signer)
 
 
-def minter_from_env(hotkey_name: str, *, clock: str = "frozen") -> WorkIdMinter:
+def minter_from_env(hotkey_name: str) -> WorkIdMinter:
     """Select deterministic development identity or the mounted Bittensor hotkey explicitly."""
     source = os.environ.get("AURELIUS_IDENTITY_SOURCE", "deterministic")
     if source == "deterministic":
-        return WorkIdMinter(hotkey_name, clock=clock)
+        return WorkIdMinter(hotkey_name)
     if source == "bittensor":
-        return minter_from_bittensor_wallet(hotkey_name, load_bittensor_wallet(), clock=clock)
+        return minter_from_bittensor_wallet(hotkey_name, load_bittensor_wallet())
     raise ValueError(f"unknown AURELIUS_IDENTITY_SOURCE {source!r}")
 
 
@@ -482,7 +478,6 @@ def validate_miner_startup_posture(environ=None) -> None:
         problems.append(str(exc))
     expected = {
         "AURELIUS_IDENTITY_SOURCE": "bittensor",
-        "AURELIUS_CLOCK": "real",
         "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
     }
     for key, wanted in expected.items():

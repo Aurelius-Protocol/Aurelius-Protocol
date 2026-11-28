@@ -2440,7 +2440,6 @@ def test_miner_production_posture_rejects_development_seams():
         ("CONFIG_SIGNING_PUBKEY", ""),
         ("CENTRAL_API_URL", ""),
         ("AURELIUS_IDENTITY_SOURCE", "deterministic"),
-        ("AURELIUS_CLOCK", "frozen"),
         ("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET", "false"),
         ("AURELIUS_BITTENSOR_NONCE_DB", ""),
         ("AURELIUS_AXON_PUBLISH_STATE_DIR", ""),
