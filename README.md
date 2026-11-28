@@ -111,8 +111,9 @@ payout multiplier. See [INCENTIVES.md](INCENTIVES.md#work-tokens).
 
 `fund --method gamma` is a second way to pay: with **gamma**, a balance the chain holds on the
 subnet, through one `spend_gamma` call signed by your funding coldkey. It is **not open yet**.
-Until it opens, the command reports what is missing and `--prepare` refuses. It needs a
-separate gamma API hotkey and a deposit whose spender is your funding coldkey. Read
+Until it opens, the command reports what is missing and `--prepare` refuses. `--mint-setup`
+does not wait for the server: do not mint before funding opens. It needs a separate gamma API
+hotkey and a deposit whose spender is your funding coldkey. Read
 [Gamma funding](docs/gamma-funding.md) before you use it.
 
 ## 5. Build and submit

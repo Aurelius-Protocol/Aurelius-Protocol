@@ -2,7 +2,9 @@
 
 **Status: not open.** Subnet 37 does not accept gamma funding yet. The commands are in the
 miner so that nothing changes for you when it opens. Until then, `fund --method gamma` reports
-what is missing, and `--prepare` refuses with the server's reason.
+what is missing, and `--prepare` refuses with the server's reason. `--mint-setup` is the
+exception: it asks the chain, not the server, and can mint as soon as the chain allows. Do not
+mint before funding opens.
 
 ## What it is
 
@@ -103,7 +105,7 @@ aurelius-miner fund --method gamma --status --intent-dir "$PWD/funding/gamma-001
 | `PREPARED_NOT_SUBMITTED` | Signed, never sent. Only `--execute` sends it. |
 | `OUTCOME_UNKNOWN` | Sent, and not yet knowable. Rerun `--status` later. |
 | `OBSERVED_ON_CHAIN` | In a finalized block. `spend_event` reports spent or skipped. |
-| `NOT_ON_CHAIN_AFTER_ERA` | Too late to be included; unpaid once the server reports no settlement. |
+| `NOT_ON_CHAIN_AFTER_ERA` | Too late to include; unpaid once the server reports no settlement. |
 | `CENTRAL_CREDITED` | A signed funding receipt was verified. This is the only proof of WT credit. |
 
 **Never delete the journal to try again.** After a submission was attempted, `--execute` and
