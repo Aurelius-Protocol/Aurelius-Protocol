@@ -16,7 +16,10 @@ import struct
 
 from subnet.bittensor_v11 import FinalizedRpc, load_wallet, open_subtensor, require_bittensor_v11
 from subnet.miner.funding_client import CHAIN_ID, TREASURY, read_funding, verified_deposit
-from subnet.miner.funding_runtime import RUNTIME_PROFILES
+from subnet.miner.funding_runtime import (
+    RUNTIME_PROFILES,
+    RUNTIME_TRANSACTION_VERSIONS,
+)
 from subnet.miner.trust import config_signing_pubkey
 from subnet.miner.prepared_extrinsic import (
     decoded_scan_candidate,
@@ -54,8 +57,9 @@ def amount_rao(value):
 
 def transfer_call(hotkey, amount):
     require(type(amount) is int and 0 < amount < MAX_U64, "invalid alpha amount or move-all")
-    # Reviewed475/477/479/481/488 metadata: SubtensorModule(7).transfer_stake(86), AccountId32 x2,
-    # NetUid u16 x2 and AlphaBalance u64. No wrapper, proxy, encrypted call or move-all.
+    # Reviewed 475/477/479/481/488/497 metadata: SubtensorModule(7).transfer_stake(86),
+    # AccountId32 x2, NetUid u16 x2 and AlphaBalance u64. No wrapper, proxy, encrypted call or
+    # move-all.
     return (
         bytes.fromhex("0756")
         + ss58_decode(TREASURY)
@@ -138,16 +142,17 @@ class FundingJournal:
 
 def chain_scope(rpc):
     snapshot = rpc.snapshot()
+    spec = snapshot.runtime_spec_version
     require(
         snapshot.genesis_hash == GENESIS_HASH
-        and type(snapshot.runtime_spec_version) is int
-        and snapshot.runtime_spec_version in RUNTIME_PROFILES
+        and type(spec) is int
+        and spec in RUNTIME_PROFILES
         and type(snapshot.transaction_version) is int
-        and snapshot.transaction_version == 1
+        and snapshot.transaction_version == RUNTIME_TRANSACTION_VERSIONS.get(spec)
         and snapshot.chain == "Bittensor",
         "unreviewed funding chain/runtime",
     )
-    metadata_sha256, code_hash = RUNTIME_PROFILES[snapshot.runtime_spec_version]
+    metadata_sha256, code_hash = RUNTIME_PROFILES[spec]
     require(
         rpc.call("state_getStorageHash", ["0x3a636f6465", snapshot.head_hash]) == code_hash,
         "runtime code differs",
@@ -165,7 +170,10 @@ def chain_scope(rpc):
 def retained_runtime(unsigned):
     version = unsigned.get("spec_version") if type(unsigned) is dict else None
     require(
-        type(version) is int and version in RUNTIME_PROFILES, "unreviewed retained funding runtime"
+        type(version) is int
+        and version in RUNTIME_PROFILES
+        and version in RUNTIME_TRANSACTION_VERSIONS,
+        "unreviewed retained funding runtime",
     )
     return version
 
@@ -186,6 +194,7 @@ def matched_execution(rpc, match, version):
         "funding execution parent differs",
     )
     metadata_sha256, code_hash = RUNTIME_PROFILES[version]
+    transaction_version = RUNTIME_TRANSACTION_VERSIONS[version]
     for digest in (parent, block_hash):
         runtime = rpc.call("state_getRuntimeVersion", [digest])
         require(
@@ -193,7 +202,7 @@ def matched_execution(rpc, match, version):
             and type(runtime.get("specVersion")) is int
             and runtime["specVersion"] == version
             and type(runtime.get("transactionVersion")) is int
-            and runtime["transactionVersion"] == 1,
+            and runtime["transactionVersion"] == transaction_version,
             "matched funding runtime differs",
         )
         require(
@@ -302,12 +311,13 @@ def observe(client, rpc, journal, response):
         and prepared["netuid"] == 37,
         "retained funding beneficiary differs",
     )
+    retained = retained_runtime(prepared["unsigned"])
     authority = validate_unsigned_dict(
         prepared["unsigned"],
         expected_address=prepared["coldkey"],
         expected_genesis_hash=GENESIS_HASH,
-        expected_spec_version=retained_runtime(prepared["unsigned"]),
-        expected_transaction_version=1,
+        expected_spec_version=retained,
+        expected_transaction_version=RUNTIME_TRANSACTION_VERSIONS[retained],
         expected_period=64,
         expected_tip=0,
         expected_call_data_sha256=hashlib.sha256(
@@ -524,7 +534,9 @@ def fund(client, wallet, *, bt, rpc, response, alpha_rao, max_fee_rao, execute, 
             expected_address=coldkey,
             expected_genesis_hash=GENESIS_HASH,
             expected_spec_version=snapshot.runtime_spec_version,
-            expected_transaction_version=1,
+            expected_transaction_version=(
+                RUNTIME_TRANSACTION_VERSIONS[snapshot.runtime_spec_version]
+            ),
             expected_period=64,
             expected_tip=0,
             expected_call_data_sha256=hashlib.sha256(transfer_call(hotkey, alpha_rao)).hexdigest(),
