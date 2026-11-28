@@ -15,8 +15,8 @@ CONTRACT (capsule header)
   instead of spawning unbounded threads. Every query is authenticated: the server refuses to
   expose ``/v1/query`` without a request authorizer. The companion HTTP server on the health port
   is health-only and loopback-bound.
-- Startup is posture-checked: serving requires a hotkey-only Bittensor wallet and an endpoint
-  address the policy admits.
+- Startup is posture-checked: serving requires a hotkey-only Bittensor wallet, an endpoint address
+  the policy admits, and a readable signed configuration.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ from subnet.miner.config_schema import ServingConfig, SchemaUnavailable, config_
 from subnet.shared.canonicalization import canonical_bytes, content_hash, parse_canonical_json
 from subnet.shared.clock import now_ts
 from subnet.shared.cost_model import cost_model_version, derive_cost_class
+from subnet.shared.network_policy import AxonEndpointPolicy, AxonEndpointPolicyError
 from subnet.shared.signing import work_id_v2_signed_bytes
 from subnet.shared.wallet_view import assert_hotkey_only_wallet_view
 
@@ -410,15 +411,15 @@ def minter_from_env() -> WorkIdMinter:
 
 
 def validate_miner_startup_posture(environ=None) -> None:
-    """Reject serving with an incomplete chain identity, nonce store or publication state.
+    """Refuse to serve with an incomplete chain identity, an unguarded wallet, an endpoint
+    address the policy cannot admit, or no way to read the signed configuration.
 
-    Every independently checkable problem is collected first, so one restart reports the
-    whole misconfiguration instead of one missing key per restart.
+    There is one posture. Every independently checkable problem is collected first, so one
+    restart reports the whole misconfiguration instead of one missing key per restart.
     """
 
     env = os.environ if environ is None else environ
     problems: list[str] = []
-    environment = env.get("AURELIUS_ENV", "prod")
     for key in (
         "AURELIUS_BITTENSOR_NONCE_DB",
         "AURELIUS_AXON_PUBLISH_STATE_DIR",
@@ -445,27 +446,16 @@ def validate_miner_startup_posture(environ=None) -> None:
         or any(character not in "0123456789abcdefABCDEF" for character in genesis[2:])
     ):
         problems.append("AURELIUS_AXON_EXPECTED_GENESIS_HASH must be an exact 32-byte hash")
-    if problems:
-        raise ValueError("; ".join(problems))
-    if environment == "testlab":
-        return
+    if env.get("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET") != "true":
+        problems.append("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET must be 'true' to serve")
+    try:
+        AxonEndpointPolicy.build(allowed_cidrs=env.get("AURELIUS_AXON_ALLOWED_CIDRS"))
+    except AxonEndpointPolicyError as exc:
+        problems.append(str(exc))
     try:
         config_source(env)
     except (SchemaUnavailable, ValueError) as exc:
         problems.append(str(exc))
-    expected = {"AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true"}
-    for key, wanted in expected.items():
-        if env.get(key) != wanted:
-            problems.append(f"{key} must be {wanted!r} outside AURELIUS_ENV=testlab")
-    if not env.get("AURELIUS_BITTENSOR_NONCE_DB"):
-        problems.append("AURELIUS_BITTENSOR_NONCE_DB is required outside AURELIUS_ENV=testlab")
-    profile = env.get("AURELIUS_AXON_ENDPOINT_PROFILE", "public")
-    allowed_profiles = {"public", "cohost"} if environment == "testnet-full" else {"public"}
-    if profile not in allowed_profiles:
-        problems.append(
-            "AURELIUS_AXON_ENDPOINT_PROFILE must be "
-            f"{sorted(allowed_profiles)!r} in environment {environment!r}"
-        )
     if problems:
         raise ValueError("; ".join(problems))
 

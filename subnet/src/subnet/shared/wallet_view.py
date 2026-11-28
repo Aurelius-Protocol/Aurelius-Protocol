@@ -2,7 +2,7 @@
 
 CONTRACT (capsule header)
 - The guard inspects metadata and directory entries only; it never opens key or public-document
-  bytes. The independently generated testnet-full view is the authority for their contents.
+  bytes. The script that generated the view is the authority for their contents.
 - A guarded long-running process receives exactly ``coldkeypub.txt`` and ``hotkeys/<name>`` plus
   ``hotkeys/<name>pub.txt``. A private ``coldkey`` (including a dangling symlink) is fatal.
 - All view directories/files are owner-only, regular, and non-symlink. This module is stdlib-only

@@ -13,7 +13,7 @@ CONTRACT (capsule header)
   consumed — the ingress's own digest check refuses the mismatched body regardless.
 - An injected transport is vetted before any request: an opener whose declared handlers include
   a redirect-following handler is refused (only a ``_NoRedirectHandler`` may carry redirects).
-- Transport fails closed: https only (plain http solely for the localhost/127.0.0.1 testlab),
+- Transport fails closed: https only (plain http solely for localhost/127.0.0.1),
   no ambient proxy, no redirects (every 3xx is a typed ``UploadError``), and every non-200/201
   answer is a typed ``UploadError(code, status)`` carrying the ingress refusal code.
 - An early HTTP reply may close the peer's read side during upload. A broken pipe then
@@ -64,7 +64,7 @@ _FRAMING_OVERHEAD_BYTES: Final = 16  # two u64 big-endian length prefixes
 _HASH_CHUNK_BYTES: Final = 1 << 20
 _OPEN_TIMEOUT_S: Final = 600.0
 _MAX_RESPONSE_BYTES: Final = 65536  # the ingress ack is a tiny JSON object
-_LOCAL_HTTP_HOSTS: Final = frozenset({"localhost", "127.0.0.1"})  # testlab only
+_LOCAL_HTTP_HOSTS: Final = frozenset({"localhost", "127.0.0.1"})  # the one plain-http allowance
 
 
 class BundleError(ValueError):
@@ -201,13 +201,13 @@ def _body_chunks(prepared: PreparedBundle, chunk_bytes: int) -> Iterator[bytes]:
 
 
 def _is_local_url(base_url: str) -> bool:
-    """True only for the localhost/127.0.0.1 testlab targets (the dev-wallet seam's home)."""
+    """True only for localhost/127.0.0.1 targets: the one place plain http is allowed."""
     host = urllib.parse.urlsplit(base_url).hostname
     return host is not None and host.lower() in _LOCAL_HTTP_HOSTS
 
 
 def _upload_url(base_url: str) -> str:
-    """The exact ``PUT`` target: https, or plain http solely for the localhost testlab."""
+    """The exact ``PUT`` target: https, or plain http solely for localhost/127.0.0.1."""
     parsed = urllib.parse.urlsplit(base_url)
     host = parsed.hostname
     https = parsed.scheme == "https"

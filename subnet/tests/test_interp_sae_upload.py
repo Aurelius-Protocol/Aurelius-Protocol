@@ -2,7 +2,7 @@
 
 No wall clock, no network, no randomness beyond sr25519's deliberate signature
 randomization: HTTP is exercised through an injected fake opener, the wallet is the
-deterministic testlab dev pair, and the timestamp is a frozen constant. The cross-package case — that the client's bytes satisfy the sidecar's ``UploadVerifier``
+stand-in with a fixed key pair, and the timestamp is a frozen constant. The cross-package case — that the client's bytes satisfy the sidecar's ``UploadVerifier``
 unchanged (step-11 acceptance) — lives in
 ``sidecars/artifact-ingress/tests/test_http.py`` instead. It was here, importing
 ``artifact_ingress.auth``, until the feature gate found that the D5 public projection copies

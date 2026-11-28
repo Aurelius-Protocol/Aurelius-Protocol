@@ -3,8 +3,9 @@
 CONTRACT (capsule header)
 - The request carries the exact v2 authorization context (validator audience,
   64-hex request identity, and authoritative fanout window) plus operator-defined task metadata;
-  `candidate_source=staging` carries NO candidate config, while testlab-only `inline` carries
-  `config_json`. The response carries the §3.1 envelope VERBATIM as one JSON string
+  `candidate_source=staging` carries NO candidate config; a miner refuses `inline`, which would
+  carry config chosen by the validator. The response carries the §3.1 envelope VERBATIM as one
+  JSON string
   as the ordinary JSON response. V11 btauth signs the exact raw request bytes and binds them to
   method, path, sender, receiver and nonce; the Aurelius work-id independently signs the response.
 - A valid request with no eligible staged work returns HTTP 204 with no body. It carries

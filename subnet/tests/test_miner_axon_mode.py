@@ -28,7 +28,6 @@ from subnet.miner.axon_serve import (
     _validate_planned_serve_axon_call,
     _validate_serve_axon_fee,
     advertised_port,
-    authorize_testnet_axon_publication,
     blacklist_decision,
     build_envelope_json,
     guarded_publish_once,
@@ -104,15 +103,16 @@ def test_btauth_mode_without_bt_is_a_clean_seam(monkeypatch, tmp_path):
 
     from subnet.miner.axon_serve import serve_axon_forever
 
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "btauth")
     monkeypatch.setenv("AURELIUS_BITTENSOR_NONCE_DB", "/unused/nonces.sqlite3")
     monkeypatch.setenv("AURELIUS_AXON_PUBLISH_STATE_DIR", str(tmp_path / "axon-publish"))
     monkeypatch.setenv("AURELIUS_AXON_EXPECTED_CHAIN_NAME", "Development")
     monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "0x" + "cd" * 32)
     monkeypatch.setenv("AURELIUS_RUNTIME_SPEC_PIN", "432")
-    monkeypatch.setenv("CHAIN_ID", "localnet")
+    monkeypatch.setenv("CHAIN_ID", "development")
     monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
+    monkeypatch.setenv("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET", "true")
+    monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", "ab" * 32)
+    monkeypatch.setenv("CENTRAL_API_URL", "http://127.0.0.1:4000")
     monkeypatch.setattr(
         subject,
         "require_bittensor_v11",
@@ -395,33 +395,15 @@ def test_guarded_axon_publish_poll_exhaustion_remains_non_retryable(tmp_path):
     assert calls["publish"] == 1
 
 
-def test_testnet_axon_ack_is_exact_and_checked_before_intent(tmp_path):
-    expected = "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES"
-    authorize_testnet_axon_publication(expected)
-    for invalid in (None, "", expected + " ", "I_ACKNOWLEDGE_SN455_AXON_ENDPOINT_UPDATES"):
-        with pytest.raises(AxonPublishError, match="acknowledgement"):
-            authorize_testnet_axon_publication(invalid)
-
-    with pytest.raises(AxonPublishError, match="acknowledgement"):
-        guarded_publish_once(
-            tmp_path,
-            {"hotkey": "5Miner", "ip": "172.30.55.10", "port": 8090},
-            lambda: {"matches": False, "finalized_block_number": 100},
-            lambda: pytest.fail("missing acknowledgement must not publish"),
-            authorize_publish=lambda: authorize_testnet_axon_publication("wrong"),
-        )
-    assert not (tmp_path / "intent.json").exists()
-
-
-def test_already_exact_axon_needs_no_mutation_acknowledgement(tmp_path):
+def test_an_already_exact_axon_needs_no_chain_write(tmp_path):
     result = guarded_publish_once(
         tmp_path,
         {"hotkey": "5Miner", "ip": "172.30.55.10", "port": 8090},
         lambda: {"matches": True, "finalized_block_number": 100},
         lambda: pytest.fail("an exact tuple must not publish"),
-        authorize_publish=lambda: pytest.fail("a no-write read-back must not request authority"),
     )
     assert result["status"] == "already_exact_no_submission"
+    assert not (tmp_path / "intent.json").exists()
 
 
 def test_publish_evidence_rejects_same_size_in_place_mutation_while_reading(tmp_path, monkeypatch):
@@ -558,7 +540,6 @@ def _install_external_publish_rpc(monkeypatch, *, finalized_block_number=123):
         "AURELIUS_AXON_EXPECTED_GENESIS_HASH",
         _EXTERNAL_GENESIS,
     )
-    monkeypatch.setenv("AURELIUS_ENV", "testnet-full")
     monkeypatch.setenv("SUBSTRATE_URL", "wss://test.example:443")
     return instances
 
@@ -1068,10 +1049,6 @@ def test_external_publish_waits_for_independent_finality_without_resubmitting(
         monkeypatch,
         finalized_block_number=lambda: 123 if finality["caught_up"] else 110,
     )
-    monkeypatch.setenv(
-        "AURELIUS_TESTNET_AXON_SERVE_ACK",
-        "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES",
-    )
     metagraphs = iter(
         (
             _external_publish_metagraph(endpoint=""),
@@ -1232,10 +1209,6 @@ def _install_external_recovery_harness(monkeypatch, root, *, include_match=True)
     import subnet.miner.axon_serve as subject
 
     _install_external_publish_rpc(monkeypatch)
-    monkeypatch.setenv(
-        "AURELIUS_TESTNET_AXON_SERVE_ACK",
-        "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES",
-    )
     state = {
         "height": 100,
         "include_match": include_match,
@@ -1545,12 +1518,7 @@ def test_external_publish_records_exact_finalized_causal_fee_evidence(
     )
     monkeypatch.setenv("AURELIUS_RUNTIME_SPEC_PIN", "432")
     monkeypatch.setenv("AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN", "1")
-    monkeypatch.setenv("AURELIUS_ENV", "testnet-full")
     monkeypatch.setenv("SUBSTRATE_URL", "wss://test.example:443")
-    monkeypatch.setenv(
-        "AURELIUS_TESTNET_AXON_SERVE_ACK",
-        "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES",
-    )
 
     class Rpc:
         def __init__(self, endpoint):
@@ -2020,27 +1988,24 @@ def test_health_reports_serving_counters_and_readiness_keeps_them():
     assert replies[-1] == (503, {"status": "publishing"})
 
 
-def test_startup_posture_reports_every_missing_btauth_key_at_once():
+def test_startup_reports_every_missing_requirement_at_once():
     """One restart reports the whole misconfiguration, not one missing key per restart."""
 
     with pytest.raises(ValueError) as excinfo:
-        validate_miner_startup_posture(
-            {
-                "AURELIUS_ENV": "testlab",
-                "AURELIUS_TRANSPORT": "btauth",
-                "AURELIUS_AXON_PUBLISH_STATE_DIR": "/tmp/publish",
-                "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "name",
-            }
-        )
+        validate_miner_startup_posture({})
     message = str(excinfo.value)
-    for key in (
+    for name in (
         "AURELIUS_BITTENSOR_NONCE_DB",
+        "AURELIUS_AXON_PUBLISH_STATE_DIR",
+        "AURELIUS_AXON_EXPECTED_CHAIN_NAME",
         "AURELIUS_AXON_EXPECTED_GENESIS_HASH",
         "AURELIUS_RUNTIME_SPEC_PIN",
         "CHAIN_ID",
         "SUBSTRATE_URL",
+        "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET",
+        "CENTRAL_API_URL",
     ):
-        assert key in message
+        assert name in message
 
 
 def test_caller_rate_limiter_is_per_caller_and_window_bounded():
@@ -2248,15 +2213,14 @@ def test_startup_identifies_the_chain_by_an_exact_genesis_hash():
     """No sentinel and no environment label stands in for a chain identity."""
 
     posture = {
-        "AURELIUS_ENV": "testlab",
         "AURELIUS_BITTENSOR_NONCE_DB": "/tmp/nonces.sqlite3",
         "AURELIUS_AXON_PUBLISH_STATE_DIR": "/tmp/axon-publish",
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Development",
         "AURELIUS_RUNTIME_SPEC_PIN": "432",
-        "CHAIN_ID": "localnet",
-        "SUBSTRATE_URL": "ws://subtensor:9944",
+        "CHAIN_ID": "development",
+        "SUBSTRATE_URL": "ws://localhost:9944",
     }
-    for genesis in ("observe-once-testlab", "0x123", "0x" + "zz" * 32, "ab" * 32):
+    for genesis in ("not-a-hash", "0x123", "0x" + "zz" * 32, "ab" * 32):
         broken = dict(posture, AURELIUS_AXON_EXPECTED_GENESIS_HASH=genesis)
         with pytest.raises(ValueError, match="AURELIUS_AXON_EXPECTED_GENESIS_HASH"):
             validate_miner_startup_posture(broken)
@@ -2268,7 +2232,6 @@ def test_an_invalid_endpoint_fails_before_sdk_or_state_mutation(monkeypatch, tmp
 
     publish_dir = tmp_path / "must-not-be-created"
     values = {
-        "AURELIUS_ENV": "testlab",
         "AURELIUS_BITTENSOR_NONCE_DB": str(tmp_path / "must-not-open.sqlite3"),
         "AURELIUS_AXON_PUBLISH_STATE_DIR": str(publish_dir),
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Development",
@@ -2404,34 +2367,47 @@ def test_sdk_block_decode_must_match_independent_canonical_block(fault):
         )
 
 
-def test_miner_production_posture_rejects_development_seams():
-    secure = {
+def _serving_posture():
+    """A complete, valid posture for a chain that is not the mainnet."""
+    return {
         "CONFIG_SIGNING_PUBKEY": "ab" * 32,
         "CENTRAL_API_URL": "http://central-api:4000",
-        "AURELIUS_ENV": "prod",
-        "AURELIUS_TRANSPORT": "btauth",
-        "AURELIUS_CLOCK": "real",
         "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
-        "AURELIUS_AXON_ENDPOINT_PROFILE": "public",
         "AURELIUS_BITTENSOR_NONCE_DB": "/var/lib/aurelius/btauth-nonces.sqlite3",
         "AURELIUS_AXON_PUBLISH_STATE_DIR": "/var/lib/aurelius/axon-publish",
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Bittensor",
         "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "0x" + "ab" * 32,
         "AURELIUS_RUNTIME_SPEC_PIN": "432",
-        "CHAIN_ID": "bittensor-mainnet:reviewed-genesis",
-        "SUBSTRATE_URL": "wss://mainnet.example:443",
+        "CHAIN_ID": "development",
+        "SUBSTRATE_URL": "wss://chain.example:443",
     }
-    validate_miner_startup_posture(secure)
+
+
+def test_startup_admits_one_posture_on_any_chain():
+    """What identifies a chain is its genesis hash and pins. A local chain's plain `ws://`
+    endpoint and a private advertised network are ordinary settings."""
+    validate_miner_startup_posture(_serving_posture())
+    validate_miner_startup_posture(
+        dict(
+            _serving_posture(),
+            SUBSTRATE_URL="ws://localhost:9944",
+            AURELIUS_AXON_ALLOWED_CIDRS="100.100.0.0/16,10.200.0.9/32",
+        )
+    )
+
+
+def test_startup_reports_every_broken_requirement():
+    posture = _serving_posture()
 
     for endpoint in (
-        "wss://operator@mainnet.example:443",
-        "wss://mainnet.example:443/rpc",
-        "wss://mainnet.example:443?unsafe=1",
-        "wss://mainnet.example:443#fragment",
-        " wss://mainnet.example:443",
+        "wss://operator@chain.example:443",
+        "wss://chain.example:443/rpc",
+        "wss://chain.example:443?unsafe=1",
+        "wss://chain.example:443#fragment",
+        " wss://chain.example:443",
     ):
         with pytest.raises(ValueError, match="SUBSTRATE_URL"):
-            validate_miner_startup_posture(dict(secure, SUBSTRATE_URL=endpoint))
+            validate_miner_startup_posture(dict(posture, SUBSTRATE_URL=endpoint))
 
     for key, bad in (
         ("CONFIG_SIGNING_PUBKEY", ""),
@@ -2444,8 +2420,8 @@ def test_miner_production_posture_rejects_development_seams():
         ("AURELIUS_RUNTIME_SPEC_PIN", ""),
         ("CHAIN_ID", ""),
         ("SUBSTRATE_URL", ""),
-        ("AURELIUS_AXON_ENDPOINT_PROFILE", "testlab-private"),
+        ("AURELIUS_AXON_ALLOWED_CIDRS", "8.8.8.0/24"),
     ):
-        broken = dict(secure, **{key: bad})
+        broken = dict(posture, **{key: bad})
         with pytest.raises(ValueError, match=key):
             validate_miner_startup_posture(broken)

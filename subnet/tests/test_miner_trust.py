@@ -45,11 +45,7 @@ def test_production_startup_accepts_bundled_key():
     validate_miner_startup_posture(
         {
             "CENTRAL_API_URL": "https://central.aureliusaligned.ai",
-            "AURELIUS_ENV": "mainnet",
-            "AURELIUS_TRANSPORT": "btauth",
-            "AURELIUS_CLOCK": "real",
             "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
-            "AURELIUS_AXON_ENDPOINT_PROFILE": "public",
             "AURELIUS_BITTENSOR_NONCE_DB": "/state/nonces.sqlite3",
             "AURELIUS_AXON_PUBLISH_STATE_DIR": "/state/axon",
             "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Bittensor",

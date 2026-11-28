@@ -1,8 +1,11 @@
 """Pure Axon endpoint policy shared by miner publication and validator discovery.
 
-Production admits only literal global-unicast addresses. Private Docker/cohost addresses require
-an explicit test-only profile *and* explicit CIDRs; profile typos and environment/profile mismatch
-fail startup instead of weakening egress policy.
+A miner may advertise a literal global-unicast address. It may advertise another one only when
+the operator lists that address's network in ``AURELIUS_AXON_ALLOWED_CIDRS``. A listed network
+must consist of addresses that are not globally routable, so private ranges and shared address
+space both qualify and a public block does not. Loopback, link-local, multicast, reserved and
+unspecified addresses are never admitted, and a malformed value fails startup instead of
+widening the policy.
 """
 
 from __future__ import annotations
@@ -11,56 +14,32 @@ from dataclasses import dataclass
 
 
 class AxonEndpointPolicyError(ValueError):
-    """The endpoint profile is malformed or inappropriate for the selected environment."""
+    """The endpoint address, or the networks allowed for it, are malformed."""
 
 
 @dataclass(frozen=True)
 class AxonEndpointPolicy:
-    environment: str
-    profile: str
     allowed_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
 
     @classmethod
-    def build(
-        cls,
-        *,
-        environment: str,
-        profile: str,
-        allowed_cidrs: str | None = None,
-    ) -> "AxonEndpointPolicy":
-        if profile == "public":
-            return cls(environment=environment, profile=profile)
-
-        permitted_environment = {
-            "testlab-private": "testlab",
-            "cohost": "testnet-full",
-        }.get(profile)
-        if permitted_environment is None:
-            raise AxonEndpointPolicyError(
-                "AURELIUS_AXON_ENDPOINT_PROFILE must be public, testlab-private, or cohost"
-            )
-        if environment != permitted_environment:
-            raise AxonEndpointPolicyError(
-                f"{profile} is a test-only Axon endpoint profile for {permitted_environment}"
-            )
-        if not isinstance(allowed_cidrs, str) or not allowed_cidrs.strip():
-            raise AxonEndpointPolicyError(
-                f"{profile} requires non-empty AURELIUS_AXON_ALLOWED_CIDRS"
-            )
+    def build(cls, *, allowed_cidrs: str | None = None) -> "AxonEndpointPolicy":
+        if allowed_cidrs is None or not allowed_cidrs.strip():
+            return cls()
         networks = []
         try:
             for raw in allowed_cidrs.split(","):
                 network = ipaddress.ip_network(raw.strip(), strict=True)
-                if not network.is_private:
+                if network.network_address.is_global or network.broadcast_address.is_global:
                     raise AxonEndpointPolicyError(
-                        f"{profile} CIDRs must be private networks, got {network}"
+                        "AURELIUS_AXON_ALLOWED_CIDRS must list networks of addresses that are "
+                        f"not globally routable, got {network}"
                     )
                 networks.append(network)
         except ValueError as exc:
             raise AxonEndpointPolicyError(f"invalid AURELIUS_AXON_ALLOWED_CIDRS: {exc}") from None
         if len(networks) != len(set(networks)):
             raise AxonEndpointPolicyError("AURELIUS_AXON_ALLOWED_CIDRS contains duplicates")
-        return cls(environment=environment, profile=profile, allowed_networks=tuple(networks))
+        return cls(allowed_networks=tuple(networks))
 
     def allows(self, raw_ip: object) -> bool:
         try:
@@ -75,8 +54,8 @@ class AxonEndpointPolicy:
             or address.is_reserved
         ):
             return False
-        if self.profile == "public":
-            return address.is_global
+        if address.is_global:
+            return True
         return any(
             address.version == network.version and address in network
             for network in self.allowed_networks
@@ -85,6 +64,7 @@ class AxonEndpointPolicy:
     def require(self, raw_ip: object) -> str:
         if not self.allows(raw_ip):
             raise AxonEndpointPolicyError(
-                f"Axon endpoint {raw_ip!r} is forbidden by profile {self.profile!r}"
+                f"Axon endpoint {raw_ip!r} is forbidden: it is not a global-unicast address "
+                "and its network is not in AURELIUS_AXON_ALLOWED_CIDRS"
             )
         return str(ipaddress.ip_address(raw_ip))
