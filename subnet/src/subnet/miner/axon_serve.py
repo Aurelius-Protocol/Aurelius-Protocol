@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from subnet.axon_protocol import (
-    CANDIDATE_SOURCE_INLINE,
+    CANDIDATE_SOURCE_STAGING,
     MAX_CONFIG_JSON_BYTES,
     PROTOCOL_VERSION,
 )
@@ -89,7 +89,6 @@ from subnet.miner.prepared_extrinsic import (
     validate_submission_claim_evidence,
     validate_unsigned_dict,
 )
-from subnet.shared.canonicalization import parse_canonical_json
 from subnet.shared.network_policy import AxonEndpointPolicy
 
 
@@ -510,14 +509,14 @@ def build_envelope_json(
     fanout_window=-1,
     validator_version="",
     protocol_version=PROTOCOL_VERSION,
-    candidate_source=CANDIDATE_SOURCE_INLINE,
+    candidate_source=CANDIDATE_SOURCE_STAGING,
     *,
     candidate_resolver=None,
 ) -> str:
     """The forward body, refusals-as-empty (the validator maps an empty envelope to
-    MinerUnreachable): size cap, miner-owned candidate resolution, then the SAME minter as http
-    mode. ``config_json`` is decoded only for explicit inline compatibility; staging mode never
-    treats validator bytes as the candidate."""
+    MinerUnreachable): size cap, miner-owned candidate resolution, then the SAME minter as the
+    authenticated wire. ``config_json`` is bounded but never decoded: validator bytes are not
+    the candidate."""
     try:
         if (
             not isinstance(config_json, str)
@@ -534,8 +533,6 @@ def build_envelope_json(
             "task_type": task_type,
             "schema_version": int(schema_version),
         }
-        if candidate_source == CANDIDATE_SOURCE_INLINE:
-            request["config"] = parse_canonical_json(config_json)
         resolve_candidate = candidate_resolver or candidate_for_request
         envelope = minter.envelope(
             resolve_candidate(request),

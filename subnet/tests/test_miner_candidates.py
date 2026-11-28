@@ -12,15 +12,6 @@ from subnet.miner.staging import ELIGIBLE_FANOUT_WINDOW, StagingPool
 pytestmark = pytest.mark.miner
 
 
-def _testlab_posture(monkeypatch):
-    """The exact local posture where inline carriage and legacy unscoped pools remain legal."""
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("CHAIN_ID", "localnet")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "observe-once-testlab")
-    monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "http")
-
-
 _SCHEMA = {
     "schema_version": 1,
     "required": ["payload"],
@@ -52,17 +43,21 @@ def _pool(tmp_path, *items):
     return pool
 
 
-def test_staging_request_uses_first_valid_miner_item_and_ignores_validator_config(
-    tmp_path, monkeypatch
-):
-    # Legacy append-order pools are confined to the local testlab posture (production requires
-    # window-scoped rows); the selection behavior itself is unchanged under that posture.
-    _testlab_posture(monkeypatch)
+def test_staging_request_skips_the_invalid_row_and_ignores_validator_config(tmp_path):
     pool = _pool(
         tmp_path,
-        {"task_type": "synthetic", "schema_version": 1, "config": {"invalid": "skip"}},
-        {"task_type": "synthetic", "schema_version": 1, "config": {"payload": "miner-first"}},
-        {"task_type": "synthetic", "schema_version": 1, "config": {"payload": "miner-second"}},
+        {
+            "task_type": "synthetic",
+            "schema_version": 1,
+            "config": {"invalid": "skip"},
+            ELIGIBLE_FANOUT_WINDOW: 7,
+        },
+        {
+            "task_type": "synthetic",
+            "schema_version": 1,
+            "config": {"payload": "miner-owned"},
+            ELIGIBLE_FANOUT_WINDOW: 7,
+        },
     )
 
     candidate = candidate_for_request(
@@ -74,8 +69,29 @@ def test_staging_request_uses_first_valid_miner_item_and_ignores_validator_confi
     assert candidate == {
         "task_type": "synthetic",
         "schema_version": 1,
-        "config": {"payload": "miner-first"},
+        "config": {"payload": "miner-owned"},
     }
+
+
+def test_two_valid_rows_for_one_window_are_an_ambiguity_and_fail_closed(tmp_path):
+    """One exact-window candidate must be stable for every validator: the pool never picks."""
+    pool = _pool(
+        tmp_path,
+        {
+            "task_type": "synthetic",
+            "schema_version": 1,
+            "config": {"payload": "first"},
+            ELIGIBLE_FANOUT_WINDOW: 7,
+        },
+        {
+            "task_type": "synthetic",
+            "schema_version": 1,
+            "config": {"payload": "second"},
+            ELIGIBLE_FANOUT_WINDOW: 7,
+        },
+    )
+    with pytest.raises(CandidateUnavailable, match="multiple valid staged candidates"):
+        candidate_for_request(_request(), pool=pool, schema_loader=lambda _task_type: _SCHEMA)
 
 
 @pytest.mark.parametrize(
@@ -132,29 +148,16 @@ def test_malformed_jsonl_pool_fails_closed(tmp_path):
         candidate_for_request(_request(), pool=pool, schema_loader=lambda _task_type: _SCHEMA)
 
 
-def test_inline_source_preserves_existing_local_and_one_shot_behavior(monkeypatch):
-    _testlab_posture(monkeypatch)
-    request = _request(candidate_source="inline", config={"payload": "legacy-fixture"})
-    assert candidate_for_request(request) == {
-        "task_type": "synthetic",
-        "schema_version": 1,
-        "config": {"payload": "legacy-fixture"},
-    }
-
-
-def test_inline_source_is_refused_outside_the_local_testlab_posture(monkeypatch):
-    """A permitted validator must not make a production miner sign validator-chosen config."""
-    for key in ("AURELIUS_ENV", "CHAIN_ID", "AURELIUS_AXON_EXPECTED_GENESIS_HASH", "SUBSTRATE_URL"):
-        monkeypatch.delenv(key, raising=False)
+def test_inline_source_is_refused():
+    """A permitted validator must not make a miner sign validator-chosen config: a candidate
+    comes only from the miner's staging pool."""
     request = _request(candidate_source="inline", config={"payload": "smuggled"})
-    with pytest.raises(CandidateUnavailable, match="testlab posture"):
+    with pytest.raises(CandidateUnavailable, match="staging pool"):
         candidate_for_request(request)
 
 
-def test_unscoped_legacy_pool_is_refused_outside_the_local_testlab_posture(tmp_path, monkeypatch):
-    """Production serving requires window-scoped rows so one stable candidate serves a window."""
-    for key in ("AURELIUS_ENV", "CHAIN_ID", "AURELIUS_AXON_EXPECTED_GENESIS_HASH", "SUBSTRATE_URL"):
-        monkeypatch.delenv(key, raising=False)
+def test_unscoped_pool_rows_are_refused(tmp_path):
+    """Serving requires window-scoped rows so one stable candidate serves a window."""
     pool = _pool(
         tmp_path,
         {"task_type": "synthetic", "schema_version": 1, "config": {"payload": "legacy"}},

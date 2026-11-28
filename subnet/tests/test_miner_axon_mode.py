@@ -50,12 +50,8 @@ from subnet.miner.serve import (
     serve as serve_plain_http,
     validate_miner_startup_posture,
 )
-from subnet.miner.staging import StagingPool
-from subnet.axon_protocol import (
-    CANDIDATE_SOURCE_STAGING,
-    MAX_CONFIG_JSON_BYTES,
-    PROTOCOL_VERSION,
-)
+from subnet.miner.staging import ELIGIBLE_FANOUT_WINDOW, StagingPool
+from subnet.axon_protocol import MAX_CONFIG_JSON_BYTES
 from subnet.shared.signing import keypair_from_seed, sign
 from subnet.shared.ss58 import ss58_encode
 from subnet.miner.prepared_extrinsic import (
@@ -1736,25 +1732,45 @@ def test_advertised_axon_port_is_independent_and_strict(monkeypatch):
             advertised_port(8091)
 
 
-def test_forward_body_mints_the_same_envelope_as_http_mode(monkeypatch):
-    # inline candidate carriage is confined to the local testlab posture; the parity claim of
-    # this test is about the WIRE, so it runs under exactly that posture.
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("CHAIN_ID", "localnet")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "observe-once-testlab")
-    monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "http")
+_FORWARD_SCHEMA = {
+    "schema_version": 1,
+    "required": ["payload"],
+    "additional_fields": False,
+    "fields": {"payload": {"type": "string"}},
+}
+
+
+def _staged_resolver(tmp_path, payload="miner-owned"):
+    """A candidate resolver backed by a pool with one window-scoped row for `_WINDOW`."""
+    pool = StagingPool(tmp_path / "staging.jsonl")
+    pool.add(
+        {
+            "task_type": "synthetic",
+            "schema_version": 1,
+            "config": {"payload": payload},
+            ELIGIBLE_FANOUT_WINDOW: _WINDOW,
+        }
+    )
+    return lambda request: candidate_for_request(
+        request, pool=pool, schema_loader=lambda _task_type: _FORWARD_SCHEMA
+    )
+
+
+def test_forward_body_mints_envelopes_for_miner_pool_candidates(tmp_path):
+    """The validator's config bytes are passed in and ignored: the signed candidate is the
+    miner's staged row."""
     minter = WorkIdMinter("miner-hotkey")
-    payload = _build(minter)
+    payload = _build(minter, candidate_resolver=_staged_resolver(tmp_path))
     envelope = json.loads(payload)
-    # the §3.1 shape, minted by the SAME minter http mode uses
+    # the §3.1 shape, minted by the SAME minter the authenticated wire uses
     assert envelope["task_type"] == "synthetic"
     assert envelope["work_id"]["hotkey_ss58"] == minter.hotkey_ss58
     assert envelope["work_id"]["validator_hotkey_ss58"] == _VALIDATOR
     assert envelope["work_id"]["request_id"] == _REQUEST_ID
     assert envelope["work_id"]["fanout_window"] == _WINDOW
+    assert json.loads(envelope["canonical_config"]) == {"payload": "miner-owned"}
     # fresh work_id per response, same content_hash (the serve contract)
-    envelope2 = json.loads(_build(minter))
+    envelope2 = json.loads(_build(minter, candidate_resolver=_staged_resolver(tmp_path)))
     assert envelope2["content_hash"] == envelope["content_hash"]
     assert envelope2["work_id"]["nonce"] != envelope["work_id"]["nonce"]
     # the coldkey never appears anywhere in the wire payload
@@ -1764,63 +1780,15 @@ def test_forward_body_mints_the_same_envelope_as_http_mode(monkeypatch):
     assert coldkey_ss58 not in payload
 
 
-def test_forward_staging_mode_signs_miner_pool_candidate_not_validator_config(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("CHAIN_ID", "localnet")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "observe-once-testlab")
-    monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "http")
-    pool = StagingPool(tmp_path / "staging.jsonl")
-    pool.add(
-        {
-            "task_type": "synthetic",
-            "schema_version": 1,
-            "config": {"payload": "miner-owned"},
-        }
-    )
-    schema = {
-        "schema_version": 1,
-        "required": ["payload"],
-        "additional_fields": False,
-        "fields": {"payload": {"type": "string"}},
-    }
-
-    def resolve(request):
-        return candidate_for_request(request, pool=pool, schema_loader=lambda _task_type: schema)
-
-    payload = build_envelope_json(
-        WorkIdMinter("miner-hotkey"),
-        "synthetic",
-        1,
-        json.dumps({"payload": "validator-supplied-must-be-ignored"}),
-        request_id=_REQUEST_ID,
-        validator_hotkey_ss58=_VALIDATOR,
-        fanout_window=_WINDOW,
-        validator_version="1.2.3",
-        protocol_version=PROTOCOL_VERSION,
-        candidate_source=CANDIDATE_SOURCE_STAGING,
-        candidate_resolver=resolve,
-    )
-    envelope = json.loads(payload)
-    assert json.loads(envelope["canonical_config"]) == {"payload": "miner-owned"}
-
-
-@pytest.mark.parametrize(
-    "config_json",
-    [
-        "x" * (MAX_CONFIG_JSON_BYTES + 1),  # over the size cap
-        "not json",
-        "\ud800",  # invalid UTF-8 must remain a refusal, never escape the Axon handler
-        None,  # not a string at all
-    ],
-)
-def test_forward_refusals_leave_the_envelope_empty(config_json):
-    # NOTE: a config that PARSES stays opaque data (the http path's posture — canonicalization
-    # accepts any JSON value); the axon wire must never be stricter than http, only size-capped
+def test_forward_config_bytes_are_capped_but_never_decoded(tmp_path):
     minter = WorkIdMinter("miner-hotkey")
-    assert _build(minter, config_json) == ""
+    resolver = _staged_resolver(tmp_path)
+    # over the size cap, not UTF-8, not a string at all: a refusal, never an escaped exception
+    for config_json in ("x" * (MAX_CONFIG_JSON_BYTES + 1), "\ud800", None):
+        assert _build(minter, config_json, candidate_resolver=resolver) == ""
+    # under the cap, the bytes are opaque: "not json" is not the miner's concern
+    payload = _build(minter, "not json", candidate_resolver=resolver)
+    assert json.loads(payload)["task_type"] == "synthetic"
 
 
 def test_http_handler_binds_declared_audience_to_authenticated_btauth_caller():
