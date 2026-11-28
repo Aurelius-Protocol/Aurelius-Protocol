@@ -7,7 +7,8 @@ The original v1 commands are: `deposit`, `balance`, `validate`, `serve` (plan §
 - `validate`: check staged items against the PUBLISHED config_schema (no lane import).
 - `balance`: a public affordability read + the deposit address (no session, no coldkey).
 - `deposit`: historical address read with optional local coldkey unlock.
-- `fund`: separate coldkey funding command, exact native-alpha transfer with durable intent.
+- `fund`: separate coldkey funding command, exact native-alpha transfer with durable intent;
+  `--method gamma` selects the gamma work-token path (check/prepare/execute/status, §14-G7).
 - `observe`: lane-agnostic refresh of charge/refund + validator-progress facts into the local
   journal (the dashboard's data source; absence of evidence stays unknown).
 
@@ -89,18 +90,26 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     fund = sub.add_parser(
-        "fund", help="preview or submit one native-alpha WT purchase on subnet 37"
+        "fund",
+        help="preview or submit one native-alpha WT purchase on subnet 37; "
+        "--method gamma selects the gamma funding path",
     )
+    # ``--method legacy`` (the default) is the deployed native-alpha transfer, unchanged. Its
+    # four mandatory arguments are enforced below with argparse's own message so the legacy
+    # behavior stays identical while ``--method gamma`` read-only actions need no wallet.
     fund.add_argument(
-        "--alpha", required=True, help="exact alpha amount, at most nine decimal places"
+        "--method",
+        choices=("legacy", "gamma"),
+        default="legacy",
+        help="funding method; gamma is check-only unless an action flag is given",
     )
+    fund.add_argument("--alpha", help="exact alpha amount, at most nine decimal places")
     fund.add_argument("--fee-cap-tao", default="0.01")
-    fund.add_argument("--wallet-name", required=True, help="separate coldkey funding wallet")
-    fund.add_argument("--wallet-path", required=True)
+    fund.add_argument("--wallet-name", help="separate coldkey funding wallet")
+    fund.add_argument("--wallet-path")
     fund.add_argument("--hotkey-name", default="default")
     fund.add_argument(
         "--intent-dir",
-        required=True,
         help="durable directory for this one purchase; reuse to observe it",
     )
     fund.add_argument(
@@ -118,6 +127,27 @@ def main(argv: list[str] | None = None) -> int:
     fund.add_argument(
         "--central", default=os.environ.get("CENTRAL_API_URL", "https://central.aureliusaligned.ai")
     )
+    gamma = fund.add_argument_group("gamma method (--method gamma)")
+    gamma.add_argument("--check", action="store_true", help="read-only readiness (the default)")
+    gamma.add_argument(
+        "--prepare", action="store_true", help="obtain + verify a quote and sign one spend"
+    )
+    gamma.add_argument("--status", action="store_true", help="read-only observation + receipt")
+    gamma.add_argument("--pack", help="approved pack id from the signed purchase policy")
+    gamma.add_argument("--gamma-hotkey", help="ss58 of the separate gamma API hotkey (deposit key)")
+    gamma.add_argument("--intent", help="expected intent id (consistency check on prepare)")
+    gamma.add_argument("--era-period-blocks", type=int, default=64)
+    gamma.add_argument(
+        "--mint-setup", action="store_true", help="explicit mint/setup helper (never automatic)"
+    )
+    gamma.add_argument("--mint-tao", help="exact TAO input for the mint")
+    gamma.add_argument("--mint-min-gamma-out", help="minimum gamma atoms out (slippage bound)")
+    gamma.add_argument("--mint-daily-cap", help="optional daily spend cap in gamma atoms")
+    gamma.add_argument(
+        "--confirm-mint-burns-tao",
+        action="store_true",
+        help="separate confirmation required with --mint-setup --execute",
+    )
 
     serve = sub.add_parser("serve", help="serve /v1/query (mint a fresh work_id per request)")
     serve.add_argument("--netuid", type=int, default=int(os.environ.get("NETUID", "2")))
@@ -134,6 +164,90 @@ def main(argv: list[str] | None = None) -> int:
         from subnet.miner.read_client import ReadUnavailable
         from subnet.miner.terms import TermsNotAccepted, ensure_incentives_accepted
 
+        if args.method == "gamma":
+            # Arguments are checked first, then the incentive terms, then the wallet is touched:
+            # the same order as the legacy method below.
+            actions = [
+                name
+                for name, flag in (
+                    ("check", args.check),
+                    ("prepare", args.prepare),
+                    ("status", args.status),
+                    ("mint-setup", args.mint_setup),
+                )
+                if flag
+            ]
+            if args.execute and not any(actions):
+                actions = ["execute"]
+            if len(actions) > 1:
+                fund.error("--check/--prepare/--status/--mint-setup are mutually exclusive")
+            action = actions[0] if actions else "check"
+            if action != "check" and not args.intent_dir:
+                fund.error(action + " requires --intent-dir")
+            if args.execute and action in {"check", "status"}:
+                fund.error(action + " never executes; --execute is for prepare-then-submit")
+            # Bound before the try: the except clause names GammaRefused, and the terms check
+            # inside the try raises before a later import would have bound it.
+            from subnet.miner.gamma_funding import GammaRefused, run as gamma_run
+
+            try:
+                ensure_incentives_accepted(accept_flag=args.accept_incentives)
+                result = gamma_run(
+                    action=action,
+                    base_url=args.central,
+                    endpoint=args.endpoint,
+                    directory=args.intent_dir,
+                    pack=args.pack,
+                    gamma_hotkey=args.gamma_hotkey,
+                    intent=args.intent,
+                    fee_cap=args.fee_cap_tao,
+                    era_period=args.era_period_blocks,
+                    execute=args.execute,
+                    wallet_path=args.wallet_path,
+                    wallet_name=args.wallet_name,
+                    mint_tao=args.mint_tao,
+                    mint_min_out=args.mint_min_gamma_out,
+                    mint_cap=args.mint_daily_cap,
+                    confirm_mint=args.confirm_mint_burns_tao,
+                )
+            except (GammaRefused, FundingRefused, ReadUnavailable, TermsNotAccepted) as exc:
+                print(json.dumps({"status": "refused", "reason": str(exc)}))
+                return 2
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0
+
+        missing = [
+            flag
+            for flag, value in (
+                ("--alpha", args.alpha),
+                ("--wallet-name", args.wallet_name),
+                ("--wallet-path", args.wallet_path),
+                ("--intent-dir", args.intent_dir),
+            )
+            if value is None
+        ]
+        if missing:
+            fund.error("the following arguments are required: " + ", ".join(missing))
+        gamma_only = [
+            "--" + flag
+            for flag, value in (
+                ("check", args.check),
+                ("prepare", args.prepare),
+                ("status", args.status),
+                ("mint-setup", args.mint_setup),
+                ("confirm-mint-burns-tao", args.confirm_mint_burns_tao),
+                ("pack", args.pack),
+                ("gamma-hotkey", args.gamma_hotkey),
+                ("intent", args.intent),
+                ("mint-tao", args.mint_tao),
+                ("mint-min-gamma-out", args.mint_min_gamma_out),
+                ("mint-daily-cap", args.mint_daily_cap),
+                ("era-period-blocks", None if args.era_period_blocks == 64 else "set"),
+            )
+            if value
+        ]
+        if gamma_only:
+            fund.error(", ".join(gamma_only) + " require --method gamma")
         try:
             ensure_incentives_accepted(accept_flag=args.accept_incentives)
             result = run(

@@ -8,8 +8,12 @@ from urllib.parse import urlsplit
 
 
 class ReadUnavailable(RuntimeError):
-    def __init__(self, code: str, status: int = 0):
+    def __init__(self, code: str, status: int = 0, detail: dict | None = None):
         self.code, self.status = code, status
+        # The server's parsed JSON error body when one was readable (e.g. {"error": reason});
+        # None for transport failures. Read-only metadata — callers surface typed reasons,
+        # they never act on an unauthenticated error body alone.
+        self.detail = detail
         super().__init__(code)
 
 
@@ -45,13 +49,16 @@ def request_json(url: str, *, body: dict | None = None) -> dict:
             raw = response.read(2 * 1024**2 + 1)
     except urllib.error.HTTPError as exc:
         code = "http_error"
+        detail = None
         try:
             error = json.loads(exc.read(4097))
             if error == {"error": "epoch_not_found"}:
                 code = "epoch_not_found"
+            if isinstance(error, dict) and isinstance(error.get("error"), str):
+                detail = {"error": error["error"][:128]}
         except (ValueError, OSError):
             pass
-        raise ReadUnavailable(code, exc.code) from None
+        raise ReadUnavailable(code, exc.code, detail) from None
     except (OSError, ValueError) as exc:
         raise ReadUnavailable("network_unavailable") from exc
     if len(raw) > 2 * 1024**2:

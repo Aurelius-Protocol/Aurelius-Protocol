@@ -205,3 +205,77 @@ def test_durable_campaign_staging_and_miner_controls_share_identity_after_restar
     with pytest.raises(StagingSelectionError, match="already selected"):
         StagingPool(path).pin_selection(candidate("replacement"), 7)
     assert path.stat().st_ino == inode
+
+
+@pytest.mark.parametrize(
+    "refusal,accepted",
+    [
+        (None, True),
+        ("refused_before_charge", True),
+        ("refused_before_commit", True),
+        ("unknown_refusal", False),
+    ],
+)
+def test_progress_reads_the_refusals_the_validator_reports(refusal, accepted):
+    """The validator reports `refused_before_commit` when central refused a charge. It is read
+    like the other refusals, and the set stays closed to anything the validator does not report."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from subnet.miner import observation_client
+    from subnet.miner.serve import WorkIdMinter
+    from subnet.shared.config_snapshot import (
+        SNAPSHOT_SIGNATURE_DOMAIN,
+        canonical_hash,
+        null_keys_present,
+    )
+
+    key = Ed25519PrivateKey.from_private_bytes(bytes([53]) * 32)
+    body = {"config_version": 1, "entries": {}}
+    body["null_keys_present"] = null_keys_present(
+        {k: v for k, v in body.items() if k != "null_keys_present"}
+    )
+    config_hash = canonical_hash(body)
+    snapshot = {
+        "version": 1,
+        "body": body,
+        "canonical_hash": config_hash,
+        "signature_hex": key.sign(SNAPSHOT_SIGNATURE_DOMAIN + f"{config_hash}|1".encode()).hex(),
+    }
+    minter = WorkIdMinter("progress-reader")
+    identity = {"hotkey": minter.hotkey_ss58, "content_hash": "a" * 64, "fanout_window": 4}
+
+    def fetch(url, *, body=None):
+        if body is None:
+            return snapshot
+        return {
+            "schema_version": 1,
+            "identity": {k: body[k] for k in ("hotkey", "netuid", "content_hash", "fanout_window")},
+            "validator_hotkey": "5" * 48,
+            "observed_at": 1782900000,
+            "generations": [
+                {
+                    "generation": 0,
+                    "state": "discarded",
+                    "retryable_precharge": False,
+                    "refusal": refusal,
+                    "evaluation": "not_observed",
+                    "refund_review": "not_observed",
+                    "created_at": 1,
+                    "updated_at": 2,
+                }
+            ],
+        }
+
+    request = dict(
+        netuid=37,
+        validator_hotkey="5" * 48,
+        signer=minter.sign_observation,
+        config_pubkey=key.public_key().public_bytes_raw().hex(),
+        fetch=fetch,
+    )
+    if accepted:
+        rows = observation_client.progress("https://example.test", identity, **request)
+        assert rows["generations"][0]["refusal"] == refusal
+    else:
+        with pytest.raises(observation_client.ReadUnavailable, match="invalid_progress"):
+            observation_client.progress("https://example.test", identity, **request)

@@ -104,7 +104,9 @@ from registration fees, alpha and training compute.
 - **Buying.** Transfer subnet alpha stake to the designated work-token wallet. Credit appears
   only after the transfer is finalized and attributed to you. Before sending, confirm the
   current destination, terms and that deposits are enabled. The current base rate is
-  **1 WT per alpha**, with fractional remainders carried exactly per beneficiary.
+  **1 WT per alpha**, with fractional remainders carried exactly per beneficiary. A second way
+  to buy, with gamma (`fund --method gamma`), is in the miner but is **not open**. You are
+  asked to agree to these terms again before it opens.
 - **Spending.** An SAE evaluation costs **10 WT**. One logical candidate is charged once per
   evaluation window; replaying the same commitment does not charge again. A new candidate, or
   the same artifact in a later epoch, is a new charge.

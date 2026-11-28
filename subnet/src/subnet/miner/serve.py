@@ -307,6 +307,22 @@ class WorkIdMinter:
             raise ValueError("appeal signature domain required")
         return self._signer(message)
 
+    def sign_miner_funding_terms(self, message: bytes) -> bytes:
+        """Sign only the read-only ``terms_version: 2`` funding-terms request (gamma §11.1)."""
+        from subnet.miner.gamma_funding import TERMS_V2_DOMAIN
+
+        if not message.startswith(TERMS_V2_DOMAIN + b"\x00"):
+            raise ValueError("funding terms signature domain required")
+        return self._signer(message)
+
+    def sign_gamma_funding_auth(self, message: bytes) -> bytes:
+        """Sign only the purpose-bound gamma quote authorization; never a spend or a charge."""
+        from subnet.miner.gamma_funding import GAMMA_AUTH_DOMAIN
+
+        if not message.startswith(GAMMA_AUTH_DOMAIN + b"\x00"):
+            raise ValueError("gamma funding auth signature domain required")
+        return self._signer(message)
+
     def _next_nonce(self) -> str:
         return secrets.token_hex(32)
 
