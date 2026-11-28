@@ -1,9 +1,10 @@
 """This repository is public and is the miner's one source of truth.
 
-Nothing that belongs to the operator's own infrastructure may live in the package: no
-operator-only module, no retired launch generation or test network, no copied-in extraction
-stamp, no pinned image, no sibling repository, and no name of the operator's hardware. The
-rules are written so that this file does not itself carry any private name.
+Nothing that belongs to the operator's own infrastructure may live in the package or in its
+tests: no operator-only module, no retired launch generation or test network, no copied-in
+extraction stamp, no pinned image, no sibling repository, no name of the operator's hardware,
+and no path into the validator's own records. The rules are written so that this file does not
+itself carry any private name.
 """
 
 import re
@@ -12,14 +13,17 @@ from pathlib import Path
 import pytest
 
 PACKAGE = Path(__file__).resolve().parents[1] / "src" / "subnet"
+TESTS = PACKAGE.parents[1] / "tests"
 REPOSITORY = PACKAGE.parents[2]
 
 FORBIDDEN = {
     "an operator-only package": re.compile(r"subnet[./]operator\b"),
+    "the validator's runtime catalog": re.compile(r"subnet[./]runtime_maintenance\b"),
     "a retired launch generation": re.compile(r"(?i)runtime[ _-]?452"),
     "a retired test network's local delivery": re.compile(r"sn455_artifact_delivery"),
     "a copied-in extraction stamp": re.compile(r"Miner dependency subset"),
     "a pinned image": re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@sha256:[0-9a-f]{64}"),
+    "a path into the validator's records": re.compile(r"\bdocs/(?:evidence|plan|adr)/"),
     # After the organisation in a GitHub URL, the next path segment is this repository, with or
     # without a ".git" suffix.
     "a sibling repository of this organisation": re.compile(
@@ -35,9 +39,17 @@ HARDWARE = re.compile(r"(?i)gh200")
 ALLOWED = {"lanes/interp_sae/stage.py": ('"gh200-sn37-mainnet"', "the validator's profile id")}
 
 
-def sources():
+def package_sources():
     for path in sorted(PACKAGE.rglob("*.py")):
         yield path.relative_to(PACKAGE).as_posix(), path
+
+
+def scanned_test_files():
+    """The test files, except this one: a guard states its own rules as text and cannot be
+    applied to itself. (Not named `test_...`: pytest would collect a generator as a test.)"""
+    for path in sorted(TESTS.rglob("*.py")):
+        if path != Path(__file__).resolve():
+            yield path.relative_to(TESTS).as_posix(), path
 
 
 def offenders_in(lines, relative):
@@ -65,12 +77,30 @@ def test_each_pattern_recognises_what_it_names():
         "https://raw.githubusercontent.com/Aurelius-Protocol/Aurelius-Protocol/main/x.md"
     )
     assert not siblings.search("https://github.com/decoderesearch/SAELens")
+    catalog = FORBIDDEN["the validator's runtime catalog"]
+    assert catalog.search("from subnet.runtime_maintenance.catalog import x")
+    assert catalog.search("import subnet/runtime_maintenance/catalog.py")
+    assert not catalog.search("from subnet.miner.funding_runtime import RUNTIME_PROFILES")
+    records = FORBIDDEN["a path into the validator's records"]
+    assert records.search("docs/evidence/x")
+    assert records.search("docs/plan/x.md")
+    assert records.search("docs/adr/0000-template.md")
+    assert not records.search("[Gamma funding](docs/gamma-funding.md)")
 
 
 def test_the_package_names_none_of_the_operator_s_infrastructure():
     offenders = []
-    for relative, path in sources():
+    for relative, path in package_sources():
         offenders += offenders_in(path.read_text(encoding="utf-8").splitlines(), relative)
+    assert offenders == [], "\n".join(offenders)
+
+
+def test_the_tests_name_none_of_the_operator_s_infrastructure():
+    offenders = []
+    for relative, path in scanned_test_files():
+        offenders += offenders_in(
+            path.read_text(encoding="utf-8").splitlines(), "tests/" + relative
+        )
     assert offenders == [], "\n".join(offenders)
 
 
@@ -83,12 +113,20 @@ def test_each_allowance_still_names_what_it_excuses():
 
 @pytest.mark.parametrize(
     "relative",
-    ["README.md", "INCENTIVES.md", "lanes/README.md", "lanes/lane1.md", ".env.example"],
+    [
+        "README.md",
+        "INCENTIVES.md",
+        "docs/gamma-funding.md",
+        "lanes/README.md",
+        "lanes/lane1.md",
+        ".env.example",
+    ],
 )
 def test_the_guides_name_no_private_infrastructure(relative):
     lines = (REPOSITORY / relative).read_text(encoding="utf-8").splitlines()
     package_only = (
         "an operator-only package",
+        "the validator's runtime catalog",
         "a retired launch generation",
         "a retired test network's local delivery",
     )
