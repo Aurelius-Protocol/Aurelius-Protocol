@@ -778,7 +778,7 @@ def test_a_foreign_gamma_receipt_under_the_same_account_is_skipped_not_refused()
 def test_minter_signers_are_domain_restricted_and_verifiable():
     pair = keypair_from_seed(b"m" * 32)
     minter = WorkIdMinter(
-        "gamma-test", hotkey_ss58=ss58_encode(pair[0]), signer=lambda message: sign(message, pair)
+        hotkey_ss58=ss58_encode(pair[0]), signer=lambda message: sign(message, pair)
     )
     terms = minter.sign_miner_funding_terms(TERMS_V2_DOMAIN + b"\x00" + b"body")
     auth = minter.sign_gamma_funding_auth(GAMMA_AUTH_DOMAIN + b"\x00" + b"body")

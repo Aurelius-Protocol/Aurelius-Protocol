@@ -15,13 +15,12 @@ CONTRACT (capsule header)
   instead of spawning unbounded threads. Every query is authenticated: the server refuses to
   expose ``/v1/query`` without a request authorizer. The companion HTTP server on the health port
   is health-only and loopback-bound.
-- Startup is posture-checked: serving requires Bittensor identity, real time, a hotkey-only wallet
-  view, and an endpoint address the policy admits.
+- Startup is posture-checked: serving requires a hotkey-only Bittensor wallet and an endpoint
+  address the policy admits.
 """
 
 from __future__ import annotations
 
-import hashlib
 import http.server
 import json
 import os
@@ -46,8 +45,7 @@ from subnet.miner.config_schema import ServingConfig, SchemaUnavailable, config_
 from subnet.shared.canonicalization import canonical_bytes, content_hash, parse_canonical_json
 from subnet.shared.clock import now_ts
 from subnet.shared.cost_model import cost_model_version, derive_cost_class
-from subnet.shared.signing import keypair_from_seed, sign, work_id_v2_signed_bytes
-from subnet.shared.ss58 import ss58_encode
+from subnet.shared.signing import work_id_v2_signed_bytes
 from subnet.shared.wallet_view import assert_hotkey_only_wallet_view
 
 
@@ -243,33 +241,18 @@ def start_status_line(stats: ServingStats, prefix: str, *, interval_s: float | N
     threading.Thread(target=run, daemon=True).start()
 
 
-def _wallet(name: str) -> tuple[tuple[bytes, bytes], str]:
-    seed = hashlib.sha256(f"aurelius-testlab-wallet:{name}".encode()).digest()
-    pair = keypair_from_seed(seed)
-    return pair, ss58_encode(pair[0])
-
-
 class WorkIdMinter:
-    """Mints fresh v2 work authorizations with an OS-random nonce for the configured hotkey."""
+    """Mints fresh v2 work authorizations with an OS-random nonce for one hotkey."""
 
-    def __init__(
-        self,
-        hotkey_name: str,
-        *,
-        hotkey_ss58: str | None = None,
-        signer: Callable[[bytes], bytes] | None = None,
-    ):
-        if (hotkey_ss58 is None) != (signer is None):
-            raise ValueError("hotkey_ss58 and signer must be provided together")
-        if signer is None:
-            pair, deterministic_ss58 = _wallet(hotkey_name)
-            self.hotkey_ss58 = deterministic_ss58
-            self._signer = lambda message: sign(message, pair)
-        else:
-            # Production passes the mounted Bittensor wallet's hotkey signer directly.  Keeping
-            # this a callable avoids ever extracting or copying private key material.
-            self.hotkey_ss58 = hotkey_ss58
-            self._signer = signer
+    def __init__(self, *, hotkey_ss58: str, signer: Callable[[bytes], bytes]):
+        if not isinstance(hotkey_ss58, str) or not hotkey_ss58:
+            raise ValueError("hotkey_ss58 is required")
+        if not callable(signer):
+            raise ValueError("signer must be callable")
+        # The mounted Bittensor wallet's hotkey signer is passed in directly. Keeping it a
+        # callable avoids ever extracting or copying private key material.
+        self.hotkey_ss58 = hotkey_ss58
+        self._signer = signer
 
     def sign_observation(self, message: bytes) -> bytes:
         """Sign a domain-separated, read-only observation request using only the hotkey."""
@@ -399,8 +382,7 @@ def load_bittensor_wallet(bt_module=None):
             bt_module = require_bittensor_v11()
         except ImportError as e:
             raise NotImplementedError(
-                "Bittensor application identity needs the optional `bt` extra; "
-                "use AURELIUS_IDENTITY_SOURCE=deterministic for the hermetic dev path"
+                "the miner's identity needs the optional `bt` extra (the chain-bt image)"
             ) from e
     else:
         bt_module = require_bittensor_v11(bt_module)
@@ -412,24 +394,19 @@ def load_bittensor_wallet(bt_module=None):
     )
 
 
-def minter_from_bittensor_wallet(hotkey_name: str, wallet) -> WorkIdMinter:
-    """Bind work-id authorship to the exact hotkey used by the Bittensor wallet."""
+def minter_from_bittensor_wallet(wallet) -> WorkIdMinter:
+    """Bind work-id authorship to the exact hotkey the Bittensor wallet selected."""
     hotkey = wallet.hotkey
     ss58 = str(hotkey.ss58_address)
     signer = getattr(hotkey, "sign", None)
     if not ss58 or not callable(signer):
         raise ValueError("Bittensor wallet hotkey must expose ss58_address and sign(message)")
-    return WorkIdMinter(hotkey_name, hotkey_ss58=ss58, signer=signer)
+    return WorkIdMinter(hotkey_ss58=ss58, signer=signer)
 
 
-def minter_from_env(hotkey_name: str) -> WorkIdMinter:
-    """Select deterministic development identity or the mounted Bittensor hotkey explicitly."""
-    source = os.environ.get("AURELIUS_IDENTITY_SOURCE", "deterministic")
-    if source == "deterministic":
-        return WorkIdMinter(hotkey_name)
-    if source == "bittensor":
-        return minter_from_bittensor_wallet(hotkey_name, load_bittensor_wallet())
-    raise ValueError(f"unknown AURELIUS_IDENTITY_SOURCE {source!r}")
+def minter_from_env() -> WorkIdMinter:
+    """The miner's identity: the hotkey of the mounted Bittensor wallet."""
+    return minter_from_bittensor_wallet(load_bittensor_wallet())
 
 
 def validate_miner_startup_posture(environ=None) -> None:
@@ -476,10 +453,7 @@ def validate_miner_startup_posture(environ=None) -> None:
         config_source(env)
     except (SchemaUnavailable, ValueError) as exc:
         problems.append(str(exc))
-    expected = {
-        "AURELIUS_IDENTITY_SOURCE": "bittensor",
-        "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
-    }
+    expected = {"AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true"}
     for key, wanted in expected.items():
         if env.get(key) != wanted:
             problems.append(f"{key} must be {wanted!r} outside AURELIUS_ENV=testlab")

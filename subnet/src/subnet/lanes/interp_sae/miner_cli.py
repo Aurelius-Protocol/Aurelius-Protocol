@@ -146,7 +146,7 @@ def status_report(args):
         if args.netuid is None:
             raise ValueError("accounting requires --netuid")
         public_key = config_signing_pubkey()
-        minter = minter_from_env(os.environ.get("MINER_HOTKEY", "miner-hotkey"))
+        minter = minter_from_env()
     observations = []
     for attempt in attempts:
         identity = attempt["identity"]

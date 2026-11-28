@@ -6,8 +6,8 @@ import pytest
 from subnet.axon_protocol import CANDIDATE_SOURCE_STAGING, PROTOCOL_VERSION
 from subnet.miner import config_schema
 from subnet.miner.candidates import CandidateUnavailable, candidate_for_request
-from subnet.miner.serve import WorkIdMinter
 from subnet.miner.staging import ELIGIBLE_FANOUT_WINDOW, StagingPool
+from .miner_fixtures import fixed_minter
 
 pytestmark = pytest.mark.miner
 
@@ -18,7 +18,7 @@ _SCHEMA = {
     "additional_fields": False,
     "fields": {"payload": {"type": "string"}},
 }
-_VALIDATOR = WorkIdMinter("validator-hotkey").hotkey_ss58
+_VALIDATOR = fixed_minter("validator-hotkey").hotkey_ss58
 
 
 def _request(**overrides):

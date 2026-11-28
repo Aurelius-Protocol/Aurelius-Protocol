@@ -601,7 +601,7 @@ def run(
 ):
     from subnet.miner.serve import minter_from_env
 
-    minter = minter_from_env(os.environ.get("MINER_HOTKEY", "default"))
+    minter = minter_from_env()
     response = read_funding(
         base_url,
         hotkey=minter.hotkey_ss58,

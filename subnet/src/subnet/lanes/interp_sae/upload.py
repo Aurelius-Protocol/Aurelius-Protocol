@@ -49,7 +49,6 @@ from subnet.lanes.interp_sae.bundle_digest import (
     WEIGHTS_FILENAME,
     digests_equal,
 )
-from subnet.miner.wallet import load_hotkey
 from subnet.shared.signing import artifact_upload_signed_bytes, sign_artifact_upload
 
 UPLOAD_PATH: Final = "/v1/artifacts"
@@ -437,27 +436,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--url",
         required=True,
-        help="ingress base URL (https; plain http only for localhost/127.0.0.1 testlab use)",
+        help="ingress base URL (https; plain http only for localhost/127.0.0.1)",
     )
     parser.add_argument(
         "--wallet",
         required=True,
-        help=(
-            "miner wallet name (hotkey only; never the coldkey). The current wallet seam derives the dev/testlab hotkey from the name — not encrypted keyfile custody"
-        ),
-    )
-    parser.add_argument(
-        "--allow-dev-wallet",
-        action="store_true",
-        help=(
-            "required for any non-localhost --url: acknowledges that the wallet seam derives the "
-            "hotkey from the wallet NAME (testlab custody), not from an encrypted keyfile"
-        ),
+        help="name of the mounted Bittensor wallet; the upload is signed with its hotkey",
     )
     parser.add_argument(
         "--bittensor-wallet",
         action="store_true",
-        help="sign with the mounted Bittensor hotkey; requires the hotkey-only wallet guard",
+        help="accepted for older scripts: the wallet is always the Bittensor wallet",
     )
     parser.add_argument("--progress", action="store_true", help="show bytes sent on stderr")
     parser.add_argument(
@@ -465,29 +454,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        signer = None
-        keypair = None
-        if args.bittensor_wallet:
-            if args.allow_dev_wallet:
-                raise UploadError("ambiguous_wallet_source", 0)
-            if os.environ.get("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET") != "true":
-                raise UploadError("hotkey_only_wallet_required", 0)
-            from subnet.miner.serve import load_bittensor_wallet
+        if os.environ.get("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET") != "true":
+            raise UploadError("hotkey_only_wallet_required", 0)
+        from subnet.miner.serve import load_bittensor_wallet
 
-            os.environ["AURELIUS_BT_WALLET"] = args.wallet
-            wallet = load_bittensor_wallet()
-            hotkey_ss58 = str(wallet.hotkey.ss58_address)
-            signer = wallet.hotkey.sign
-        else:
-            if not _is_local_url(args.url) and not args.allow_dev_wallet:
-                raise UploadError("dev_wallet_refused_for_remote_url", 0)
-            keypair, hotkey_ss58 = load_hotkey(args.wallet)
+        os.environ["AURELIUS_BT_WALLET"] = args.wallet
+        wallet = load_bittensor_wallet()
+        hotkey_ss58 = str(wallet.hotkey.ss58_address)
+        signer = wallet.hotkey.sign
         prepared = prepare_upload(Path(args.bundle))
         result = upload(
             url=args.url,
             prepared=prepared,
             slot_id=args.slot_id,
-            keypair=keypair,
             hotkey_ss58=hotkey_ss58,
             nonce=secrets.token_hex(32),
             timestamp=int(time.time()),

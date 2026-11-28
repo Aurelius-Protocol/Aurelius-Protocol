@@ -13,7 +13,6 @@ the pure client: wire framing, headers and typed error mapping, all public-safe.
 
 from __future__ import annotations
 
-import hashlib
 import http.client
 import inspect
 import io
@@ -45,9 +44,9 @@ from subnet.lanes.interp_sae.upload import (
     prepare_upload,
     upload,
 )
-from subnet.miner.wallet import load_hotkey
-from subnet.shared.signing import keypair_from_seed, verify_artifact_upload
-from subnet.shared.ss58 import ss58_decode, ss58_encode
+from subnet.shared.signing import verify_artifact_upload
+from subnet.shared.ss58 import ss58_decode
+from .miner_fixtures import fixed_keypair, mount_wallet
 
 pytestmark = pytest.mark.miner
 
@@ -56,10 +55,8 @@ WEIGHTS: bytes = bytes(range(256)) * 4  # 1024 bytes
 SLOT_ID = "slot-1"
 NONCE = "ab" * 32
 NOW = 1_700_000_000
-BASE_URL = "http://127.0.0.1:8095"  # testlab-local: the one plain-http allowance
-SEED = hashlib.sha256(b"aurelius-testlab-wallet:tester").digest()
-WALLET_KEYPAIR = keypair_from_seed(SEED)
-WALLET_HOTKEY = ss58_encode(WALLET_KEYPAIR[0])
+BASE_URL = "http://127.0.0.1:8095"  # loopback: the one plain-http allowance
+WALLET_KEYPAIR, WALLET_HOTKEY = fixed_keypair("tester")
 
 
 def _bundle_dir(tmp_path: Path, *, cfg: bytes = CFG, weights: bytes = WEIGHTS) -> Path:
@@ -354,8 +351,17 @@ def test_upload_refuses_ambiguous_or_missing_signer_before_request(tmp_path: Pat
     assert opener.requests == []
 
 
-def test_bittensor_upload_requires_hotkey_only_custody_before_wallet_load(monkeypatch, tmp_path):
+@pytest.mark.parametrize("older_script", [[], ["--bittensor-wallet"]])
+def test_upload_requires_hotkey_only_custody_before_the_wallet_loads(
+    monkeypatch, tmp_path, older_script
+):
+    """The hotkey-only guard is required whether or not an older script passes the flag."""
     monkeypatch.delenv("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET", raising=False)
+
+    def must_not_load():
+        pytest.fail("the wallet must not be loaded before the hotkey-only guard is checked")
+
+    monkeypatch.setattr("subnet.miner.serve.load_bittensor_wallet", must_not_load)
     assert (
         upload_module.main(
             [
@@ -367,7 +373,7 @@ def test_bittensor_upload_requires_hotkey_only_custody_before_wallet_load(monkey
                 BASE_URL,
                 "--wallet",
                 "registered-miner",
-                "--bittensor-wallet",
+                *older_script,
             ]
         )
         == 2
@@ -628,6 +634,7 @@ def _run_main_with_fake_opener(
         return real_upload(opener=opener, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(upload_module, "upload", with_fake_opener)
+    mount_wallet(monkeypatch, "tester")
     return upload_module.main(
         [
             "--bundle",
@@ -638,16 +645,14 @@ def _run_main_with_fake_opener(
             url,
             "--wallet",
             "tester",
-            "--allow-dev-wallet",
         ]
     )
 
 
-def test_main_uploads_via_the_dev_wallet_and_prints_the_ingress_ack(
+def test_main_uploads_with_the_wallet_hotkey_and_prints_the_ingress_ack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     prepared = _prepared(tmp_path)
-    assert load_hotkey("tester") == (WALLET_KEYPAIR, WALLET_HOTKEY)
     opener = _FakeOpener(
         _JsonResponse(
             201,
@@ -670,7 +675,6 @@ def test_main_uploads_via_the_dev_wallet_and_prints_the_ingress_ack(
     [request] = opener.requests
     signature = _wire_headers(request)[HEADER_SIGNATURE.lower()]
     output = captured.out + captured.err
-    assert SEED.hex() not in output, "the wallet seed must never be printed"
     assert WALLET_KEYPAIR[1].hex() not in output, "the secret key must never be printed"
     assert signature not in output, "the raw signature must never be printed"
 
@@ -682,6 +686,7 @@ def test_main_reports_an_ingress_refusal_on_stderr_with_exit_2(
         raise upload_module.UploadError("replayed", 401)
 
     monkeypatch.setattr(upload_module, "upload", refused)
+    mount_wallet(monkeypatch, "tester")
     exit_code = upload_module.main(
         [
             "--bundle",
@@ -692,7 +697,6 @@ def test_main_reports_an_ingress_refusal_on_stderr_with_exit_2(
             BASE_URL,
             "--wallet",
             "tester",
-            "--allow-dev-wallet",
         ]
     )
     captured = capsys.readouterr()
@@ -718,25 +722,6 @@ def test_refused_ignores_a_server_code_that_is_not_a_plain_token() -> None:
     body = json.dumps({"code": "\x1b[31mevil\x1b[0m"}).encode()
     error = urllib.error.HTTPError("https://x", 403, "Forbidden", hdrs=None, fp=io.BytesIO(body))  # type: ignore[arg-type]
     assert _refused(error).code == "http_error"
-
-
-def test_main_refuses_the_dev_wallet_seam_for_a_remote_url_without_the_flag(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    exit_code = upload_module.main(
-        [
-            "--bundle",
-            str(_bundle_dir(tmp_path)),
-            "--slot-id",
-            SLOT_ID,
-            "--url",
-            "https://ingress.example",
-            "--wallet",
-            "tester",
-        ]
-    )
-    assert exit_code == 2
-    assert "dev_wallet_refused_for_remote_url" in capsys.readouterr().err
 
 
 def test_refused_tolerates_a_truncated_refusal_body() -> None:

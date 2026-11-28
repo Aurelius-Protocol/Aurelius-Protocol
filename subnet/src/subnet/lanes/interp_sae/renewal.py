@@ -341,7 +341,7 @@ def main(argv=None):
         from subnet.bittensor_v11 import FinalizedRpc
         from subnet.miner.serve import minter_from_env
 
-        signer = minter_from_env(os.environ.get("MINER_HOTKEY", "miner-hotkey"))
+        signer = minter_from_env()
         central = os.environ["CENTRAL_API_URL"]
         while True:
             try:

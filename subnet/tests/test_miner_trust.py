@@ -11,10 +11,11 @@ import pytest
 
 from subnet.miner import cli, config_schema, economics_client, observation_client
 from subnet.miner.journal import AttemptJournal, identity_for
-from subnet.miner.serve import WorkIdMinter, validate_miner_startup_posture
+from subnet.miner.serve import validate_miner_startup_posture
 from subnet.miner.trust import SN37_CONFIG_SIGNING_PUBKEY, config_signing_pubkey
 from subnet.lanes.interp_sae import miner_cli as sae_cli
 from subnet.shared.config_snapshot import SNAPSHOT_SIGNATURE_DOMAIN, canonical_hash
+from .miner_fixtures import fixed_minter
 
 pytestmark = pytest.mark.miner
 
@@ -46,7 +47,6 @@ def test_production_startup_accepts_bundled_key():
             "CENTRAL_API_URL": "https://central.aureliusaligned.ai",
             "AURELIUS_ENV": "mainnet",
             "AURELIUS_TRANSPORT": "btauth",
-            "AURELIUS_IDENTITY_SOURCE": "bittensor",
             "AURELIUS_CLOCK": "real",
             "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
             "AURELIUS_AXON_ENDPOINT_PROFILE": "public",
@@ -114,7 +114,7 @@ def test_economics_uses_resolved_key(monkeypatch, override):
         monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", override)
     seen = []
     monkeypatch.setattr(economics_client, "read_economics", lambda *a, **kw: seen.append(kw) or {})
-    monkeypatch.setattr("subnet.miner.serve.minter_from_env", lambda *a: WorkIdMinter("fixture"))
+    monkeypatch.setattr("subnet.miner.serve.minter_from_env", lambda *a: fixed_minter("fixture"))
     assert cli.main(["economics", "--netuid", "37"]) == 0
     assert seen[0]["config_pubkey"] == (override or SN37_CONFIG_SIGNING_PUBKEY)
 
@@ -124,7 +124,7 @@ def test_economics_uses_resolved_key(monkeypatch, override):
 def test_observation_commands_use_resolved_key(monkeypatch, tmp_path, command, override):
     if override is not None:
         monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", override)
-    minter = WorkIdMinter("fixture")
+    minter = fixed_minter("fixture")
     monkeypatch.setattr("subnet.miner.serve.minter_from_env", lambda *a: minter)
     item = {
         "task_type": "interp_sae",

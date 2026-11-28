@@ -2189,7 +2189,7 @@ def advertised_port(bind_port: int, raw: str | None = None) -> int:
     return port
 
 
-def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> None:
+def serve_axon_forever(*, netuid: int, port: int = 8091) -> None:
     validate_miner_startup_posture()
     configured_external_ip = os.environ.get("AURELIUS_AXON_EXTERNAL_IP")
     # The durable publish directory is created before any wallet is loaded or RPC opened.
@@ -2205,7 +2205,7 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
     serving_config = ServingConfig()
     # Load once and bind BOTH btauth and application work-id signatures to this exact hotkey.
     wallet = load_bittensor_wallet(bt)
-    minter = minter_from_bittensor_wallet(hotkey_name, wallet)
+    minter = minter_from_bittensor_wallet(wallet)
     registered = RegisteredSet()
     external_ip = configured_external_ip or socket.gethostbyname(socket.gethostname())
     endpoint_policy = AxonEndpointPolicy.build(

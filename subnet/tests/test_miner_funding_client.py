@@ -9,7 +9,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from subnet.miner.funding_client import CHAIN_ID, TREASURY, read_funding, verified_deposit
 from subnet.miner.read_client import ReadUnavailable
-from subnet.miner.serve import WorkIdMinter
 from subnet.shared.canonicalization import canonical_bytes
 from subnet.shared.config_snapshot import (
     canonical_hash,
@@ -19,12 +18,13 @@ from subnet.shared.config_snapshot import (
 from subnet.shared.price_policy import digest, shipped_catalog
 from subnet.shared.sn37_economics import GENESIS_HASH, TARIFF_VERSION
 from subnet.shared.ss58 import ss58_encode
+from .miner_fixtures import fixed_minter
 
 pytestmark = pytest.mark.miner
 
 
 def prepared_response():
-    minter = WorkIdMinter("funding-client-test")
+    minter = fixed_minter("funding-client-test")
     body = json.loads((Path(__file__).parent / "fixtures/sn37_config_v24.json").read_text())["body"]
     policy = {
         "schema_version": 2,

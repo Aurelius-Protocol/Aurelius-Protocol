@@ -42,7 +42,6 @@ from subnet.miner.serve import (
     MAX_HTTP_QUERY_BYTES,
     QueryAuthorizationError,
     ServingStats,
-    WorkIdMinter,
     _handler,
     make_server,
     validate_miner_startup_posture,
@@ -59,11 +58,12 @@ from subnet.miner.prepared_extrinsic import (
     submission_claim_evidence,
     validate_unsigned_dict,
 )
+from .miner_fixtures import fixed_keypair, fixed_minter
 
 pytestmark = pytest.mark.miner
 
 _TASK_CONFIG = json.dumps({"payload": "axon-item"})
-_VALIDATOR = WorkIdMinter("validator-hotkey").hotkey_ss58
+_VALIDATOR = fixed_minter("validator-hotkey").hotkey_ss58
 _REQUEST_ID = "ab" * 32
 _WINDOW = 7
 _EXTERNAL_MINER_PUBLIC_KEY, _EXTERNAL_MINER_SECRET_KEY = keypair_from_seed(b"a" * 32)
@@ -119,7 +119,7 @@ def test_btauth_mode_without_bt_is_a_clean_seam(monkeypatch, tmp_path):
         lambda: (_ for _ in ()).throw(ImportError("not installed")),
     )
     with pytest.raises(NotImplementedError, match="Bittensor"):
-        serve_axon_forever(hotkey_name="miner-hotkey", netuid=2)
+        serve_axon_forever(netuid=2)
 
 
 def test_blacklist_posture_pinned():
@@ -1749,7 +1749,7 @@ def _staged_resolver(tmp_path, payload="miner-owned"):
 def test_forward_body_mints_envelopes_for_miner_pool_candidates(tmp_path):
     """The validator's config bytes are passed in and ignored: the signed candidate is the
     miner's staged row."""
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     payload = _build(minter, candidate_resolver=_staged_resolver(tmp_path))
     envelope = json.loads(payload)
     # the §3.1 shape, minted by the SAME minter the authenticated wire uses
@@ -1764,14 +1764,12 @@ def test_forward_body_mints_envelopes_for_miner_pool_candidates(tmp_path):
     assert envelope2["content_hash"] == envelope["content_hash"]
     assert envelope2["work_id"]["nonce"] != envelope["work_id"]["nonce"]
     # the coldkey never appears anywhere in the wire payload
-    from subnet.miner.wallet import load_coldkey
-
-    _, coldkey_ss58 = load_coldkey("miner-coldkey", unlocked=True)
+    _, coldkey_ss58 = fixed_keypair("miner-coldkey")
     assert coldkey_ss58 not in payload
 
 
 def test_forward_config_bytes_are_capped_but_never_decoded(tmp_path):
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     resolver = _staged_resolver(tmp_path)
     # over the size cap, not UTF-8, not a string at all: a refusal, never an escaped exception
     for config_json in ("x" * (MAX_CONFIG_JSON_BYTES + 1), "\ud800", None):
@@ -1784,7 +1782,7 @@ def test_forward_config_bytes_are_capped_but_never_decoded(tmp_path):
 def test_http_handler_binds_declared_audience_to_authenticated_btauth_caller():
     from io import BytesIO
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     candidate_calls = []
     request = {
         "task_type": "synthetic",
@@ -1969,7 +1967,7 @@ def test_btauth_sender_header_rejects_duplicates_and_invalid_shape_before_verify
 def test_make_server_status_seam():
     """The readiness-gated /health: 503 until served, 200 after — no socket/wall clock."""
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     state = {"served": False}
 
     def status():
@@ -1992,7 +1990,7 @@ def test_make_server_status_seam():
 def test_health_reports_serving_counters_and_readiness_keeps_them():
     """/health carries aggregated serving telemetry; a non-200 readiness body does not."""
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     stats = ServingStats()
     stats.note_served("5" * 48)
     stats.note_auth_rejected()
@@ -2066,7 +2064,7 @@ def test_query_rate_limit_answers_429_and_counts():
 
     from subnet.miner.serve import CallerRateLimiter
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     stats = ServingStats()
     limiter = CallerRateLimiter(1, window_s=60.0)
     request = {
@@ -2129,7 +2127,7 @@ def test_make_server_constructs_and_enforces_caller_quota(monkeypatch, shared_li
     }
     body = json.dumps(request).encode()
     with make_server(
-        WorkIdMinter("miner-hotkey"),
+        fixed_minter("miner-hotkey"),
         0,
         candidate_resolver=lambda value: value,
         request_authorizer=lambda *_args, **_kwargs: _VALIDATOR,
@@ -2160,7 +2158,7 @@ def _authenticated_caller(*_args, **_kwargs):
 def test_the_query_route_requires_a_request_authorizer():
     """No server is ever constructed that answers `/v1/query` to an unauthenticated caller."""
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     with pytest.raises(ValueError, match="request authorizer"):
         _handler(minter)
     with pytest.raises(ValueError, match="request authorizer"):
@@ -2170,7 +2168,7 @@ def test_the_query_route_requires_a_request_authorizer():
 
 
 def test_the_health_surface_serves_no_queries_and_the_query_route_caps_bodies():
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
 
     def invoke(handler_cls, *, length, body=b""):
         handler = handler_cls.__new__(handler_cls)
@@ -2202,7 +2200,7 @@ def test_partial_query_body_timeout_is_bounded_and_never_reaches_candidate_selec
 
     candidates = []
     handler_cls = _handler(
-        WorkIdMinter("miner-hotkey"),
+        fixed_minter("miner-hotkey"),
         candidate_resolver=lambda value: candidates.append(value) or value,
         request_authorizer=_authenticated_caller,
     )
@@ -2288,7 +2286,7 @@ def test_an_invalid_endpoint_fails_before_sdk_or_state_mutation(monkeypatch, tmp
     )
 
     with pytest.raises(ValueError, match="SUBSTRATE_URL"):
-        subject.serve_axon_forever(hotkey_name="miner-0", netuid=455)
+        subject.serve_axon_forever(netuid=455)
     assert not publish_dir.exists()
 
 
@@ -2412,7 +2410,6 @@ def test_miner_production_posture_rejects_development_seams():
         "CENTRAL_API_URL": "http://central-api:4000",
         "AURELIUS_ENV": "prod",
         "AURELIUS_TRANSPORT": "btauth",
-        "AURELIUS_IDENTITY_SOURCE": "bittensor",
         "AURELIUS_CLOCK": "real",
         "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
         "AURELIUS_AXON_ENDPOINT_PROFILE": "public",
@@ -2439,7 +2436,6 @@ def test_miner_production_posture_rejects_development_seams():
     for key, bad in (
         ("CONFIG_SIGNING_PUBKEY", ""),
         ("CENTRAL_API_URL", ""),
-        ("AURELIUS_IDENTITY_SOURCE", "deterministic"),
         ("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET", "false"),
         ("AURELIUS_BITTENSOR_NONCE_DB", ""),
         ("AURELIUS_AXON_PUBLISH_STATE_DIR", ""),
