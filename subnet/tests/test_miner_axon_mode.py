@@ -28,7 +28,6 @@ from subnet.miner.axon_serve import (
     _validate_planned_serve_axon_call,
     _validate_serve_axon_fee,
     advertised_port,
-    authorize_testnet_axon_publication,
     blacklist_decision,
     build_envelope_json,
     guarded_publish_once,
@@ -37,25 +36,17 @@ from subnet.miner.axon_serve import (
     serve_axon_forever,
 )
 from subnet.miner.candidates import candidate_for_request
-from subnet.miner.cli import _serve_mode
 from subnet.miner.serve import (
     BoundedThreadingHTTPServer,
     MAX_HTTP_QUERY_BYTES,
     QueryAuthorizationError,
     ServingStats,
-    WorkIdMinter,
     _handler,
     make_server,
-    plain_query_allowed,
-    serve as serve_plain_http,
     validate_miner_startup_posture,
 )
-from subnet.miner.staging import StagingPool
-from subnet.axon_protocol import (
-    CANDIDATE_SOURCE_STAGING,
-    MAX_CONFIG_JSON_BYTES,
-    PROTOCOL_VERSION,
-)
+from subnet.miner.staging import ELIGIBLE_FANOUT_WINDOW, StagingPool
+from subnet.axon_protocol import MAX_CONFIG_JSON_BYTES
 from subnet.shared.signing import keypair_from_seed, sign
 from subnet.shared.ss58 import ss58_encode
 from subnet.miner.prepared_extrinsic import (
@@ -66,11 +57,12 @@ from subnet.miner.prepared_extrinsic import (
     submission_claim_evidence,
     validate_unsigned_dict,
 )
+from .miner_fixtures import fixed_keypair, fixed_minter
 
 pytestmark = pytest.mark.miner
 
 _TASK_CONFIG = json.dumps({"payload": "axon-item"})
-_VALIDATOR = WorkIdMinter("validator-hotkey").hotkey_ss58
+_VALIDATOR = fixed_minter("validator-hotkey").hotkey_ss58
 _REQUEST_ID = "ab" * 32
 _WINDOW = 7
 _EXTERNAL_MINER_PUBLIC_KEY, _EXTERNAL_MINER_SECRET_KEY = keypair_from_seed(b"a" * 32)
@@ -92,13 +84,6 @@ def _build(minter, config_json=_TASK_CONFIG, **overrides):
     return build_envelope_json(minter, "synthetic", 1, config_json, **values)
 
 
-def test_serve_mode_env_seam(monkeypatch):
-    monkeypatch.delenv("AURELIUS_TRANSPORT", raising=False)
-    assert _serve_mode() == "http"  # hermetic default
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "btauth")
-    assert _serve_mode() == "btauth"
-
-
 def test_module_import_is_bittensor_free():
     completed = subprocess.run(
         [
@@ -118,22 +103,23 @@ def test_btauth_mode_without_bt_is_a_clean_seam(monkeypatch, tmp_path):
 
     from subnet.miner.axon_serve import serve_axon_forever
 
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "btauth")
     monkeypatch.setenv("AURELIUS_BITTENSOR_NONCE_DB", "/unused/nonces.sqlite3")
     monkeypatch.setenv("AURELIUS_AXON_PUBLISH_STATE_DIR", str(tmp_path / "axon-publish"))
     monkeypatch.setenv("AURELIUS_AXON_EXPECTED_CHAIN_NAME", "Development")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "observe-once-testlab")
+    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "0x" + "cd" * 32)
     monkeypatch.setenv("AURELIUS_RUNTIME_SPEC_PIN", "432")
-    monkeypatch.setenv("CHAIN_ID", "localnet")
+    monkeypatch.setenv("CHAIN_ID", "development")
     monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
+    monkeypatch.setenv("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET", "true")
+    monkeypatch.setenv("CONFIG_SIGNING_PUBKEY", "ab" * 32)
+    monkeypatch.setenv("CENTRAL_API_URL", "http://127.0.0.1:4000")
     monkeypatch.setattr(
         subject,
         "require_bittensor_v11",
         lambda: (_ for _ in ()).throw(ImportError("not installed")),
     )
     with pytest.raises(NotImplementedError, match="Bittensor"):
-        serve_axon_forever(hotkey_name="miner-hotkey", netuid=2)
+        serve_axon_forever(netuid=2)
 
 
 def test_blacklist_posture_pinned():
@@ -409,33 +395,15 @@ def test_guarded_axon_publish_poll_exhaustion_remains_non_retryable(tmp_path):
     assert calls["publish"] == 1
 
 
-def test_testnet_axon_ack_is_exact_and_checked_before_intent(tmp_path):
-    expected = "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES"
-    authorize_testnet_axon_publication(expected)
-    for invalid in (None, "", expected + " ", "I_ACKNOWLEDGE_SN455_AXON_ENDPOINT_UPDATES"):
-        with pytest.raises(AxonPublishError, match="acknowledgement"):
-            authorize_testnet_axon_publication(invalid)
-
-    with pytest.raises(AxonPublishError, match="acknowledgement"):
-        guarded_publish_once(
-            tmp_path,
-            {"hotkey": "5Miner", "ip": "172.30.55.10", "port": 8090},
-            lambda: {"matches": False, "finalized_block_number": 100},
-            lambda: pytest.fail("missing acknowledgement must not publish"),
-            authorize_publish=lambda: authorize_testnet_axon_publication("wrong"),
-        )
-    assert not (tmp_path / "intent.json").exists()
-
-
-def test_already_exact_axon_needs_no_mutation_acknowledgement(tmp_path):
+def test_an_already_exact_axon_needs_no_chain_write(tmp_path):
     result = guarded_publish_once(
         tmp_path,
         {"hotkey": "5Miner", "ip": "172.30.55.10", "port": 8090},
         lambda: {"matches": True, "finalized_block_number": 100},
         lambda: pytest.fail("an exact tuple must not publish"),
-        authorize_publish=lambda: pytest.fail("a no-write read-back must not request authority"),
     )
     assert result["status"] == "already_exact_no_submission"
+    assert not (tmp_path / "intent.json").exists()
 
 
 def test_publish_evidence_rejects_same_size_in_place_mutation_while_reading(tmp_path, monkeypatch):
@@ -572,7 +540,6 @@ def _install_external_publish_rpc(monkeypatch, *, finalized_block_number=123):
         "AURELIUS_AXON_EXPECTED_GENESIS_HASH",
         _EXTERNAL_GENESIS,
     )
-    monkeypatch.setenv("AURELIUS_ENV", "testnet-full")
     monkeypatch.setenv("SUBSTRATE_URL", "wss://test.example:443")
     return instances
 
@@ -1082,10 +1049,6 @@ def test_external_publish_waits_for_independent_finality_without_resubmitting(
         monkeypatch,
         finalized_block_number=lambda: 123 if finality["caught_up"] else 110,
     )
-    monkeypatch.setenv(
-        "AURELIUS_TESTNET_AXON_SERVE_ACK",
-        "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES",
-    )
     metagraphs = iter(
         (
             _external_publish_metagraph(endpoint=""),
@@ -1246,10 +1209,6 @@ def _install_external_recovery_harness(monkeypatch, root, *, include_match=True)
     import subnet.miner.axon_serve as subject
 
     _install_external_publish_rpc(monkeypatch)
-    monkeypatch.setenv(
-        "AURELIUS_TESTNET_AXON_SERVE_ACK",
-        "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES",
-    )
     state = {
         "height": 100,
         "include_match": include_match,
@@ -1559,12 +1518,7 @@ def test_external_publish_records_exact_finalized_causal_fee_evidence(
     )
     monkeypatch.setenv("AURELIUS_RUNTIME_SPEC_PIN", "432")
     monkeypatch.setenv("AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN", "1")
-    monkeypatch.setenv("AURELIUS_ENV", "testnet-full")
     monkeypatch.setenv("SUBSTRATE_URL", "wss://test.example:443")
-    monkeypatch.setenv(
-        "AURELIUS_TESTNET_AXON_SERVE_ACK",
-        "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES",
-    )
 
     class Rpc:
         def __init__(self, endpoint):
@@ -1736,97 +1690,67 @@ def test_advertised_axon_port_is_independent_and_strict(monkeypatch):
             advertised_port(8091)
 
 
-def test_forward_body_mints_the_same_envelope_as_http_mode(monkeypatch):
-    # inline candidate carriage is confined to the local testlab posture; the parity claim of
-    # this test is about the WIRE, so it runs under exactly that posture.
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("CHAIN_ID", "localnet")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "observe-once-testlab")
-    monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "http")
-    minter = WorkIdMinter("miner-hotkey")
-    payload = _build(minter)
-    envelope = json.loads(payload)
-    # the §3.1 shape, minted by the SAME minter http mode uses
-    assert envelope["task_type"] == "synthetic"
-    assert envelope["work_id"]["hotkey_ss58"] == minter.hotkey_ss58
-    assert envelope["work_id"]["validator_hotkey_ss58"] == _VALIDATOR
-    assert envelope["work_id"]["request_id"] == _REQUEST_ID
-    assert envelope["work_id"]["fanout_window"] == _WINDOW
-    # fresh work_id per response, same content_hash (the serve contract)
-    envelope2 = json.loads(_build(minter))
-    assert envelope2["content_hash"] == envelope["content_hash"]
-    assert envelope2["work_id"]["nonce"] != envelope["work_id"]["nonce"]
-    # the coldkey never appears anywhere in the wire payload
-    from subnet.miner.wallet import load_coldkey
-
-    _, coldkey_ss58 = load_coldkey("miner-coldkey", unlocked=True)
-    assert coldkey_ss58 not in payload
+_FORWARD_SCHEMA = {
+    "schema_version": 1,
+    "required": ["payload"],
+    "additional_fields": False,
+    "fields": {"payload": {"type": "string"}},
+}
 
 
-def test_forward_staging_mode_signs_miner_pool_candidate_not_validator_config(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("CHAIN_ID", "localnet")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "observe-once-testlab")
-    monkeypatch.setenv("SUBSTRATE_URL", "ws://subtensor:9944")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "http")
+def _staged_resolver(tmp_path, payload="miner-owned"):
+    """A candidate resolver backed by a pool with one window-scoped row for `_WINDOW`."""
     pool = StagingPool(tmp_path / "staging.jsonl")
     pool.add(
         {
             "task_type": "synthetic",
             "schema_version": 1,
-            "config": {"payload": "miner-owned"},
+            "config": {"payload": payload},
+            ELIGIBLE_FANOUT_WINDOW: _WINDOW,
         }
     )
-    schema = {
-        "schema_version": 1,
-        "required": ["payload"],
-        "additional_fields": False,
-        "fields": {"payload": {"type": "string"}},
-    }
-
-    def resolve(request):
-        return candidate_for_request(request, pool=pool, schema_loader=lambda _task_type: schema)
-
-    payload = build_envelope_json(
-        WorkIdMinter("miner-hotkey"),
-        "synthetic",
-        1,
-        json.dumps({"payload": "validator-supplied-must-be-ignored"}),
-        request_id=_REQUEST_ID,
-        validator_hotkey_ss58=_VALIDATOR,
-        fanout_window=_WINDOW,
-        validator_version="1.2.3",
-        protocol_version=PROTOCOL_VERSION,
-        candidate_source=CANDIDATE_SOURCE_STAGING,
-        candidate_resolver=resolve,
+    return lambda request: candidate_for_request(
+        request, pool=pool, schema_loader=lambda _task_type: _FORWARD_SCHEMA
     )
+
+
+def test_forward_body_mints_envelopes_for_miner_pool_candidates(tmp_path):
+    """The validator's config bytes are passed in and ignored: the signed candidate is the
+    miner's staged row."""
+    minter = fixed_minter("miner-hotkey")
+    payload = _build(minter, candidate_resolver=_staged_resolver(tmp_path))
     envelope = json.loads(payload)
+    # the §3.1 shape, minted by the SAME minter the authenticated wire uses
+    assert envelope["task_type"] == "synthetic"
+    assert envelope["work_id"]["hotkey_ss58"] == minter.hotkey_ss58
+    assert envelope["work_id"]["validator_hotkey_ss58"] == _VALIDATOR
+    assert envelope["work_id"]["request_id"] == _REQUEST_ID
+    assert envelope["work_id"]["fanout_window"] == _WINDOW
     assert json.loads(envelope["canonical_config"]) == {"payload": "miner-owned"}
+    # fresh work_id per response, same content_hash (the serve contract)
+    envelope2 = json.loads(_build(minter, candidate_resolver=_staged_resolver(tmp_path)))
+    assert envelope2["content_hash"] == envelope["content_hash"]
+    assert envelope2["work_id"]["nonce"] != envelope["work_id"]["nonce"]
+    # the coldkey never appears anywhere in the wire payload
+    _, coldkey_ss58 = fixed_keypair("miner-coldkey")
+    assert coldkey_ss58 not in payload
 
 
-@pytest.mark.parametrize(
-    "config_json",
-    [
-        "x" * (MAX_CONFIG_JSON_BYTES + 1),  # over the size cap
-        "not json",
-        "\ud800",  # invalid UTF-8 must remain a refusal, never escape the Axon handler
-        None,  # not a string at all
-    ],
-)
-def test_forward_refusals_leave_the_envelope_empty(config_json):
-    # NOTE: a config that PARSES stays opaque data (the http path's posture — canonicalization
-    # accepts any JSON value); the axon wire must never be stricter than http, only size-capped
-    minter = WorkIdMinter("miner-hotkey")
-    assert _build(minter, config_json) == ""
+def test_forward_config_bytes_are_capped_but_never_decoded(tmp_path):
+    minter = fixed_minter("miner-hotkey")
+    resolver = _staged_resolver(tmp_path)
+    # over the size cap, not UTF-8, not a string at all: a refusal, never an escaped exception
+    for config_json in ("x" * (MAX_CONFIG_JSON_BYTES + 1), "\ud800", None):
+        assert _build(minter, config_json, candidate_resolver=resolver) == ""
+    # under the cap, the bytes are opaque: "not json" is not the miner's concern
+    payload = _build(minter, "not json", candidate_resolver=resolver)
+    assert json.loads(payload)["task_type"] == "synthetic"
 
 
 def test_http_handler_binds_declared_audience_to_authenticated_btauth_caller():
     from io import BytesIO
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     candidate_calls = []
     request = {
         "task_type": "synthetic",
@@ -2011,7 +1935,7 @@ def test_btauth_sender_header_rejects_duplicates_and_invalid_shape_before_verify
 def test_make_server_status_seam():
     """The readiness-gated /health: 503 until served, 200 after — no socket/wall clock."""
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     state = {"served": False}
 
     def status():
@@ -2019,7 +1943,8 @@ def test_make_server_status_seam():
             return 200, {"status": "ok"}
         return 503, {"status": "publishing"}
 
-    handler = _handler(minter, status=status).__new__(_handler(minter, status=status))
+    health_only = _handler(minter, status=status, query_enabled=False)
+    handler = health_only.__new__(health_only)
     handler.path = "/health"
     replies = []
     handler._json = lambda code, body: replies.append((code, body))
@@ -2033,13 +1958,14 @@ def test_make_server_status_seam():
 def test_health_reports_serving_counters_and_readiness_keeps_them():
     """/health carries aggregated serving telemetry; a non-200 readiness body does not."""
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     stats = ServingStats()
     stats.note_served("5" * 48)
     stats.note_auth_rejected()
     stats.note_saturated()
 
-    plain = _handler(minter, stats=stats).__new__(_handler(minter, stats=stats))
+    health_only = _handler(minter, stats=stats, query_enabled=False)
+    plain = health_only.__new__(health_only)
     plain.path = "/health"
     replies = []
     plain._json = lambda code, body: replies.append((code, body))
@@ -2052,7 +1978,9 @@ def test_health_reports_serving_counters_and_readiness_keeps_them():
     assert body["stats"]["last_caller_hotkey"] == "5" * 48
     assert body["stats"]["last_activity_at"] is not None
 
-    gated = _handler(minter, status=lambda: (503, {"status": "publishing"}), stats=stats)
+    gated = _handler(
+        minter, status=lambda: (503, {"status": "publishing"}), stats=stats, query_enabled=False
+    )
     handler = gated.__new__(gated)
     handler.path = "/health"
     handler._json = lambda c, b: replies.append((c, b))
@@ -2060,27 +1988,24 @@ def test_health_reports_serving_counters_and_readiness_keeps_them():
     assert replies[-1] == (503, {"status": "publishing"})
 
 
-def test_startup_posture_reports_every_missing_btauth_key_at_once():
+def test_startup_reports_every_missing_requirement_at_once():
     """One restart reports the whole misconfiguration, not one missing key per restart."""
 
     with pytest.raises(ValueError) as excinfo:
-        validate_miner_startup_posture(
-            {
-                "AURELIUS_ENV": "testlab",
-                "AURELIUS_TRANSPORT": "btauth",
-                "AURELIUS_AXON_PUBLISH_STATE_DIR": "/tmp/publish",
-                "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "name",
-            }
-        )
+        validate_miner_startup_posture({})
     message = str(excinfo.value)
-    for key in (
+    for name in (
         "AURELIUS_BITTENSOR_NONCE_DB",
+        "AURELIUS_AXON_PUBLISH_STATE_DIR",
+        "AURELIUS_AXON_EXPECTED_CHAIN_NAME",
         "AURELIUS_AXON_EXPECTED_GENESIS_HASH",
         "AURELIUS_RUNTIME_SPEC_PIN",
         "CHAIN_ID",
         "SUBSTRATE_URL",
+        "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET",
+        "CENTRAL_API_URL",
     ):
-        assert key in message
+        assert name in message
 
 
 def test_caller_rate_limiter_is_per_caller_and_window_bounded():
@@ -2104,7 +2029,7 @@ def test_query_rate_limit_answers_429_and_counts():
 
     from subnet.miner.serve import CallerRateLimiter
 
-    minter = WorkIdMinter("miner-hotkey")
+    minter = fixed_minter("miner-hotkey")
     stats = ServingStats()
     limiter = CallerRateLimiter(1, window_s=60.0)
     request = {
@@ -2140,11 +2065,8 @@ def test_query_rate_limit_answers_429_and_counts():
     assert stats.snapshot()["rate_limited"] == 1
 
 
-@pytest.mark.parametrize("authenticated", [False, True], ids=["http", "btauth"])
 @pytest.mark.parametrize("shared_limiter", [False, True], ids=["default", "shared"])
-def test_make_server_constructs_and_enforces_caller_quota(
-    monkeypatch, authenticated, shared_limiter
-):
+def test_make_server_constructs_and_enforces_caller_quota(monkeypatch, shared_limiter):
     """Exercise the real factory without binding a port or starting a serving thread."""
     from subnet.miner.serve import CallerRateLimiter
 
@@ -2170,10 +2092,10 @@ def test_make_server_constructs_and_enforces_caller_quota(
     }
     body = json.dumps(request).encode()
     with make_server(
-        WorkIdMinter("miner-hotkey"),
+        fixed_minter("miner-hotkey"),
         0,
         candidate_resolver=lambda value: value,
-        request_authorizer=(lambda *_args, **_kwargs: _VALIDATOR) if authenticated else None,
+        request_authorizer=lambda *_args, **_kwargs: _VALIDATOR,
         stats=stats,
         **kwargs,
     ) as server:
@@ -2194,8 +2116,24 @@ def test_make_server_constructs_and_enforces_caller_quota(
         assert stats.snapshot()["rate_limited"] == 1
 
 
-def test_http_sidecar_can_be_health_only_and_caps_query_bodies():
-    minter = WorkIdMinter("miner-hotkey")
+def _authenticated_caller(*_args, **_kwargs):
+    return _VALIDATOR
+
+
+def test_the_query_route_requires_a_request_authorizer():
+    """No server is ever constructed that answers `/v1/query` to an unauthenticated caller."""
+
+    minter = fixed_minter("miner-hotkey")
+    with pytest.raises(ValueError, match="request authorizer"):
+        _handler(minter)
+    with pytest.raises(ValueError, match="request authorizer"):
+        make_server(minter, 0)
+    # A health-only server answers no query, so it needs none.
+    assert _handler(minter, query_enabled=False) is not None
+
+
+def test_the_health_surface_serves_no_queries_and_the_query_route_caps_bodies():
+    minter = fixed_minter("miner-hotkey")
 
     def invoke(handler_cls, *, length, body=b""):
         handler = handler_cls.__new__(handler_cls)
@@ -2211,7 +2149,13 @@ def test_http_sidecar_can_be_health_only_and_caps_query_bodies():
         404,
         {"error": "not found"},
     )
-    assert invoke(_handler(minter), length=MAX_HTTP_QUERY_BYTES + 1)[0] == 413
+    assert (
+        invoke(
+            _handler(minter, request_authorizer=_authenticated_caller),
+            length=MAX_HTTP_QUERY_BYTES + 1,
+        )[0]
+        == 413
+    )
 
 
 def test_partial_query_body_timeout_is_bounded_and_never_reaches_candidate_selection():
@@ -2221,8 +2165,9 @@ def test_partial_query_body_timeout_is_bounded_and_never_reaches_candidate_selec
 
     candidates = []
     handler_cls = _handler(
-        WorkIdMinter("miner-hotkey"),
+        fixed_minter("miner-hotkey"),
         candidate_resolver=lambda value: candidates.append(value) or value,
+        request_authorizer=_authenticated_caller,
     )
     handler = handler_cls.__new__(handler_cls)
     handler.path = "/v1/query"
@@ -2264,105 +2209,47 @@ def test_bounded_http_server_rejects_saturation_without_starting_another_thread(
     assert request.closed is True
 
 
-def test_plain_query_requires_the_exact_local_chain_posture(monkeypatch):
-    local = {
-        "AURELIUS_ENV": "testlab",
-        "AURELIUS_TRANSPORT": "btauth",
-        "CHAIN_ID": "localnet",
-        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
-        "SUBSTRATE_URL": "ws://subtensor:9944",
-    }
-    assert plain_query_allowed(local) is True
-    for key, external in (
-        ("AURELIUS_ENV", "testnet-full"),
-        ("CHAIN_ID", "bittensor-testnet:external"),
-        ("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "0x" + "ab" * 32),
-        ("AURELIUS_TRANSPORT", "other"),
-    ):
-        assert plain_query_allowed(dict(local, **{key: external})) is False
+def test_startup_identifies_the_chain_by_an_exact_genesis_hash():
+    """No sentinel and no environment label stands in for a chain identity."""
 
-    with pytest.raises(ValueError, match="CHAIN_ID=localnet"):
-        validate_miner_startup_posture(
-            {
-                "AURELIUS_ENV": "testlab",
-                "AURELIUS_TRANSPORT": "http",
-                "CHAIN_ID": "bittensor-testnet:external",
-                "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "0x" + "ab" * 32,
-                "SUBSTRATE_URL": "wss://test.finney.opentensor.ai:443",
-            }
-        )
-
-    monkeypatch.setenv("AURELIUS_ENV", "testlab")
-    monkeypatch.setenv("AURELIUS_TRANSPORT", "http")
-    monkeypatch.setenv("CHAIN_ID", "bittensor-testnet:external")
-    monkeypatch.setenv("AURELIUS_AXON_EXPECTED_GENESIS_HASH", "0x" + "ab" * 32)
-    monkeypatch.setenv("SUBSTRATE_URL", "wss://test.finney.opentensor.ai:443")
-    with pytest.raises(ValueError, match="CHAIN_ID=localnet"):
-        serve_plain_http(hotkey_name="must-not-open", port=0)
-
-
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        "wss://test.finney.opentensor.ai:443",
-        "ws://test.finney.opentensor.ai:9944",
-        "ws://subtensor:9945",
-        "ws://subtensor.example:9944",
-        "ws://subtensor:9944/rpc",
-        "ws://operator@subtensor:9944",
-        "ws://subtensor:9944?network=testnet",
-        " ws://subtensor:9944",
-    ],
-)
-def test_observe_once_rejects_nonlocal_subtensor_authorities(endpoint):
     posture = {
-        "AURELIUS_ENV": "testlab",
-        "AURELIUS_TRANSPORT": "btauth",
-        "AURELIUS_IDENTITY_SOURCE": "bittensor",
-        "AURELIUS_CLOCK": "real",
-        "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
         "AURELIUS_BITTENSOR_NONCE_DB": "/tmp/nonces.sqlite3",
         "AURELIUS_AXON_PUBLISH_STATE_DIR": "/tmp/axon-publish",
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Development",
-        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
         "AURELIUS_RUNTIME_SPEC_PIN": "432",
-        "CHAIN_ID": "localnet",
-        "SUBSTRATE_URL": endpoint,
+        "CHAIN_ID": "development",
+        "SUBSTRATE_URL": "ws://localhost:9944",
     }
+    for genesis in ("not-a-hash", "0x123", "0x" + "zz" * 32, "ab" * 32):
+        broken = dict(posture, AURELIUS_AXON_EXPECTED_GENESIS_HASH=genesis)
+        with pytest.raises(ValueError, match="AURELIUS_AXON_EXPECTED_GENESIS_HASH"):
+            validate_miner_startup_posture(broken)
 
-    assert plain_query_allowed(posture) is False
-    with pytest.raises(ValueError, match="SUBSTRATE_URL"):
-        validate_miner_startup_posture(posture)
 
-
-def test_observe_once_external_endpoint_fails_before_sdk_or_state_mutation(monkeypatch, tmp_path):
+def test_an_invalid_endpoint_fails_before_sdk_or_state_mutation(monkeypatch, tmp_path):
+    """The startup check runs before the SDK is imported or any state directory is created."""
     import subnet.miner.axon_serve as subject
 
     publish_dir = tmp_path / "must-not-be-created"
     values = {
-        "AURELIUS_ENV": "testlab",
-        "AURELIUS_TRANSPORT": "btauth",
-        "AURELIUS_IDENTITY_SOURCE": "bittensor",
-        "AURELIUS_CLOCK": "real",
-        "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
         "AURELIUS_BITTENSOR_NONCE_DB": str(tmp_path / "must-not-open.sqlite3"),
         "AURELIUS_AXON_PUBLISH_STATE_DIR": str(publish_dir),
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Development",
-        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
+        "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "0x" + "cd" * 32,
         "AURELIUS_RUNTIME_SPEC_PIN": "432",
-        "CHAIN_ID": "localnet",
-        "SUBSTRATE_URL": "wss://test.finney.opentensor.ai:443",
+        "CHAIN_ID": "development",
+        "SUBSTRATE_URL": "wss://operator@chain.example:443",
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(
         subject,
         "require_bittensor_v11",
-        lambda: pytest.fail("SDK import must follow local-endpoint posture validation"),
+        lambda: pytest.fail("the SDK must not be imported before the posture is validated"),
     )
 
     with pytest.raises(ValueError, match="SUBSTRATE_URL"):
-        subject.serve_axon_forever(hotkey_name="miner-0", netuid=455)
+        subject.serve_axon_forever(netuid=455)
     assert not publish_dir.exists()
 
 
@@ -2480,42 +2367,51 @@ def test_sdk_block_decode_must_match_independent_canonical_block(fault):
         )
 
 
-def test_miner_production_posture_rejects_development_seams():
-    secure = {
+def _serving_posture():
+    """A complete, valid posture for a chain that is not the mainnet."""
+    return {
         "CONFIG_SIGNING_PUBKEY": "ab" * 32,
         "CENTRAL_API_URL": "http://central-api:4000",
-        "AURELIUS_ENV": "prod",
-        "AURELIUS_TRANSPORT": "btauth",
-        "AURELIUS_IDENTITY_SOURCE": "bittensor",
-        "AURELIUS_CLOCK": "real",
         "AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET": "true",
-        "AURELIUS_AXON_ENDPOINT_PROFILE": "public",
         "AURELIUS_BITTENSOR_NONCE_DB": "/var/lib/aurelius/btauth-nonces.sqlite3",
         "AURELIUS_AXON_PUBLISH_STATE_DIR": "/var/lib/aurelius/axon-publish",
         "AURELIUS_AXON_EXPECTED_CHAIN_NAME": "Bittensor",
         "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "0x" + "ab" * 32,
         "AURELIUS_RUNTIME_SPEC_PIN": "432",
-        "CHAIN_ID": "bittensor-mainnet:reviewed-genesis",
-        "SUBSTRATE_URL": "wss://mainnet.example:443",
+        "CHAIN_ID": "development",
+        "SUBSTRATE_URL": "wss://chain.example:443",
     }
-    validate_miner_startup_posture(secure)
+
+
+def test_startup_admits_one_posture_on_any_chain():
+    """What identifies a chain is its genesis hash and pins. A local chain's plain `ws://`
+    endpoint and a private advertised network are ordinary settings."""
+    validate_miner_startup_posture(_serving_posture())
+    validate_miner_startup_posture(
+        dict(
+            _serving_posture(),
+            SUBSTRATE_URL="ws://localhost:9944",
+            AURELIUS_AXON_ALLOWED_CIDRS="100.100.0.0/16,10.200.0.9/32",
+        )
+    )
+
+
+def test_startup_reports_every_broken_requirement():
+    posture = _serving_posture()
 
     for endpoint in (
-        "wss://operator@mainnet.example:443",
-        "wss://mainnet.example:443/rpc",
-        "wss://mainnet.example:443?unsafe=1",
-        "wss://mainnet.example:443#fragment",
-        " wss://mainnet.example:443",
+        "wss://operator@chain.example:443",
+        "wss://chain.example:443/rpc",
+        "wss://chain.example:443?unsafe=1",
+        "wss://chain.example:443#fragment",
+        " wss://chain.example:443",
     ):
         with pytest.raises(ValueError, match="SUBSTRATE_URL"):
-            validate_miner_startup_posture(dict(secure, SUBSTRATE_URL=endpoint))
+            validate_miner_startup_posture(dict(posture, SUBSTRATE_URL=endpoint))
 
     for key, bad in (
         ("CONFIG_SIGNING_PUBKEY", ""),
         ("CENTRAL_API_URL", ""),
-        ("AURELIUS_TRANSPORT", "http"),
-        ("AURELIUS_IDENTITY_SOURCE", "deterministic"),
-        ("AURELIUS_CLOCK", "frozen"),
         ("AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET", "false"),
         ("AURELIUS_BITTENSOR_NONCE_DB", ""),
         ("AURELIUS_AXON_PUBLISH_STATE_DIR", ""),
@@ -2524,19 +2420,8 @@ def test_miner_production_posture_rejects_development_seams():
         ("AURELIUS_RUNTIME_SPEC_PIN", ""),
         ("CHAIN_ID", ""),
         ("SUBSTRATE_URL", ""),
-        ("AURELIUS_AXON_ENDPOINT_PROFILE", "testlab-private"),
+        ("AURELIUS_AXON_ALLOWED_CIDRS", "8.8.8.0/24"),
     ):
-        broken = dict(secure, **{key: bad})
+        broken = dict(posture, **{key: bad})
         with pytest.raises(ValueError, match=key):
             validate_miner_startup_posture(broken)
-
-    # Explicit testlab is the only compatibility profile that may retain the HTTP responder.
-    validate_miner_startup_posture(
-        {
-            "AURELIUS_ENV": "testlab",
-            "AURELIUS_TRANSPORT": "http",
-            "CHAIN_ID": "localnet",
-            "AURELIUS_AXON_EXPECTED_GENESIS_HASH": "observe-once-testlab",
-            "SUBSTRATE_URL": "ws://subtensor:9944",
-        }
-    )

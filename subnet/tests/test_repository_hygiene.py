@@ -3,8 +3,9 @@
 Nothing that belongs to the operator's own infrastructure may live in the package or in its
 tests: no operator-only module, no retired launch generation or test network, no copied-in
 extraction stamp, no pinned image, no sibling repository, no name of the operator's hardware,
-and no path into the validator's own records. The rules are written so that this file does not
-itself carry any private name.
+no path into the validator's own records, and no switch of the local development posture that
+was removed. The miner has one posture. The rules are written so that this file does not itself
+carry any private name.
 """
 
 import re
@@ -30,6 +31,23 @@ FORBIDDEN = {
         r"github(?:usercontent)?\.com/Aurelius-Protocol/"
         r"(?!Aurelius-Protocol(?:\.git)?(?![A-Za-z0-9_.-]))"
     ),
+    # The local development posture was removed: the miner has one posture. None of the
+    # switches that selected another one may come back, in the package or in its tests.
+    "a removed environment label": re.compile(r"\bAURELIUS_ENV\b"),
+    "a removed transport switch": re.compile(r"\bAURELIUS_TRANSPORT\b"),
+    "a removed clock switch": re.compile(r"\bAURELIUS_CLOCK\b"),
+    "a removed identity-source switch": re.compile(r"\bAURELIUS_IDENTITY_SOURCE\b"),
+    "a removed endpoint profile": re.compile(r"\bAURELIUS_AXON_ENDPOINT_PROFILE\b"),
+    "a variable the miner no longer reads": re.compile(
+        r"\b(?:MINER_HOTKEY|MINER_COLDKEY|AURELIUS_CANDIDATE_SOURCE)\b"
+    ),
+    "a removed test network's environment": re.compile(
+        r"testnet-full|AURELIUS_TESTNET_AXON_SERVE_ACK"
+    ),
+    "a removed development sentinel": re.compile(
+        r"observe-once-testlab|AURELIUS_TESTLAB_FAULTS|aurelius-testlab-wallet"
+    ),
+    "the removed development environment": re.compile(r"(?i)\btestlab\b|\"localnet\""),
 }
 HARDWARE = re.compile(r"(?i)gh200")
 
@@ -86,6 +104,24 @@ def test_each_pattern_recognises_what_it_names():
     assert records.search("docs/plan/x.md")
     assert records.search("docs/adr/0000-template.md")
     assert not records.search("[Gamma funding](docs/gamma-funding.md)")
+    for label, text in (
+        ("a removed environment label", 'os.environ.get("AURELIUS_ENV", "prod")'),
+        ("a removed transport switch", "AURELIUS_TRANSPORT=btauth"),
+        ("a removed clock switch", "AURELIUS_CLOCK=real"),
+        ("a removed identity-source switch", "AURELIUS_IDENTITY_SOURCE=deterministic"),
+        ("a removed endpoint profile", "AURELIUS_AXON_ENDPOINT_PROFILE=testlab-private"),
+        ("a variable the miner no longer reads", 'os.environ.get("MINER_HOTKEY", "miner")'),
+        ("a variable the miner no longer reads", "AURELIUS_CANDIDATE_SOURCE=staging"),
+        ("a removed test network's environment", 'environ.get("AURELIUS_ENV") == "testnet-full"'),
+        ("a removed development sentinel", '"observe-once-testlab"'),
+        ("a removed development sentinel", "aurelius-testlab-wallet:"),
+        ("the removed development environment", "# for the local testlab only"),
+        ("the removed development environment", 'CHAIN_ID == "localnet"'),
+    ):
+        assert FORBIDDEN[label].search(text), label
+    # Names that stay are not caught.
+    assert not FORBIDDEN["a variable the miner no longer reads"].search("MINER_HOTKEY_SS58")
+    assert not FORBIDDEN["the removed development environment"].search("a local network")
 
 
 def test_the_package_names_none_of_the_operator_s_infrastructure():

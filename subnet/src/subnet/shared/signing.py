@@ -243,7 +243,7 @@ def verify_artifact_upload(public_key: bytes, signature: bytes, **fields) -> boo
 def is_fresh(timestamp: int, *, now: int, max_past: int, max_future: int) -> bool:
     """Freshness check against a caller-supplied anchor (§3.3) — no wall-clock in here.
 
-    `now` is injected (the validator's cycle-start anchor / the frozen testlab Clock), keeping
+    `now` is injected (the validator's cycle-start anchor), keeping
     this pure and deterministic under test.
     """
     if isinstance(timestamp, bool) or not isinstance(timestamp, int):

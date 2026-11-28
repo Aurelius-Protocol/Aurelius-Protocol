@@ -205,7 +205,7 @@ as shown above.
 | --- | --- | --- |
 | `SUBSTRATE_URL` | Your Bittensor mainnet `wss://` endpoint | Chain reads and endpoint publication. Plain `wss://host` URLs and OnFinality API-key URLs are accepted. An archive node is recommended. |
 | `AURELIUS_BT_WALLET` | Your wallet name | Wallet directory under `AURELIUS_BT_WALLET_PATH`. |
-| `AURELIUS_BT_HOTKEY` / `MINER_HOTKEY` | Your hotkey name | Signing hotkey; keep both the same. |
+| `AURELIUS_BT_HOTKEY` | Your hotkey name | The hotkey the miner signs with. |
 | `AURELIUS_BT_WALLET_PATH` | Absolute path | The hotkey-only wallet copy from step 2. |
 | `AURELIUS_AXON_EXTERNAL_IP` | Your public IPv4 | Address advertised on-chain. |
 | `AURELIUS_AXON_EXTERNAL_PORT` | `8091` | Advertised port. |
@@ -217,9 +217,8 @@ as shown above.
 
 ### Leave as supplied
 
-`NETUID`, `CENTRAL_API_URL`, `AURELIUS_ENV`, `CHAIN_ID`, `AURELIUS_AXON_EXPECTED_CHAIN_NAME`,
-`AURELIUS_AXON_EXPECTED_GENESIS_HASH`, `AURELIUS_TRANSPORT`, `AURELIUS_IDENTITY_SOURCE`,
-`AURELIUS_CLOCK`, `AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET`, `AURELIUS_AXON_ENDPOINT_PROFILE` and
+`NETUID`, `CENTRAL_API_URL`, `CHAIN_ID`, `AURELIUS_AXON_EXPECTED_CHAIN_NAME`,
+`AURELIUS_AXON_EXPECTED_GENESIS_HASH`, `AURELIUS_REQUIRE_HOTKEY_ONLY_WALLET` and
 `AURELIUS_MINER_HTTP_PORT`.
 
 `AURELIUS_RUNTIME_SPEC_PIN` (`497`) and `AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN` (`2`) must
@@ -230,6 +229,7 @@ After a chain upgrade, update this repository and its pins together; the miner r
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `AURELIUS_AXON_ALLOWED_CIDRS` | unset | Only when your advertised address is not a public IPv4: the networks, as CIDRs, it may come from. They must not be globally routable. A public address needs nothing here. |
 | `AURELIUS_AXON_MAX_FEE_TAO` | `0.01` | Maximum endpoint-publication fee in TAO. |
 | `AURELIUS_MINER_MAX_CONCURRENT_REQUESTS` | `32` | Concurrent requests (`1`–`256`). |
 | `AURELIUS_MINER_SOCKET_TIMEOUT_S` | `5` | Socket timeout in seconds (up to `60`). |

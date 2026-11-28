@@ -1,12 +1,12 @@
 """Bittensor v11 miner endpoint: publish on-chain, serve receiver-bound btauth/1 HTTP.
 
 CONTRACT (capsule header)
-- The envelope is BYTE-IDENTICAL to plain-http mode: the same `WorkIdMinter.envelope`
-  and mints an exact v2 authorization bound to request ID, fanout window, and the authenticated
-  btauth caller hotkey. A caller whose declared validator audience differs from that identity is
-  rejected before candidate selection; the coldkey is never present.
+- The envelope is minted by the one `WorkIdMinter.envelope` and is an exact v2 authorization
+  bound to request ID, fanout window, and the authenticated btauth caller hotkey. A caller whose
+  declared validator audience differs from that identity is rejected before candidate selection;
+  the coldkey is never present.
 - `external_ip` is ALWAYS explicit (env `AURELIUS_AXON_EXTERNAL_IP`, default the container's own
-  address) — never the SDK's IP-echo autodiscovery (no network egress from the testlab). The bind
+  address) — never the SDK's IP-echo autodiscovery (no network egress from the miner). The bind
   port and advertised NAT port are separate: `AURELIUS_AXON_EXTERNAL_PORT` selects only the
   on-chain endpoint and is range/shape checked before publication.
 - Candidate admission requires a finalized validator-permit view before any public listener opens.
@@ -17,8 +17,7 @@ CONTRACT (capsule header)
   durable intent, submits at most once, and may recover only from an exact finalized-chain tuple.
   An ambiguous result is never retried across process or Compose-project restarts.
 - No HTTP socket opens until durable publication/recovery and the first finalized permit sync.
-  The :8092 sidecar then answers ready; `/v1/query` is available only in the exact local
-  testlab/localnet/observed-genesis posture. Both surfaces have bounded concurrency/read deadlines.
+  The health sidecar then answers ready. Both surfaces have bounded concurrency/read deadlines.
 - SDK pin: bittensor 11.0.0. V11 provides no Axon/Dendrite/Synapse server; the application owns
   HTTP and uses ``bittensor.http_auth`` for raw-body authentication and replay protection.
 - NO priority_fn: stake-ordered priority is economics-adjacent (STOP discipline).
@@ -42,7 +41,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from subnet.axon_protocol import (
-    CANDIDATE_SOURCE_INLINE,
+    CANDIDATE_SOURCE_STAGING,
     MAX_CONFIG_JSON_BYTES,
     PROTOCOL_VERSION,
 )
@@ -63,7 +62,6 @@ from subnet.miner.serve import (
     load_bittensor_wallet,
     make_server,
     minter_from_bittensor_wallet,
-    plain_query_allowed,
     start_status_line,
     validate_miner_startup_posture,
 )
@@ -89,7 +87,6 @@ from subnet.miner.prepared_extrinsic import (
     validate_submission_claim_evidence,
     validate_unsigned_dict,
 )
-from subnet.shared.canonicalization import parse_canonical_json
 from subnet.shared.network_policy import AxonEndpointPolicy
 
 
@@ -128,7 +125,6 @@ class _AxonScanPending(AxonPublishError):
     """A claimed submission must remain scan-only until finalized evidence catches up."""
 
 
-_TESTNET_AXON_SERVE_ACK = "I_ACKNOWLEDGE_UP_TO_FOUR_SN455_AXON_ENDPOINT_UPDATES"
 _DEFAULT_MAX_FEE_TAO = Decimal("0.01")
 _MAX_MAX_FEE_TAO = Decimal("0.01")
 _RAO_PER_TAO = 1_000_000_000
@@ -194,14 +190,6 @@ def finalized_axon_evidence_document(
         "prepared_attempt": prepared_attempt,
         "causal_extrinsic_evidence": causal_extrinsic_evidence,
     }
-
-
-def authorize_testnet_axon_publication(raw: str | None = None) -> None:
-    """Require an exact operator acknowledgement immediately before an Axon chain write."""
-
-    value = os.environ.get("AURELIUS_TESTNET_AXON_SERVE_ACK") if raw is None else raw
-    if value != _TESTNET_AXON_SERVE_ACK:
-        raise AxonPublishError("SN455 Axon publication acknowledgement is absent or invalid")
 
 
 def _strict_json_object(path: Path):
@@ -294,7 +282,6 @@ def guarded_publish_once(
     observe,
     publish,
     *,
-    authorize_publish=None,
     post_submit_observe_attempts=1,
     post_submit_observe_delay=0.0,
     sleeper=None,
@@ -305,9 +292,8 @@ def guarded_publish_once(
 ):
     """Publish at most once across process and Compose-project restarts.
 
-    ``state_dir`` is host-stable in the external-testnet profile. An unresolved intent is never
-    retried: a later process may continue only when a finalized chain read already equals the
-    exact intended Axon tuple. Ordinary localnet mode does not select this helper.
+    ``state_dir`` is host-stable. An unresolved intent is never retried: a later process may
+    continue only when a finalized chain read already equals the exact intended Axon tuple.
     """
     if not isinstance(identity, dict) or not identity:
         raise AxonPublishError("guarded Axon publish identity must be a non-empty object")
@@ -381,12 +367,6 @@ def guarded_publish_once(
         }
         _atomic_json(finalized_path, finalized)
         return finalized
-
-    # A missing acknowledgement is a configuration refusal, not an ambiguous chain attempt. Run
-    # this after exact read-back (which can prove that no write is needed) but before the durable
-    # intent that permanently forbids retry after any possible submission.
-    if authorize_publish is not None:
-        authorize_publish()
 
     plan_evidence = plan() if plan is not None else None
     if plan_evidence is not None and not isinstance(plan_evidence, dict):
@@ -510,14 +490,14 @@ def build_envelope_json(
     fanout_window=-1,
     validator_version="",
     protocol_version=PROTOCOL_VERSION,
-    candidate_source=CANDIDATE_SOURCE_INLINE,
+    candidate_source=CANDIDATE_SOURCE_STAGING,
     *,
     candidate_resolver=None,
 ) -> str:
     """The forward body, refusals-as-empty (the validator maps an empty envelope to
-    MinerUnreachable): size cap, miner-owned candidate resolution, then the SAME minter as http
-    mode. ``config_json`` is decoded only for explicit inline compatibility; staging mode never
-    treats validator bytes as the candidate."""
+    MinerUnreachable): size cap, miner-owned candidate resolution, then the SAME minter as the
+    authenticated wire. ``config_json`` is bounded but never decoded: validator bytes are not
+    the candidate."""
     try:
         if (
             not isinstance(config_json, str)
@@ -534,8 +514,6 @@ def build_envelope_json(
             "task_type": task_type,
             "schema_version": int(schema_version),
         }
-        if candidate_source == CANDIDATE_SOURCE_INLINE:
-            request["config"] = parse_canonical_json(config_json)
         resolve_candidate = candidate_resolver or candidate_for_request
         envelope = minter.envelope(
             resolve_candidate(request),
@@ -1148,21 +1126,9 @@ def _guarded_external_publish(
     rpc = FinalizedRpc(endpoint)
     try:
         initial = rpc.snapshot()
-        observe_local_genesis = (
-            expected_genesis == "observe-once-testlab"
-            and os.environ.get("AURELIUS_ENV") == "testlab"
-            and chain_id == "localnet"
-        )
-        if (
-            not observe_local_genesis
-            and re.fullmatch(r"0x[0-9a-fA-F]{64}", expected_genesis) is None
-        ):
-            raise AxonPublishError(
-                "AURELIUS_AXON_EXPECTED_GENESIS_HASH must be an exact hash outside local testlab"
-            )
-        expected_genesis_hash = (
-            initial.genesis_hash.lower() if observe_local_genesis else expected_genesis.lower()
-        )
+        if re.fullmatch(r"0x[0-9a-fA-F]{64}", expected_genesis) is None:
+            raise AxonPublishError("AURELIUS_AXON_EXPECTED_GENESIS_HASH must be an exact hash")
+        expected_genesis_hash = expected_genesis.lower()
         _validate_finalized_snapshot(
             initial,
             expected_chain=expected_chain,
@@ -1971,8 +1937,6 @@ def _guarded_external_publish(
                     causal_evidence={"status": "not_required"},
                     submission_attempts=0,
                 )
-            if os.environ.get("AURELIUS_ENV") == "testnet-full":
-                authorize_testnet_axon_publication()
 
         def validate_prior_attempt_one():
             _prior_document, _prior_unsigned, prior_authority = load_authority(1)
@@ -2179,9 +2143,9 @@ def _permitted_validators_from_metagraph(metagraph) -> frozenset:
 def advertised_port(bind_port: int, raw: str | None = None) -> int:
     """Resolve the independently advertised Axon port.
 
-    Localnet keeps the historical same-port default. A NAT/profile deployment supplies the env
-    explicitly; malformed or out-of-range values fail startup instead of publishing an endpoint
-    different from the operator's intended mapping.
+    The default advertises the bind port. A NAT deployment supplies the env explicitly;
+    malformed or out-of-range values fail startup instead of publishing an endpoint different
+    from the operator's intended mapping.
     """
     value = os.environ.get("AURELIUS_AXON_EXTERNAL_PORT") if raw is None else raw
     if value is None:
@@ -2194,7 +2158,7 @@ def advertised_port(bind_port: int, raw: str | None = None) -> int:
     return port
 
 
-def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> None:
+def serve_axon_forever(*, netuid: int, port: int = 8091) -> None:
     validate_miner_startup_posture()
     configured_external_ip = os.environ.get("AURELIUS_AXON_EXTERNAL_IP")
     # The durable publish directory is created before any wallet is loaded or RPC opened.
@@ -2203,21 +2167,17 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
         bt = require_bittensor_v11()
     except ImportError as e:
         raise NotImplementedError(
-            "miner btauth mode needs the Bittensor SDK — install the optional `bt` extra "
-            "(the chain-bt image); AURELIUS_TRANSPORT=http needs none of this"
+            "the miner needs the Bittensor SDK — install the optional `bt` extra "
+            "(the chain-bt image)"
         ) from e
 
     serving_config = ServingConfig()
     # Load once and bind BOTH btauth and application work-id signatures to this exact hotkey.
     wallet = load_bittensor_wallet(bt)
-    minter = minter_from_bittensor_wallet(
-        hotkey_name, wallet, clock=os.environ.get("AURELIUS_CLOCK", "frozen")
-    )
+    minter = minter_from_bittensor_wallet(wallet)
     registered = RegisteredSet()
     external_ip = configured_external_ip or socket.gethostbyname(socket.gethostname())
     endpoint_policy = AxonEndpointPolicy.build(
-        environment=os.environ.get("AURELIUS_ENV", "prod"),
-        profile=os.environ.get("AURELIUS_AXON_ENDPOINT_PROFILE", "public"),
         allowed_cidrs=os.environ.get("AURELIUS_AXON_ALLOWED_CIDRS"),
     )
     external_ip = endpoint_policy.require(external_ip)
@@ -2286,22 +2246,20 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
         limiter = caller_rate_limiter()
         http_port = int(os.environ.get("AURELIUS_MINER_HTTP_PORT", "8092") or 0)
         if http_port:
-            query_enabled = plain_query_allowed()
-            bind_host = "0.0.0.0" if query_enabled else "127.0.0.1"
+            # Health only, loopback only: queries reach the miner on the authenticated port.
             sidecar = make_server(
                 minter,
                 http_port,
                 status=status,
-                query_enabled=query_enabled,
-                bind_host=bind_host,
+                query_enabled=False,
+                bind_host="127.0.0.1",
                 stats=stats,
                 rate_limiter=limiter,
                 serving_config=serving_config,
             )
             servers.append(sidecar)
             threading.Thread(target=sidecar.serve_forever, daemon=True).start()
-            mode = "health + /v1/query" if query_enabled else "health-only"
-            print(f"[miner:btauth] plain sidecar on {bind_host}:{http_port} ({mode})", flush=True)
+            print(f"[miner:btauth] health sidecar on 127.0.0.1:{http_port}", flush=True)
 
         authorizer = make_btauth_authorizer(bt, wallet, registered, nonce_store=nonce_store)
         authenticated = make_server(

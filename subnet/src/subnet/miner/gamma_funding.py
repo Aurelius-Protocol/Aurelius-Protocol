@@ -2195,7 +2195,7 @@ def run(
     """Wire the CLI action to transports; reads stay wallet-free, execute never loads a wallet."""
     from subnet.miner.serve import minter_from_env
 
-    minter = minter_from_env(os.environ.get("MINER_HOTKEY", "default"))
+    minter = minter_from_env()
     rpc = FinalizedRpc(endpoint)
     chain = GammaChain(rpc)
     try:

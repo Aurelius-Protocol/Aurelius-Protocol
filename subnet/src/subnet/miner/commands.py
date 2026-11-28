@@ -1,13 +1,13 @@
-"""Miner CLI command bodies (plan §1.8): `validate`, `balance`, `deposit`.
+"""Miner CLI command bodies (plan §1.8): `validate`, `balance`, `observe`, `ready`.
 
 CONTRACT (capsule header)
 - `validate`: check every staged item against the PUBLISHED config_schema (never a lane import);
   invalid configs are surfaced and the command exits non-zero (a pre-submission hygiene gate).
 - `balance`: a PUBLIC affordability read (`/api/can_afford`) + the deposit address — the miner
   never authenticates (only validators hold sessions) and never charges (invariant 1).
-- `deposit`: the ONLY command that unlocks the coldkey, and it uses it LOCALLY — resolves the
-  work-token deposit address and reports the transfer the operator must make on-chain. The coldkey
-  is never placed in a network payload. The actual on-chain transfer runs under the `chain` profile.
+- `observe`: refresh charge/refund and validator-progress facts into the local journal. It signs
+  only read-only observation requests with the hotkey, and it never charges.
+- `ready`: check whether a staged candidate is eligible for a fanout window.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from urllib.parse import urlencode
 
 from subnet.miner import config_schema
 from subnet.miner.staging import StagingPool
-from subnet.miner.wallet import load_coldkey
 
 
 def _central() -> str:
@@ -174,7 +173,7 @@ def run_observe(
             flush=True,
         )
         return 2
-    minter = minter_from_env(os.environ.get("MINER_HOTKEY", "miner-hotkey"))
+    minter = minter_from_env()
     book = AttemptJournal(journal)
     results = []
     for attempt in book.attempts(limit=limit):
@@ -229,30 +228,5 @@ def run_observe(
             {"schema_version": 1, "authority": "observations_only", "refresh": results},
             sort_keys=True,
         )
-    )
-    return 0
-
-
-def run_deposit(coldkey_name: str, *, unlocked: bool) -> int:
-    """Resolve the deposit address and report the transfer to make. Unlocks the coldkey LOCALLY
-    (never sent). The on-chain transfer itself runs under the `chain` profile."""
-    from subnet.miner.wallet import ColdkeyLocked
-
-    try:
-        _pair, coldkey_ss58 = load_coldkey(coldkey_name, unlocked=unlocked)
-    except ColdkeyLocked as e:
-        print(f"[aurelius-miner] deposit: {e}", flush=True)
-        return 2
-
-    try:
-        address = _get("/api/deposit_address").get("address", "<unavailable>")
-    except (urllib.error.URLError, OSError, ValueError):
-        address = "<unavailable>"
-
-    print(
-        f"[aurelius-miner] deposit: from coldkey {coldkey_ss58} (unlocked locally) -> "
-        f"work-token wallet {address}. The on-chain transfer_stake runs under the `chain` profile; "
-        "the coldkey signs it LOCALLY and is never sent to central.",
-        flush=True,
     )
     return 0

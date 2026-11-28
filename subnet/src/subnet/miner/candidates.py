@@ -2,17 +2,16 @@
 
 CONTRACT (capsule header)
 - Every request has one closed v2 metadata shape, including the validator audience, 64-hex
-  request identity, and non-negative authoritative fanout window. A ``staging`` request is
-  operator policy only: candidate bytes come exclusively from the miner's local ``StagingPool``;
-  any validator-supplied ``config`` is ignored.
+  request identity, and non-negative authoritative fanout window. The validator chooses the lane
+  and its schema version; candidate bytes come exclusively from the miner's local
+  ``StagingPool``. Any validator-supplied ``config`` is ignored, and ``inline`` is refused before
+  candidate resolution, so a permitted validator can never make a miner sign validator-chosen
+  config.
 - Eligibility fails closed against the signed, published ``config_schema.<task_type>``. No lane
   implementation is imported, and schema unavailability never falls back to trusting the item.
-- ``inline`` retains testlab/one-shot candidate carriage as an explicit source, but ONLY under
-  the exact local testlab posture ([ADR-0292]); outside it an inline request is refused before
-  candidate resolution, so a permitted validator can never make a production miner sign
-  validator-chosen config. Production staging additionally requires window-scoped rows.
-- Window eligibility is miner-local, non-identity metadata. Stale/future candidates are skipped,
-  one exact-window candidate is stable for all validators, and ambiguity fails closed.
+- The pool must carry window-scoped rows. Window eligibility is miner-local, non-identity
+  metadata. Stale/future candidates are skipped, one exact-window candidate is stable for all
+  validators, and ambiguity fails closed.
 - This capsule selects content only. It knows nothing about payment, novelty, quality, scoring, or
   adoption; ``WorkIdMinter`` remains the sole envelope/signing step after selection.
 """
@@ -66,39 +65,30 @@ def _utf8_size(value: str, field: str) -> int:
         raise CandidateUnavailable(f"{field} must be valid UTF-8") from None
 
 
-def _inline_allowed() -> bool:
-    """Inline candidate carriage belongs to the exact local testlab posture only.
-
-    A permitted-but-malicious validator must never be able to make a production miner
-    mint work-ids for validator-chosen config (charge/score sabotage under the miner's
-    identity). Lazy import: serve imports this module at load time.
-    """
-    from subnet.miner.serve import plain_query_allowed
-
-    return plain_query_allowed()
-
-
 def candidate_for_request(
     request: dict,
     *,
     pool: StagingPool | None = None,
     schema_loader: Callable[[str], dict] = config_schema.load_published_schema,
-    allow_inline: bool | None = None,
 ) -> dict:
     """Resolve the exact task that ``WorkIdMinter`` may sign for this request.
 
-    Both sources share the same closed v2 request metadata. The staging source is the production
-    trust claim: the validator chooses the lane/version, but neither chooses nor supplies the
-    candidate. Outside the exact local testlab posture, ``inline`` requests are REFUSED and the
-    staging pool must carry window-scoped rows (``eligible_fanout_window``), so one stable
-    candidate serves every validator in a window — an unscoped legacy pool cannot rotate
-    divergent content per validator.
+    The staging pool is the miner's only candidate source and its trust claim: the validator
+    chooses the lane and version, but neither chooses nor supplies the candidate. A request for
+    ``inline`` carriage is refused before anything is read. The pool must carry window-scoped
+    rows (``eligible_fanout_window``), so one stable candidate serves every validator in a
+    window.
     """
     if not isinstance(request, dict):
         raise CandidateUnavailable("task request must be an object")
 
     source = request.get("candidate_source")
-    if source not in (CANDIDATE_SOURCE_INLINE, CANDIDATE_SOURCE_STAGING):
+    if source == CANDIDATE_SOURCE_INLINE:
+        raise CandidateUnavailable(
+            "candidate_source=inline is refused: a candidate comes only from the miner's "
+            "staging pool"
+        )
+    if source != CANDIDATE_SOURCE_STAGING:
         raise CandidateUnavailable(f"unknown candidate_source {source!r}")
     fields = frozenset(request)
     allowed_fields = _COMMON_REQUEST_FIELDS | {"config"}
@@ -108,15 +98,6 @@ def candidate_for_request(
         raise CandidateUnavailable(
             f"task request fields are not closed (missing={missing}, extra={extra})"
         )
-    if source == CANDIDATE_SOURCE_INLINE:
-        if allow_inline is None:
-            allow_inline = _inline_allowed()
-        if not allow_inline:
-            raise CandidateUnavailable(
-                "candidate_source=inline is confined to the exact local testlab posture"
-            )
-        if "config" not in fields:
-            raise CandidateUnavailable("inline request missing 'config'")
     request_id = request["request_id"]
     validator_hotkey = request["validator_hotkey_ss58"]
     fanout_window = request["fanout_window"]
@@ -143,9 +124,6 @@ def candidate_for_request(
     if type(schema_version) is not int or schema_version < 1:
         raise CandidateUnavailable("task request needs a positive integer schema_version")
 
-    if source == CANDIDATE_SOURCE_INLINE:
-        return _inline_candidate(request)
-
     try:
         schema = schema_loader(task_type)
     except config_schema.SchemaUnavailable as e:
@@ -166,7 +144,7 @@ def candidate_for_request(
             schema_version=schema_version,
             fanout_window=fanout_window,
             validate=lambda config: config_schema.validate_config(config, schema),
-            require_window_scoped=not _inline_allowed(),
+            require_window_scoped=True,
         )
     except (OSError, ValueError) as e:
         raise CandidateUnavailable(f"staging pool refused selection: {e}") from None
@@ -182,13 +160,4 @@ def candidate_for_request(
         "task_type": selected["task_type"],
         "schema_version": selected["schema_version"],
         "config": selected["config"],
-    }
-
-
-def _inline_candidate(request: dict) -> dict:
-    """The testlab validator-supplied candidate path, still carrying exact v2 authorization."""
-    return {
-        "task_type": request["task_type"],
-        "schema_version": request["schema_version"],
-        "config": request["config"],
     }

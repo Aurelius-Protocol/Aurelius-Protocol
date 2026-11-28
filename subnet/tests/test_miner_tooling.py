@@ -7,6 +7,7 @@ import pytest
 
 from subnet.miner import cli, commands
 from subnet.miner.staging import StagingPool, StagingSelectionError, item_id
+from .miner_fixtures import fixed_minter, mount_wallet
 
 pytestmark = pytest.mark.miner
 
@@ -21,8 +22,6 @@ def candidate(payload="a"):
 
 
 def test_serve_reports_configuration_errors_without_a_traceback(monkeypatch, tmp_path, capsys):
-    monkeypatch.delenv("AURELIUS_ENV", raising=False)
-    monkeypatch.delenv("AURELIUS_TRANSPORT", raising=False)
     monkeypatch.setenv("AURELIUS_MINER_JOURNAL", str(tmp_path / "attempts.sqlite3"))
     monkeypatch.setenv("AURELIUS_MINER_DATA", str(tmp_path))
     monkeypatch.setenv("AURELIUS_ACCEPT_INCENTIVES", "yes")
@@ -35,9 +34,8 @@ def test_serve_reports_configuration_errors_without_a_traceback(monkeypatch, tmp
 def test_observe_records_remote_facts_into_the_journal(monkeypatch, tmp_path, capsys):
     from subnet.miner import observation_client
     from subnet.miner.journal import AttemptJournal, identity_for
-    from subnet.miner.serve import WorkIdMinter
 
-    hotkey = WorkIdMinter("miner-hotkey").hotkey_ss58
+    hotkey = mount_wallet(monkeypatch, "miner-hotkey").hotkey.ss58_address
     candidate = {
         "task_type": "synthetic",
         "schema_version": 1,
@@ -82,9 +80,8 @@ def test_observe_records_remote_facts_into_the_journal(monkeypatch, tmp_path, ca
 def test_observe_journals_unavailable_central_as_unknown(monkeypatch, tmp_path, capsys):
     from subnet.miner import observation_client
     from subnet.miner.journal import AttemptJournal, identity_for
-    from subnet.miner.serve import WorkIdMinter
 
-    hotkey = WorkIdMinter("miner-hotkey").hotkey_ss58
+    hotkey = mount_wallet(monkeypatch, "miner-hotkey").hotkey.ss58_address
     candidate = {
         "task_type": "synthetic",
         "schema_version": 1,
@@ -222,7 +219,6 @@ def test_progress_reads_the_refusals_the_validator_reports(refusal, accepted):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
     from subnet.miner import observation_client
-    from subnet.miner.serve import WorkIdMinter
     from subnet.shared.config_snapshot import (
         SNAPSHOT_SIGNATURE_DOMAIN,
         canonical_hash,
@@ -241,7 +237,7 @@ def test_progress_reads_the_refusals_the_validator_reports(refusal, accepted):
         "canonical_hash": config_hash,
         "signature_hex": key.sign(SNAPSHOT_SIGNATURE_DOMAIN + f"{config_hash}|1".encode()).hex(),
     }
-    minter = WorkIdMinter("progress-reader")
+    minter = fixed_minter("progress-reader")
     identity = {"hotkey": minter.hotkey_ss58, "content_hash": "a" * 64, "fanout_window": 4}
 
     def fetch(url, *, body=None):

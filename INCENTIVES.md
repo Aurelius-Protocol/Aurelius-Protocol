@@ -121,8 +121,8 @@ aurelius-miner balance --task-type interp_sae
 aurelius-sae status --refresh --accounting --netuid "$NETUID"
 ```
 
-The legacy `deposit` command is a development seam, not a production funding path. Budget
-for training, failed attempts, renewals and operating costs; nothing here guarantees profit.
+Budget for training, failed attempts, renewals and operating costs; nothing here guarantees
+profit.
 
 ## Reference formula
 

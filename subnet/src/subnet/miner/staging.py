@@ -237,8 +237,8 @@ class StagingPool:
 
         if require_window_scoped and not has_window_scoped_row:
             raise StagingSelectionError(
-                "serving outside the local testlab posture requires a window-scoped staged "
-                f"candidate ({ELIGIBLE_FANOUT_WINDOW}) for this task"
+                "serving requires a window-scoped staged candidate "
+                f"({ELIGIBLE_FANOUT_WINDOW}) for this task"
             )
 
         eligible: list[dict] = []

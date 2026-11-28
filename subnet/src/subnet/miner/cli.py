@@ -1,12 +1,12 @@
 """Miner CLI entry point.
 
-The original v1 commands are: `deposit`, `balance`, `validate`, `serve` (plan §15.1).
-- `serve` (testlab long-running `miner` service): a `/v1/query` responder that mints a fresh,
-  real-sr25519-signed work_id per request; btauth readiness is exposed by the companion health
-  server on `AURELIUS_MINER_HTTP_PORT` (8092 in testlab), signing as `MINER_HOTKEY`.
+The commands are: `balance`, `validate`, `serve` (plan §15.1), and the ones added since.
+- `serve`: the long-running miner. It publishes its endpoint on chain and answers authenticated
+  `/v1/query` requests, each with a fresh real-sr25519-signed work_id, signing with the hotkey of
+  the mounted wallet. Readiness is exposed by the companion health server on
+  `AURELIUS_MINER_HTTP_PORT`.
 - `validate`: check staged items against the PUBLISHED config_schema (no lane import).
 - `balance`: a public affordability read + the deposit address (no session, no coldkey).
-- `deposit`: historical address read with optional local coldkey unlock.
 - `fund`: separate coldkey funding command, exact native-alpha transfer with durable intent;
   `--method gamma` selects the gamma work-token path (check/prepare/execute/status, §14-G7).
 - `observe`: lane-agnostic refresh of charge/refund + validator-progress facts into the local
@@ -24,12 +24,6 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-
-
-def _serve_mode() -> str:
-    """The shared wire seam: v11 ``btauth`` (publish endpoint + authenticated HTTP) or the
-    hermetic plain ``http`` responder."""
-    return os.environ.get("AURELIUS_TRANSPORT", "http")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -81,13 +75,6 @@ def main(argv: list[str] | None = None) -> int:
     dashboard.add_argument("--pool")
     dashboard.add_argument("--experiments", help="parent directory of local experiment runs")
     dashboard.add_argument("--port", type=int, default=8093)
-
-    deposit = sub.add_parser("deposit", help="resolve the deposit address (unlocks the coldkey)")
-    deposit.add_argument(
-        "--unlock",
-        action="store_true",
-        help="explicitly unlock the coldkey for local deposit signing (never sent)",
-    )
 
     fund = sub.add_parser(
         "fund",
@@ -277,7 +264,7 @@ def main(argv: list[str] | None = None) -> int:
             public_key = config_signing_pubkey()
         except ValueError as exc:
             parser.error(str(exc))
-        minter = minter_from_env(os.environ.get("MINER_HOTKEY", "miner-hotkey"))
+        minter = minter_from_env()
         result = read_economics(
             os.environ.get("CENTRAL_API_URL", "http://127.0.0.1:4000"),
             hotkey=minter.hotkey_ss58,
@@ -304,26 +291,18 @@ def main(argv: list[str] | None = None) -> int:
         from subnet.miner.staging import data_dir
 
         os.environ.setdefault("AURELIUS_MINER_JOURNAL", str(data_dir() / "attempts.sqlite3"))
-        hotkey_name = os.environ.get("MINER_HOTKEY", "miner-hotkey")
         from subnet.miner.serve import validate_miner_startup_posture
         from subnet.miner.terms import ensure_incentives_accepted
 
         try:
             ensure_incentives_accepted(accept_flag=args.accept_incentives)
             validate_miner_startup_posture()
-            if _serve_mode() == "btauth":
-                # Bittensor v11: publish the endpoint on-chain, run application-owned btauth HTTP,
-                # and keep :8092 for readiness + explicit testlab one-shot scenarios.
-                from subnet.miner.axon_serve import serve_axon_forever
+            # Bittensor v11: publish the endpoint on-chain, run application-owned btauth HTTP,
+            # and keep the health port for readiness.
+            from subnet.miner.axon_serve import serve_axon_forever
 
-                serve_axon_forever(hotkey_name=hotkey_name, netuid=args.netuid, port=args.port)
-                return 0
-            if _serve_mode() == "http":
-                from subnet.miner.serve import serve as serve_miner
-
-                serve_miner(hotkey_name=hotkey_name, port=args.port)
-                return 0
-            raise ValueError(f"unknown AURELIUS_TRANSPORT {_serve_mode()!r}")
+            serve_axon_forever(netuid=args.netuid, port=args.port)
+            return 0
         except KeyboardInterrupt:
             print("[aurelius-miner] serve interrupted", file=sys.stderr, flush=True)
             return 0
@@ -357,10 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         from subnet.miner.commands import run_balance
         from subnet.miner.serve import minter_from_env
 
-        hotkey_ss58 = (
-            args.hotkey
-            or minter_from_env(os.environ.get("MINER_HOTKEY", "miner-hotkey")).hotkey_ss58
-        )
+        hotkey_ss58 = args.hotkey or minter_from_env().hotkey_ss58
         return run_balance(hotkey_ss58, args.task_type)
 
     if args.command == "ready":
@@ -392,13 +368,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-
-    if args.command == "deposit":
-        from subnet.miner.commands import run_deposit
-
-        coldkey_name = os.environ.get("MINER_COLDKEY", "miner-coldkey")
-        unlocked = args.unlock or os.environ.get("AURELIUS_MINER_UNLOCK") == "1"
-        return run_deposit(coldkey_name, unlocked=unlocked)
 
     return 2
 
