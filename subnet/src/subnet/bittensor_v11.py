@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Small, explicit compatibility boundary for the pinned Bittensor v11 SDK.
 
 The v11 release is a rewrite, not a continuation of the v10 neuron stack.  Keeping the few

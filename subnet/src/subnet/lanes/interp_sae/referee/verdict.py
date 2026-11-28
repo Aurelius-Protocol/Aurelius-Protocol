@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Closed, deterministic Verdict JSON v3 construction (lane plan R1 / frozen seam S1).
 
 The public verdict is deliberately smaller than the referee's private diagnostics: closed base

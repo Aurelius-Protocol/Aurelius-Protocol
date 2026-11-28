@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Miner-facing observations and explanations; never scoring or allocation authority."""
 
 from __future__ import annotations

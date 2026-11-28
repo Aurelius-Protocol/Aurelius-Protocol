@@ -6,7 +6,7 @@ Retained475/477/479 profiles remain supported. Unknown identities still refuse
 before wallet unlock; a signed chain submission still requires its own verified
 Central receipt before the client reports credited funding.
 
-Validation on 2026-10-20 used an isolated GH200 arm64 Kubernetes Job:
+Validation on 2026-10-20 used an isolated arm64 machine:
 
 - Full public source suite: **463 passed**.
 - Full suite against the built wheel in a separate environment: **463 passed**.

@@ -15,7 +15,7 @@ from subnet.miner.funding import (
     transfer_event_index,
 )
 from subnet.miner.funding_client import TREASURY
-from subnet.operator.prepared_extrinsic import BITTENSOR_V11_SIGNED_EXTENSIONS
+from subnet.miner.prepared_extrinsic import BITTENSOR_V11_SIGNED_EXTENSIONS
 from subnet.shared.ss58 import ss58_encode
 from subnet.shared.sn37_economics import GENESIS_HASH
 

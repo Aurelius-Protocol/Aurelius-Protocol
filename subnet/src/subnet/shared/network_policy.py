@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Pure Axon endpoint policy shared by miner publication and validator discovery.
 
 Production admits only literal global-unicast addresses. Private Docker/cohost addresses require

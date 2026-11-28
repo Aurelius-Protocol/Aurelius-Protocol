@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """cost_class / cost_model_version derivation (shared library, spec §3.2).
 
 CONTRACT (capsule header)

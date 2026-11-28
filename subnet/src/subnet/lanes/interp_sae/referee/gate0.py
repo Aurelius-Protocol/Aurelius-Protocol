@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Cheap, dependency-free Gate 0 checks for the v5-native SAE referee.
 
 Contract: R2/S4 authenticates the exact two-file SAE-Lens bundle and validates every signed slot

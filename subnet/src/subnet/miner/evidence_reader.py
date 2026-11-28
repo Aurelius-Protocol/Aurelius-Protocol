@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Descriptor-bound readers for retained operator evidence.
 
 Security-sensitive terminal decisions must not validate one pathname incarnation and hash a

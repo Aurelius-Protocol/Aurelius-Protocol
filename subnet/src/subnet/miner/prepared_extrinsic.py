@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 """Reusable authority records for Bittensor 11 prepared-extrinsic submission.
 
 ``Subtensor.execute`` intentionally hides plan, signing, and submission behind one call.  That is
@@ -19,7 +18,7 @@ from dataclasses import dataclass
 import hashlib
 import re
 from typing import Any, Mapping
-from subnet.operator.evidence_reader import canonical_json_bytes
+from subnet.miner.evidence_reader import canonical_json_bytes
 from subnet.shared.signing import verify as verify_sr25519
 from subnet.shared.ss58 import ss58_decode
 

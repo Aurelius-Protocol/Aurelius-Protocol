@@ -1,4 +1,3 @@
-# Miner dependency subset extracted from Aurelius v5 (02375403).
 r"""Appendix-F canonicalization + `content_hash` (NORMATIVE implementation, appf-v1).
 
 CONTRACT (capsule header)
@@ -12,7 +11,7 @@ CONTRACT (capsule header)
   machine-readable `.kind`) rather than coercing — a silent coercion would collapse distinct
   inputs onto one hash (a dedup/novelty/charge bug).
 
-Appendix-F rules implemented here (spec `docs/spec/aurelius-spec-v2-9.md`, App F):
+Appendix-F rules implemented here (the Aurelius specification, Appendix F):
 - content_hash = SHA-256(domain_separator || preimage), domain `aurelius/content_hash/v1\n`;
   preimage joins canon(task_type), canon(schema_version), canon(config), canon(cost_model_version),
   canon(cost_class) with 0x1F. 0x1F can never appear inside canon() output because every control

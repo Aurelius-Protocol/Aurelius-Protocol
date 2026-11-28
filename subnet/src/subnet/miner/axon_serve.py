@@ -67,29 +67,12 @@ from subnet.miner.serve import (
     start_status_line,
     validate_miner_startup_posture,
 )
-from subnet.operator.evidence_reader import (
+from subnet.miner.evidence_reader import (
     EvidenceReadError,
     canonical_json_bytes,
     read_json_evidence,
 )
-from subnet.operator.sn455_runtime452_action_claim import (
-    ACTION_SIGNERS as RUNTIME452_ACTION_SIGNERS,
-    AXON_ENDPOINTS as RUNTIME452_AXON_ENDPOINTS,
-    CLAIM_FILE_ENV as RUNTIME452_CLAIM_FILE_ENV,
-    GENERATION_FILE_ENV as RUNTIME452_GENERATION_FILE_ENV,
-    HANDOFF_FILE_ENV as RUNTIME452_HANDOFF_FILE_ENV,
-    PLUMBING_PROFILE_ID as RUNTIME452_PLUMBING_PROFILE_ID,
-    PROFILE_ID as RUNTIME452_PROFILE_ID,
-    SERVE_AXON_ACTION as RUNTIME452_SERVE_AXON_ACTION,
-    Runtime452ActionClaim,
-    Runtime452ActionClaimError,
-    runtime452_action_claim_from_env,
-)
-from subnet.operator.runtime452_action_journal import (
-    Runtime452ActionJournalCustody,
-    Runtime452ActionJournalError,
-)
-from subnet.operator.prepared_extrinsic import (
+from subnet.miner.prepared_extrinsic import (
     MAX_PREPARED_ATTEMPTS,
     decoded_scan_candidate,
     prepared_evidence,
@@ -108,9 +91,6 @@ from subnet.operator.prepared_extrinsic import (
 )
 from subnet.shared.canonicalization import parse_canonical_json
 from subnet.shared.network_policy import AxonEndpointPolicy
-
-
-RUNTIME452_PROFILE_IDS = frozenset({RUNTIME452_PROFILE_ID, RUNTIME452_PLUMBING_PROFILE_ID})
 
 
 class RegisteredSet:
@@ -166,107 +146,13 @@ AXON_TERMINAL_EVIDENCE_STATUSES = frozenset(
 )
 
 
-def _runtime452_axon_claim_preflight(
-    environ,
-    *,
-    hotkey_name: str,
-    netuid: int,
-    external_ip: str,
-    external_port: int,
-) -> Runtime452ActionClaim | None:
-    """Resolve the exact one-shot Axon authority before wallet or network access."""
-
-    selected = environ.get("AURELIUS_ENV") in RUNTIME452_PROFILE_IDS
-    evidence_names = (
-        RUNTIME452_CLAIM_FILE_ENV,
-        RUNTIME452_GENERATION_FILE_ENV,
-        RUNTIME452_HANDOFF_FILE_ENV,
-    )
-    if not selected:
-        if any(name in environ for name in evidence_names):
-            raise AxonPublishError(
-                "runtime452 Axon action evidence is forbidden outside its exact profile"
-            )
-        return None
-    actor = environ.get("AURELIUS_BT_WALLET")
-    if (
-        actor not in RUNTIME452_AXON_ENDPOINTS
-        or hotkey_name != actor
-        or environ.get("AURELIUS_BT_HOTKEY") != "default"
-    ):
-        raise AxonPublishError("runtime452 Axon process identity differs from its exact actor")
-    if "AURELIUS_TESTNET_AXON_SERVE_ACK" in environ:
-        raise AxonPublishError(
-            "raw Axon acknowledgement is forbidden in the runtime452 evidence profile"
-        )
-    try:
-        claim = runtime452_action_claim_from_env(
-            environ,
-            expected_action=RUNTIME452_SERVE_AXON_ACTION,
-            expected_actor=actor,
-        )
-    except Runtime452ActionClaimError as exc:
-        raise AxonPublishError("runtime452 Axon action claim is invalid") from exc
-    if (
-        claim is None
-        or netuid != claim.netuid
-        or external_ip != claim.endpoint_ip
-        or external_port != claim.endpoint_port
-        or environ.get("SUBSTRATE_URL") != claim.chain_endpoint
-        or environ.get("AURELIUS_AXON_EXPECTED_CHAIN_NAME") != claim.chain_name
-        or environ.get("AURELIUS_AXON_EXPECTED_GENESIS_HASH") != claim.genesis_hash
-        or environ.get("AURELIUS_RUNTIME_SPEC_PIN") != str(claim.runtime_spec_version)
-        or environ.get("AURELIUS_RUNTIME_TRANSACTION_VERSION_PIN") != str(claim.transaction_version)
-        or environ.get("AURELIUS_AXON_PUBLISH_STATE_DIR") != claim.journal_path
-    ):
-        raise AxonPublishError("runtime452 Axon process coordinates differ from its action claim")
-    return claim
-
-
-def _require_runtime452_axon_wallet(
-    claim: Runtime452ActionClaim | None,
-    wallet,
-) -> None:
-    """Bind the already-validated public claim to the wallet before any RPC is opened."""
-
-    if claim is None:
-        return
-    signer = RUNTIME452_ACTION_SIGNERS.get(claim.actor)
-    if (
-        signer is None
-        or str(wallet.hotkey.ss58_address) != claim.signer_hotkey_ss58
-        or str(wallet.coldkeypub.ss58_address) != claim.signer_coldkey_ss58
-        or signer
-        != {
-            "hotkey_ss58": claim.signer_hotkey_ss58,
-            "coldkey_ss58": claim.signer_coldkey_ss58,
-        }
-    ):
-        raise AxonPublishError("runtime452 Axon wallet differs from its action claim")
-
-
-_RUNTIME452_AXON_ATTEMPT_KINDS = (
+_ATTEMPT_JOURNAL_KINDS = (
     "authority",
     "signature",
     "submission-claim",
     "sdk-result",
     "scan-resolution",
 )
-
-
-def _axon_prepared_attempt_limit(
-    state_root: Path | Runtime452ActionJournalCustody,
-    claim: Runtime452ActionClaim | None,
-) -> int:
-    """Make the runtime452 action's one-signature bound structural in the recovery loop."""
-
-    if claim is None:
-        return MAX_PREPARED_ATTEMPTS
-    if not isinstance(state_root, Runtime452ActionJournalCustody):
-        raise AxonPublishError("runtime452 Axon attempt bound lacks installed journal custody")
-    if any(state_root.exists(f"{kind}-2.json") for kind in _RUNTIME452_AXON_ATTEMPT_KINDS):
-        raise AxonPublishError("runtime452 Axon journal exceeds its one signed extrinsic claim")
-    return 1
 
 
 def finalized_axon_evidence_document(
@@ -724,18 +610,8 @@ def _required_env(name: str) -> str:
     return value.strip()
 
 
-def _prepare_publish_state_dir(
-    raw: str,
-    runtime452_action_claim: Runtime452ActionClaim | None = None,
-) -> Path | Runtime452ActionJournalCustody:
+def _prepare_publish_state_dir(raw: str) -> Path:
     path = Path(raw)
-    if runtime452_action_claim is not None:
-        if path != Path(runtime452_action_claim.journal_path):
-            raise AxonPublishError("runtime452 Axon journal path differs from its action claim")
-        try:
-            return Runtime452ActionJournalCustody(runtime452_action_claim)
-        except Runtime452ActionJournalError as exc:
-            raise AxonPublishError("runtime452 Axon journal installation is invalid") from exc
     try:
         path.mkdir(mode=0o700, parents=True, exist_ok=True)
     except OSError as exc:
@@ -892,11 +768,8 @@ _SERVE_AXON_CALL_ARG_TYPES = {
 }
 _SERVE_AXON_CALL_ARG_ORDER = tuple(_SERVE_AXON_CALL_ARG_TYPES)
 _SERVE_AXON_CALL_INDEX = "0x0704"
-# Each admitted runtime is independently decoded by an attributed metadata test. Runtime 452 is
-# covered by ``test_bittensor_v11_runtime452_metadata.py`` and runtime 453 by
-# ``test_bittensor_v11_runtime453_metadata.py`` (ADR-0197). Runtime 458 has its own
-# attributed metadata and exact GH200 endpoint byte tests (ADR-0252). Runtime 466 has
-# separate attributed metadata/byte proofs (ADR-0286); future eras still refuse.
+# Each admitted runtime is independently decoded by an attributed metadata test and exact
+# endpoint byte tests; future eras still refuse.
 # Runtime467/468 are separately attributed and wire-tested in ADR-0290/0314.
 # Runtime473 is attributed and wire-tested in ADR-0339; runtime475 in ADR-0359.
 # Runtime479 has retained metadata and independent/native ServeAxon byte tests.
@@ -1222,28 +1095,9 @@ def _guarded_external_publish(
     *,
     external_ip,
     external_port,
-    runtime452_action_claim: Runtime452ActionClaim | None = None,
 ):
     """Durable v11 ``ServeAxon`` publication, bound to explicit deployment identity."""
-    selected_runtime452 = os.environ.get("AURELIUS_ENV") in RUNTIME452_PROFILE_IDS
-    if selected_runtime452 != (runtime452_action_claim is not None):
-        raise AxonPublishError("runtime452 Axon action claim selection differs from profile")
-    runtime452_journal = (
-        state_dir if isinstance(state_dir, Runtime452ActionJournalCustody) else None
-    )
-    if selected_runtime452 != (runtime452_journal is not None) or (
-        runtime452_journal is not None and runtime452_journal.claim is not runtime452_action_claim
-    ):
-        raise AxonPublishError("runtime452 Axon action lacks its exact installed journal custody")
-    state_root = runtime452_journal.path if runtime452_journal is not None else Path(state_dir)
-
-    def journal_boundary() -> None:
-        if runtime452_journal is None:
-            return
-        try:
-            runtime452_journal.revalidate()
-        except Runtime452ActionJournalError as exc:
-            raise AxonPublishError("runtime452 Axon journal custody changed") from exc
+    state_root = Path(state_dir)
 
     def journal_name(path: Path) -> str:
         if path.parent != state_root or path.name in {"", ".", ".."}:
@@ -1251,32 +1105,15 @@ def _guarded_external_publish(
         return path.name
 
     def journal_exists(path: Path) -> bool:
-        if runtime452_journal is None:
-            return path.exists()
-        try:
-            return runtime452_journal.exists(journal_name(path))
-        except Runtime452ActionJournalError as exc:
-            raise AxonPublishError("runtime452 Axon evidence cannot be inspected") from exc
+        return path.exists()
 
     def journal_read(path: Path):
-        if runtime452_journal is None:
-            return _strict_json_object(path)
-        try:
-            return runtime452_journal.read_json(journal_name(path))
-        except Runtime452ActionJournalError as exc:
-            raise AxonPublishError("runtime452 Axon evidence cannot be read") from exc
+        return _strict_json_object(path)
 
     def journal_claim(path: Path, value) -> str:
-        if runtime452_journal is None:
-            _claim_json(path, value)
-            return "claimed_exact"
-        try:
-            return runtime452_journal.claim_bytes(journal_name(path), _publish_json_payload(value))
-        except Runtime452ActionJournalError as exc:
-            raise AxonPublishError("runtime452 Axon evidence cannot be claimed") from exc
+        _claim_json(path, value)
+        return "claimed_exact"
 
-    journal_boundary()
-    _require_runtime452_axon_wallet(runtime452_action_claim, wallet)
     chain_id = _required_env("CHAIN_ID")
     expected_chain = _required_env("AURELIUS_AXON_EXPECTED_CHAIN_NAME")
     expected_genesis = _required_env("AURELIUS_AXON_EXPECTED_GENESIS_HASH")
@@ -1298,18 +1135,6 @@ def _guarded_external_publish(
         raise AxonPublishError("guarded Axon netuid must be a non-negative integer")
     max_fee_rao = _max_fee_rao()
     endpoint = os.environ["SUBSTRATE_URL"]
-    if runtime452_action_claim is not None and (
-        netuid != runtime452_action_claim.netuid
-        or external_ip != runtime452_action_claim.endpoint_ip
-        or external_port != runtime452_action_claim.endpoint_port
-        or endpoint != runtime452_action_claim.chain_endpoint
-        or expected_chain != runtime452_action_claim.chain_name
-        or expected_genesis != runtime452_action_claim.genesis_hash
-        or runtime_pin != runtime452_action_claim.runtime_spec_version
-        or transaction_pin != runtime452_action_claim.transaction_version
-    ):
-        raise AxonPublishError("runtime452 Axon guarded coordinates differ from action claim")
-    journal_boundary()
     _require_sdk_endpoint(subtensor, endpoint)
 
     intent = bt.ServeAxon(
@@ -1321,7 +1146,6 @@ def _guarded_external_publish(
     )
     rpc = FinalizedRpc(endpoint)
     try:
-        journal_boundary()
         initial = rpc.snapshot()
         observe_local_genesis = (
             expected_genesis == "observe-once-testlab"
@@ -1374,18 +1198,8 @@ def _guarded_external_publish(
             "allow_raw_calls": False,
         },
     }
-    if runtime452_action_claim is not None:
-        identity["runtime452_action_claim"] = {
-            "action": runtime452_action_claim.action,
-            "actor": runtime452_action_claim.actor,
-            "claim_index": runtime452_action_claim.claim_index,
-            "claim_sha256": runtime452_action_claim.claim_sha256,
-            "generation_marker_sha256": runtime452_action_claim.generation_marker_sha256,
-            "burn_handoff_sha256": runtime452_action_claim.burn_handoff_sha256,
-        }
 
     def observe(*, retained_observation=None):
-        journal_boundary()
         snapshot = _validate_finalized_snapshot(
             rpc.snapshot(),
             expected_chain=expected_chain,
@@ -1478,7 +1292,6 @@ def _guarded_external_publish(
     }
 
     def plan():
-        journal_boundary()
         policy = bt.Policy(
             max_fee_tao=bt.Balance.from_rao(max_fee_rao),
             max_spend_tao=bt.Balance.from_rao(0),
@@ -1559,7 +1372,6 @@ def _guarded_external_publish(
             raise AxonPublishError("ServeAxon SDK response fee exceeds the authorized cap")
 
     def verify_response(envelope, *, authority, signature):
-        journal_boundary()
         if (
             envelope.get("schema_version") != 1
             or envelope.get("kind") != "bittensor_v11_sdk_response"
@@ -1739,7 +1551,6 @@ def _guarded_external_publish(
             raise AxonPublishError("durable ServeAxon plan differs from exact typed authority")
 
     def validate_anchor(authority):
-        journal_boundary()
         snapshot = _validate_finalized_snapshot(
             rpc.snapshot(),
             expected_chain=expected_chain,
@@ -1813,7 +1624,6 @@ def _guarded_external_publish(
         return document, unsigned_document, authority
 
     def create_authority(attempt):
-        journal_boundary()
         sdk_plan_document = plan()
         sdk_plan = prepared.pop("plan", None)
         if sdk_plan is None:
@@ -1869,7 +1679,6 @@ def _guarded_external_publish(
         if journal_exists(path):
             document = journal_read(path)
         else:
-            journal_boundary()
             try:
                 signature = bt.WalletSigner(wallet, role="hotkey").sign(authority.payload)
                 document = signature_evidence(
@@ -1912,7 +1721,6 @@ def _guarded_external_publish(
         return policy
 
     def exact_scan(attempt, unsigned_document, authority, signature):
-        journal_boundary()
         encoded_call = unsigned_document.get("call_data")
         if (
             not isinstance(encoded_call, str)
@@ -2071,13 +1879,11 @@ def _guarded_external_publish(
         if retained["status"] == "already_exact_no_submission":
             if any(
                 journal_exists(attempt_path(kind, index))
-                for kind in _RUNTIME452_AXON_ATTEMPT_KINDS
+                for kind in _ATTEMPT_JOURNAL_KINDS
                 for index in (1, 2)
             ):
                 raise AxonPublishError("already-exact Axon terminal has submitted lineage")
             return retained
-        if runtime452_action_claim is not None and attempt != 1:
-            raise AxonPublishError("runtime452 Axon terminal exceeds one signed extrinsic")
         _document, unsigned, authority = load_authority(attempt)
         signature = validate_signature_evidence(
             journal_read(attempt_path("signature", attempt)),
@@ -2149,10 +1955,7 @@ def _guarded_external_publish(
         if journal_exists(finalized_path):
             return replay_finalized()
 
-        maximum_prepared_attempts = _axon_prepared_attempt_limit(
-            runtime452_journal if runtime452_journal is not None else state_root,
-            runtime452_action_claim,
-        )
+        maximum_prepared_attempts = MAX_PREPARED_ATTEMPTS
 
         has_authority = any(
             journal_exists(attempt_path("authority", attempt))
@@ -2233,7 +2036,6 @@ def _guarded_external_publish(
                     signature_sha256=hashlib.sha256(signature).hexdigest(),
                 )
                 unsigned = reconstruct_unsigned(bt, unsigned_document)
-                journal_boundary()
                 try:
                     response = subtensor.submit_signature(
                         unsigned,
@@ -2297,24 +2099,13 @@ def _guarded_external_publish(
             if resolution["status"] == "multiple_exact_matches_terminal":
                 raise AxonPublishError("multiple exact prepared ServeAxon submissions finalized")
             if attempt == maximum_prepared_attempts:
-                if runtime452_action_claim is not None:
-                    raise AxonPublishError(
-                        "runtime452 Axon claim permits no second signed extrinsic after exact "
-                        "attempt-one no-match"
-                    )
                 raise AxonPublishError(
                     "both prepared ServeAxon attempts expired with exact no-match"
                 )
         raise AxonPublishError("ServeAxon prepared lifecycle exhausted unexpectedly")
 
     try:
-        if runtime452_journal is None:
-            return run_prepared_publish()
-        try:
-            with runtime452_journal.locked():
-                return run_prepared_publish()
-        except Runtime452ActionJournalError as exc:
-            raise AxonPublishError("runtime452 Axon journal lock or custody changed") from exc
+        return run_prepared_publish()
     finally:
         rpc.close()
 
@@ -2404,45 +2195,9 @@ def advertised_port(bind_port: int, raw: str | None = None) -> int:
 
 def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> None:
     validate_miner_startup_posture()
-    selected_runtime452 = os.environ.get("AURELIUS_ENV") in RUNTIME452_PROFILE_IDS
     configured_external_ip = os.environ.get("AURELIUS_AXON_EXTERNAL_IP")
-    if selected_runtime452 and not configured_external_ip:
-        raise AxonPublishError(
-            "runtime452 Axon publication requires an explicit external IP before wallet access"
-        )
-    if selected_runtime452:
-        endpoint_policy = AxonEndpointPolicy.build(
-            environment=os.environ.get("AURELIUS_ENV", "prod"),
-            profile=os.environ.get("AURELIUS_AXON_ENDPOINT_PROFILE", "public"),
-            allowed_cidrs=os.environ.get("AURELIUS_AXON_ALLOWED_CIDRS"),
-        )
-        external_ip = endpoint_policy.require(configured_external_ip)
-        external_port = advertised_port(port)
-        runtime452_action_claim = _runtime452_axon_claim_preflight(
-            os.environ,
-            hotkey_name=hotkey_name,
-            netuid=netuid,
-            external_ip=external_ip,
-            external_port=external_port,
-        )
-    else:
-        # Also reject leaked profile evidence before any local state is created. Endpoint
-        # resolution stays in its historical location after SDK/wallet loading on other profiles.
-        runtime452_action_claim = _runtime452_axon_claim_preflight(
-            os.environ,
-            hotkey_name=hotkey_name,
-            netuid=netuid,
-            external_ip="",
-            external_port=0,
-        )
-        external_ip = ""
-        external_port = 0
-    # The exact profile does not create even its durable journal directory until the immutable
-    # public claim has been joined and validated. Wallet loading and RPC construction follow.
-    publish_state_dir = _prepare_publish_state_dir(
-        os.environ["AURELIUS_AXON_PUBLISH_STATE_DIR"],
-        runtime452_action_claim,
-    )
+    # The durable publish directory is created before any wallet is loaded or RPC opened.
+    publish_state_dir = _prepare_publish_state_dir(os.environ["AURELIUS_AXON_PUBLISH_STATE_DIR"])
     try:
         bt = require_bittensor_v11()
     except ImportError as e:
@@ -2454,20 +2209,18 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
     serving_config = ServingConfig()
     # Load once and bind BOTH btauth and application work-id signatures to this exact hotkey.
     wallet = load_bittensor_wallet(bt)
-    _require_runtime452_axon_wallet(runtime452_action_claim, wallet)
     minter = minter_from_bittensor_wallet(
         hotkey_name, wallet, clock=os.environ.get("AURELIUS_CLOCK", "frozen")
     )
     registered = RegisteredSet()
-    if not selected_runtime452:
-        external_ip = configured_external_ip or socket.gethostbyname(socket.gethostname())
-        endpoint_policy = AxonEndpointPolicy.build(
-            environment=os.environ.get("AURELIUS_ENV", "prod"),
-            profile=os.environ.get("AURELIUS_AXON_ENDPOINT_PROFILE", "public"),
-            allowed_cidrs=os.environ.get("AURELIUS_AXON_ALLOWED_CIDRS"),
-        )
-        external_ip = endpoint_policy.require(external_ip)
-        external_port = advertised_port(port)
+    external_ip = configured_external_ip or socket.gethostbyname(socket.gethostname())
+    endpoint_policy = AxonEndpointPolicy.build(
+        environment=os.environ.get("AURELIUS_ENV", "prod"),
+        profile=os.environ.get("AURELIUS_AXON_ENDPOINT_PROFILE", "public"),
+        allowed_cidrs=os.environ.get("AURELIUS_AXON_ALLOWED_CIDRS"),
+    )
+    external_ip = endpoint_policy.require(external_ip)
+    external_port = advertised_port(port)
     nonce_store = durable_btauth_nonce_store()
     endpoint = os.environ["SUBSTRATE_URL"]
     subtensor = None
@@ -2478,22 +2231,17 @@ def serve_axon_forever(*, hotkey_name: str, netuid: int, port: int = 8091) -> No
         subtensor = open_subtensor(bt, endpoint)
         # No listener exists yet. Chain identity, durable publish recovery/submission, and one
         # finalized permit view must all succeed before an attacker can occupy a request slot.
-        try:
-            publication = _await_guarded_external_publish(
-                lambda: _guarded_external_publish(
-                    bt,
-                    wallet,
-                    netuid,
-                    subtensor,
-                    publish_state_dir,
-                    external_ip=external_ip,
-                    external_port=external_port,
-                    runtime452_action_claim=runtime452_action_claim,
-                )
+        publication = _await_guarded_external_publish(
+            lambda: _guarded_external_publish(
+                bt,
+                wallet,
+                netuid,
+                subtensor,
+                publish_state_dir,
+                external_ip=external_ip,
+                external_port=external_port,
             )
-        finally:
-            if isinstance(publish_state_dir, Runtime452ActionJournalCustody):
-                publish_state_dir.close()
+        )
         authority = publication.get("identity")
         if not isinstance(authority, dict):
             raise AxonPublishError("Axon publication omitted its explicit chain identity")

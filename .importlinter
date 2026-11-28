@@ -9,13 +9,11 @@ source_modules =
 forbidden_modules =
     subnet.miner
     subnet.lanes
-    subnet.operator
 
 [importlinter:contract:platform-not-lane]
 name = Miner platform and publication helpers do not import task lanes
 type = forbidden
 source_modules =
     subnet.miner
-    subnet.operator
 forbidden_modules =
     subnet.lanes
